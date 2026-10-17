@@ -163,6 +163,7 @@ export class Debris {
       age: 0,
       dead: false,
       rimY: undefined,
+      burn: opts.burn ?? 0, // seconds it keeps burning
     })
     _c.set(color)
     if (!d) _c.offsetHSL(0, 0, (Math.random() - 0.5) * 0.15)

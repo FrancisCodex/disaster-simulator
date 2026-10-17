@@ -90,7 +90,9 @@ export class CityLife {
     this.deadCache = null
     const road = net.road
     this.road = road
-    this.blocked = new Uint8Array(N * N)
+    this.blocked = new Uint8Array(N * N) // impassable now: rubble, closed bridges, fire
+    this.rubble = new Uint8Array(N * N) // blocked for good (rubble, landslides, closed bridges)
+    this.heat = new Uint8Array(N * N) // too hot to pass beside a fire
     // cars: where they may drive next; pedestrians: where the sidewalks go
     const carOut = net.carOut
     this.carOut = carOut
@@ -553,13 +555,19 @@ export class CityLife {
     return Math.abs(perp) < 2.8
   }
 
+  /** Close road cell k for good (rubble, a landslide, a closed bridge). */
+  block(k) {
+    this.rubble[k] = 1
+    this.blocked[k] = 1
+  }
+
   blockAround(b) {
     // rubble spills into the street around a collapsed building
     for (let j = b.y - 1; j <= b.y + b.d; j++)
       for (let i = b.x - 1; i <= b.x + b.w; i++) {
         if (i < 0 || j < 0 || i >= GRID || j >= GRID) continue
         const k = idx(i, j)
-        if (this.road[k] && Math.random() < 0.6) this.blocked[k] = 1
+        if (this.road[k] && Math.random() < 0.6) this.block(k)
       }
   }
 
@@ -567,7 +575,7 @@ export class CityLife {
   closeBridge(sp) {
     for (let i = sp.i0 + 1; i < sp.i1; i++) {
       const k = idx(i, sp.j)
-      this.blocked[k] = 1
+      this.block(k)
       this.walkOut[k] = 0
     }
     this.deadCache = null
@@ -642,11 +650,30 @@ export class CityLife {
     this.time += dt
     // surface PGA (g) being felt right now in cell k
     this.felt = ctx.field ? (k) => ctx.field[k] * ctx.frac : () => 0
-    // standing near a burning building is frightening, and people keep away from it
+    // Fires: people keep well away from the flames, and the radiant heat beside
+    // a fully developed fire makes the road past it impassable until it dies down.
     this.fireTimer = (this.fireTimer || 0) + dt
-    if (this.fireTimer > 0.5 && ctx.burning?.length) {
+    if (this.fireTimer > 0.5) {
       this.fireTimer = 0
-      for (const b of ctx.burning) this.alarm(b.cx, b.cz, 22, 0.25, 0.5)
+      this.heat.fill(0)
+      const scorch = (i0, j0, i1, j1) => {
+        for (let j = Math.max(0, j0); j <= Math.min(GRID - 1, j1); j++) for (let i = Math.max(0, i0); i <= Math.min(GRID - 1, i1); i++) if (this.road[idx(i, j)]) this.heat[idx(i, j)] = 1
+      }
+      for (const b of ctx.burning || []) {
+        const I = ctx.fireOf ? ctx.fireOf(b) : 1
+        if (I < 0.05) continue
+        this.alarm(b.cx, b.cz, 12 + 14 * I, 0.35 * I, 0.6)
+        if (I > 0.5) scorch(b.x - 1, b.y - 1, b.x + b.w, b.y + b.d)
+      }
+      for (const tr of ctx.burningTrees || []) {
+        if ((tr.I ?? 1) < 0.3) continue
+        this.alarm(tr.x, tr.z, 8, 0.25, 0.6)
+        const i = Math.floor((tr.x + HALF) / CELL)
+        const j = Math.floor((tr.z + HALF) / CELL)
+        scorch(i, j, i, j)
+      }
+      for (let k = 0; k < this.blocked.length; k++) this.blocked[k] = this.rubble[k] | this.heat[k]
+      this.deadCache = null
     }
     // pedestrians currently out on the carriageway, per cell (for drivers to yield)
     this.crossing = new Map()

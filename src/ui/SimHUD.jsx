@@ -128,7 +128,15 @@ export default function SimHUD({ s, game }) {
                   <div className="mt-1 text-xs text-slate-400">
                     {quake.shocks - 1} aftershocks (M4+){quake.maxAfter ? `, largest M${quake.maxAfter.toFixed(1)}` : ''}
                   </div>
-                  <div className="text-xs text-slate-400">{quake.fires} fires started</div>
+                  <div className="text-xs text-slate-400">
+                    {quake.fires} fires started · wind {quake.wind.speed.toFixed(1)} m/s from the {quake.wind.from}
+                    {(quake.treesBurning > 0 || quake.treesBurnt > 0) && (
+                      <span className="text-orange-300">
+                        {' '}
+                        · {quake.treesBurning} trees burning, {quake.treesBurnt} burnt
+                      </span>
+                    )}
+                  </div>
                   <div className="mt-2 text-[11px] tracking-wider text-slate-400 uppercase">Standing buildings</div>
                   <div className="mt-1 h-2 overflow-hidden rounded bg-slate-700">
                     <div

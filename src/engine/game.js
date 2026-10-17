@@ -25,7 +25,7 @@ import { Rng, clamp } from './math.js'
 import { World } from './world.js'
 import { FloodSim } from './floodSim.js'
 import { FloodImpact } from './floodImpact.js'
-import { QuakeSim, demand, mediansFor, damageProbs, collapseProb, cellOfBuilding, soilName, rockPgaAt, withGeometry, quakeAzimuth, shapeOf, dsFromD } from './quakeSim.js'
+import { QuakeSim, demand, mediansFor, damageProbs, collapseProb, cellOfBuilding, soilName, rockPgaAt, withGeometry, quakeAzimuth, shapeOf, dsFromD, compass } from './quakeSim.js'
 
 /**
  * The earthquake a set of menu settings describes. settings.quake:
@@ -751,7 +751,8 @@ export class Game {
       w.setEnvironment({ hour, rain, haze })
     }
     w.setLifeContext(this.lifeContext())
-    w.update(dt)
+    // paused: freeze every moving thing (traffic, people, debris, fire, water, shaking)
+    w.update(dt, this.phase === 'sim' && this.paused)
   }
 
   /** What the city's cars and pedestrians need to know about the disaster. */
@@ -973,7 +974,7 @@ export class Game {
         for (const sl of G.slides) {
           if (sl.blocked) continue
           sl.blocked = true
-          for (const k of [...sl.cells, ...sl.dep.map((d) => d.k)]) if (w.life.road[k]) w.life.blocked[k] = 1
+          for (const k of [...sl.cells, ...sl.dep.map((d) => d.k)]) if (w.life.road[k]) w.life.block(k)
         }
       }
     }
@@ -986,11 +987,18 @@ export class Game {
         const a = w.animFor(b)
         // a fire breaks out only once the shaking has reached the building
         const lit = !!s.burning && w.realTime >= (a.hitAt ?? 0) + 1.5
-        a.burning = lit ? Math.min(1, s.burning / 2) : 0
+        a.burning = lit ? Math.max(0.05, s.fireI ?? 0) : 0 // how fiercely it is burning right now
         a.burnt = s.burnt && shown(a)
         if (lit) burning.push(b)
       }
       w.burning = burning
+      // trees on fire, and the charred ones left behind
+      const F = q.fire
+      w.burningTrees = w.realTime >= (this.groundShowAt ?? 0) ? F.burningTrees() : []
+      if (F.treesDirty) {
+        F.treesDirty = false
+        w.buildTrees()
+      }
       if (this.overlay) this.applyColorMode()
       else w.refreshColors()
       this.logPanic()
@@ -1297,7 +1305,7 @@ export class Game {
       }
       if (this.quake) {
         const q = this.quake
-        s.sim.quake = { mainDone: q.mainDone, countdown: Math.max(0, q.mainTime - q.time), shocks: q.shocks.length, lastShock: q.shocks[q.shocks.length - 1] ?? null, maxAfter: Math.max(0, ...q.shocks.filter((x) => !x.main).map((x) => x.M)), fires: q.fires, ground: q.ground.stats(), panic: this.world.life.panicStats(), bridges: q.bridges.filter((b) => b?.ds >= 3).length, bridgesDown: q.bridges.filter((b) => b?.collapsed).length }
+        s.sim.quake = { mainDone: q.mainDone, countdown: Math.max(0, q.mainTime - q.time), shocks: q.shocks.length, lastShock: q.shocks[q.shocks.length - 1] ?? null, maxAfter: Math.max(0, ...q.shocks.filter((x) => !x.main).map((x) => x.M)), fires: q.fires, ground: q.ground.stats(), panic: this.world.life.panicStats(), bridges: q.bridges.filter((b) => b?.ds >= 3).length, bridgesDown: q.bridges.filter((b) => b?.collapsed).length, wind: { speed: q.fire.wind.speed, from: compass(q.fire.wind.dir + Math.PI) }, treesBurning: q.fire.trees.filter((t) => t.fire > 0).length, treesBurnt: q.fire.trees.filter((t) => t.burnt).length }
       }
     }
     if (this.results) s.results = this.results

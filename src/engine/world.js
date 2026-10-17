@@ -111,6 +111,8 @@ export class World {
     this.uNight = { value: 0 }
     this.uTime = { value: 0 }
     this.uRain = { value: 0 }
+    // water sloshing in the shaking: (amplitude m, direction x, direction z)
+    this.uQuake = { value: new THREE.Vector3(0, 1, 0) }
     this.sky = new SkyEnvironment(renderer)
     this.sky.update({ top: new THREE.Color(0x4f7fbf), horizon: new THREE.Color(0xbcd4ea), ground: new THREE.Color(0x3b4535), sunDir: new THREE.Vector3(0.3, 0.8, 0.2), sunCol: new THREE.Color(1, 0.95, 0.85) })
     this.envMaterials = new Set()
@@ -191,6 +193,7 @@ export class World {
     this.city = city
     this.clearGround()
     this.burning = [] // fires of the previous city must not follow us onto the new one
+    this.burningTrees = []
     for (const c of [...this.root.children]) {
       this.root.remove(c)
       c.traverse?.((o) => {
@@ -788,7 +791,7 @@ export class World {
     const V = GRID + 1
     g.setAttribute('aWater', new THREE.BufferAttribute(new Float32Array(V * V * 4), 4))
     this.waterGeo = g
-    this.waterMat = this.waterMat || this.trackEnv(makeWaterMaterial({ envMap: this.sky.texture, uTime: this.uTime, uRain: this.uRain }))
+    this.waterMat = this.waterMat || this.trackEnv(makeWaterMaterial({ envMap: this.sky.texture, uTime: this.uTime, uRain: this.uRain, uQuake: this.uQuake }))
     this.envMaterials.add(this.waterMat)
     const mesh = new THREE.Mesh(g, this.waterMat)
     mesh.receiveShadow = true
@@ -927,12 +930,15 @@ export class World {
       _m.makeScale(s, 3 * s, s).setPosition(x, y, z)
       trunks.setMatrixAt(q, _m)
       _c.setHSL(0.27 + (t.ox % 0.05), 0.45, 0.22 + (t.s - 0.7) * 0.12)
+      // burnt by fire: a charred, half-bare skeleton
+      const burnt = t.burnt ? 0.5 : 1
+      if (t.burnt) _c.set(0x231f1b)
       if (t.kind === 1) {
-        _m.makeScale(3 * s, 8 * s, 3 * s).setPosition(x, y + 2 * s, z)
+        _m.makeScale(3 * s * burnt, 8 * s * (0.4 + burnt * 0.6), 3 * s * burnt).setPosition(x, y + 2 * s, z)
         cones.setMatrixAt(ki, _m)
-        cones.setColorAt(ki++, _c.offsetHSL(0.03, 0, -0.04))
+        cones.setColorAt(ki++, t.burnt ? _c : _c.offsetHSL(0.03, 0, -0.04))
       } else {
-        _m.makeScale(3.4 * s, 3.2 * s, 3.4 * s).setPosition(x, y + 5 * s, z)
+        _m.makeScale(3.4 * s * burnt, 3.2 * s * burnt, 3.4 * s * burnt).setPosition(x, y + 5 * s, z)
         crowns.setMatrixAt(ci, _m)
         crowns.setColorAt(ci++, _c)
       }
@@ -1736,7 +1742,13 @@ export class World {
     this.lifeCtx = ctx
   }
 
-  update(dt) {
+  /** frozen: the simulation is paused — only the camera moves; everything else holds still. */
+  update(dt, frozen = false) {
+    if (frozen) {
+      this.controls.update()
+      this.renderer.render(this.scene, this.camera)
+      return
+    }
     this.realTime += dt
     this.frameDt = dt
     this.uTime.value += dt
@@ -1744,6 +1756,21 @@ export class World {
     const t = this.realTime
     this.shakes = this.shakes.filter((s) => t - s.t0 < s.dur + 0.1)
     const g = this.groundAccel(t)
+
+    // the river sloshes with the ground and keeps rocking for a while after
+    // the shaking stops (a seiche dies away over tens of seconds)
+    const Q = this.uQuake.value
+    const slosh = clamp(g.env * 2.2, 0, 1.4)
+    if (slosh > Q.x) Q.x += (slosh - Q.x) * Math.min(1, dt * 3)
+    else Q.x *= Math.exp(-dt / 7)
+    const am = Math.hypot(g.ax, g.az)
+    if (g.env > 0.002 && am > 1e-4) {
+      Q.y += (g.ax / am - Q.y) * Math.min(1, dt * 0.6)
+      Q.z += (g.az / am - Q.z) * Math.min(1, dt * 0.6)
+      const n = Math.hypot(Q.y, Q.z) || 1
+      Q.y /= n
+      Q.z /= n
+    }
 
     // cut-away view: the whole block moves with the ground
     this.subsurface.update(dt)
@@ -1810,9 +1837,11 @@ export class World {
     if (this.burning && this.burning.length) {
       for (const b of this.burning) {
         const a = this.anim.get(b.id)
+        const I = a?.burning ?? 1 // growing, fully developed or dying down
         const top = b.base + b.elevated + b.height * (a?.hScale ?? 1)
         const n = Math.min(6, 1 + Math.floor((b.fw * b.fd) / 150))
         for (let q = 0; q < n; q++) {
+          if (Math.random() > 0.25 + I * 0.75) continue
           const x = b.cx + (Math.random() - 0.5) * b.fw * 0.9
           const z = b.cz + (Math.random() - 0.5) * b.fd * 0.9
           const y = b.base + Math.random() * (top - b.base) * 0.9 + 1
@@ -1821,7 +1850,19 @@ export class World {
         }
       }
     }
-    this.life.update(dt, { ...this.lifeCtx, shaking: g.env, field: g.field, frac: g.frac, burning: this.burning, night: this.nightF })
+    // burning trees, and debris thrown from burning buildings still alight
+    for (const tr of this.burningTrees || []) {
+      const y = this.groundAt(tr.x, tr.z)
+      const s = tr.t.s
+      if (Math.random() < 0.5 + (tr.I ?? 1) * 0.5) this.fire.emit(tr.x + (Math.random() - 0.5) * 3 * s, y + (2 + Math.random() * 6) * s, tr.z + (Math.random() - 0.5) * 3 * s, 0, 3 + Math.random() * 3, 0, 3 + Math.random() * 3, -1, 0.5 + Math.random() * 0.5, [1, 0.6, 0.2, 0.9], [0.9, 0.25, 0.05, 0])
+      if (Math.random() < 0.15) this.smoke.emit(tr.x, y + 9 * s, tr.z, 0, 4, 0, 6, 7, 5, [0.2, 0.18, 0.16, 0.5], [0.35, 0.34, 0.33, 0])
+    }
+    for (const it of this.debris.items) {
+      if (!(it.burn > 0) || it.dead) continue
+      it.burn -= dt
+      if (Math.random() < 0.35) this.fire.emit(it.x, it.y + it.sy * 0.5, it.z, 0, 2 + Math.random() * 2, 0, 2 + Math.random() * 2, -1, 0.4 + Math.random() * 0.4, [1, 0.55, 0.15, 0.9], [0.9, 0.2, 0.05, 0])
+    }
+    this.life.update(dt, { ...this.lifeCtx, shaking: g.env, field: g.field, frac: g.frac, burning: this.burning, burningTrees: this.burningTrees, fireOf: (b) => this.anim.get(b.id)?.burning ?? 0, night: this.nightF })
     this.fire.update(dt)
     this.smoke.update(dt, 3)
     this.dust.update(dt, 1)
@@ -1839,7 +1880,9 @@ export class World {
     const out = 2 + Math.random() * 5
     const ang = Math.random() * Math.PI * 2
     const size = clamp(Math.sqrt(b.fw * b.fd) * (0.05 + Math.random() * 0.1), 0.6, 4)
-    this.debris.spawn(x, y, z, Math.cos(ang) * out, Math.random() * 3, Math.sin(ang) * out, size, Math.random() < 0.3 ? 0x56524c : b.color, { src: b.id })
+    // a building that was on fire throws out debris that is still burning
+    const burn = (this.anim.get(b.id)?.burning ?? 0) > 0.15 && Math.random() < 0.4 ? 15 + Math.random() * 45 : 0
+    this.debris.spawn(x, y, z, Math.cos(ang) * out, Math.random() * 3, Math.sin(ang) * out, size, burn ? 0x2a2420 : Math.random() < 0.3 ? 0x56524c : b.color, { src: b.id, burn })
   }
 
   spawnDust(b, k = 1, atY) {

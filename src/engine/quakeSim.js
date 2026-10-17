@@ -8,6 +8,7 @@
 import { GRID, CELL, CONSTRUCTION, FRAGILITY_BETA, QUAKE_CASUALTY, QUAKE_CASUALTY_COLLAPSE, BUILDING_TYPES, DAMAGE_STATES } from './config.js'
 import { occupancyAt, idx } from './cityGen.js'
 import { GroundFailure } from './groundFailure.js'
+import { FireSim } from './fireSim.js'
 import { normCdf, clamp } from './math.js'
 import { sourceParams, faultGeometry, siteDistances, rockPga, siteFactor, gmpeFor, MECHANISMS, SOIL_VS30 } from './quakePhysics.js'
 
@@ -183,7 +184,7 @@ export class QuakeSim {
     this.deathsByClass = {}
     this.waterOk = 1
     this.fires = 0
-    this.neighbors = null
+    this.fire = new FireSim(city, rng)
   }
 
   log(text, level = 'info') {
@@ -448,6 +449,7 @@ export class QuakeSim {
       s.ds = collapsed ? 4 : ds
       if (collapsed) {
         s.collapsed = true
+        this.onCollapse(b, s)
         collapses++
         if (!shock.main) this.lateCollapses++
         if (D0 > 0.3) weakFell++
@@ -573,7 +575,10 @@ export class QuakeSim {
     if (ds <= s.ds && !collapsed) return null
     const old = s.ds
     s.ds = collapsed ? 4 : ds
-    if (collapsed) s.collapsed = true
+    if (collapsed) {
+      s.collapsed = true
+      this.onCollapse(b, s)
+    }
     this.casualties(b, s, old, s.ds, collapsed)
     if (s.ds >= 3) this.maybeIgnite(b, s, s.ds)
     this.pending.push({ impact: true, M: 0, pga: 0, main: false, collapses: collapsed ? [b.id] : [], damaged: collapsed ? [] : [b.id] })
@@ -590,6 +595,7 @@ export class QuakeSim {
     const old = s.ds
     s.ds = 4
     s.collapsed = true
+    this.onCollapse(b, s)
     this.lateCollapses++
     if (why === 'fire') this.fireCollapses = (this.fireCollapses || 0) + 1
     this.casualties(b, s, old, 4, true)
@@ -622,27 +628,32 @@ export class QuakeSim {
     if (this.rng.chance(p)) this.ignite(b, s)
   }
 
-  ignite(b, s) {
-    s.burning = 0.001
+  /** how: 'quake' (broken gas lines, toppled stoves), 'radiant', 'embers', 'tree', 'debris' */
+  ignite(b, s, how = 'quake') {
+    if (s.burning || s.burnt) return
+    this.fire.ignite(b, s)
     this.fires++
-    if (this.fires <= 12) this.log(`Fire broke out in a ${BUILDING_TYPES[b.type].name.toLowerCase()}.`, 'warn')
+    if (this.fires === 1) {
+      const W = this.fire.wind
+      this.log(`Wind ${W.speed.toFixed(1)} m/s from the ${compass(W.dir + Math.PI)}: embers will be carried ${compass(W.dir)}.`, 'info')
+    }
+    if (this.fires > 14) return
+    const name = BUILDING_TYPES[b.type].name.toLowerCase()
+    const a = /^[aeiou]/.test(name) ? 'an' : 'a'
+    const text = {
+      quake: `Fire broke out in ${a} ${name}.`,
+      radiant: `Fire spread to ${a} ${name} next door — the heat from the blaze set it alight.`,
+      embers: `Wind-blown embers set ${a} ${name} on fire.`,
+      tree: `Burning trees set ${a} ${name} on fire.`,
+      debris: `Burning debris from a collapse set ${a} ${name} on fire.`,
+    }[how]
+    this.log(text, 'warn')
   }
 
-  buildNeighbors() {
-    const { city } = this
-    const grid = city.buildingAt
-    this.neighbors = new Map()
-    for (const b of city.buildings) {
-      if (b.removed) continue
-      const set = new Set()
-      for (let j = b.y - 2; j < b.y + b.d + 2; j++)
-        for (let i = b.x - 2; i < b.x + b.w + 2; i++) {
-          if (i < 0 || j < 0 || i >= GRID || j >= GRID) continue
-          const id = grid[idx(i, j)]
-          if (id >= 0 && id !== b.id) set.add(id)
-        }
-      this.neighbors.set(b.id, [...set])
-    }
+  /** A building came down: if it was burning, its burning debris is flung around it. */
+  onCollapse(b, s) {
+    if (!s.burning || s.fireI < 0.2) return
+    this.fire.collapseBrands(b, this.st, (o, os) => this.ignite(o, os, 'debris'))
   }
 
   facilityFactor(b) {
@@ -654,7 +665,6 @@ export class QuakeSim {
   dynamics(dtH) {
     const { city, rng } = this
     const hoursSince = Math.max(0, (this.time - this.mainTime) / 3600)
-    if (!this.neighbors) this.buildNeighbors()
 
     // ---- facilities
     const stations = []
@@ -720,7 +730,8 @@ export class QuakeSim {
       const s = this.st.get(b.id)
       if (!s || s.collapsed || b.removed) continue
       if (s.burning) {
-        s.D += CONSTRUCTION[b.construction].fireLoss * dtH * (b.floors >= 10 ? 1.2 : 1)
+        // the hotter the fire, the faster it eats the structure (timber burns, steel softens, concrete spalls)
+        s.D += CONSTRUCTION[b.construction].fireLoss * dtH * (b.floors >= 10 ? 1.2 : 1) * Math.max(0.2, s.fireI ?? 1)
         s.ds = Math.max(s.ds, dsFromD(s.D))
       }
       if (s.burning && s.D >= D_FAIL * 1.2) {
@@ -733,11 +744,29 @@ export class QuakeSim {
       }
     }
 
-    // ---- fires
+    // ---- fires: burn, spread by radiant heat, embers and burning trees, burn out
+    const ext = (b) => {
+      // firefighting from the stations still able to respond (until crews are modelled on the map)
+      let inRange = 0
+      for (const st of stations) if (Math.hypot(st.b.x - b.x, st.b.y - b.y) < 50) inRange += st.f
+      return Math.min(0.85, 0.3 * Math.min(inRange, 2.5) * this.waterOk)
+    }
+    const wasBurning = new Set()
+    for (const [id, s] of this.st) if (s.burning) wasBurning.add(id)
+    this.fire.step(dtH, this.st, ext, (o, os, how) => this.ignite(o, os, how))
+    for (const id of wasBurning) {
+      const s = this.st.get(id)
+      if (s.burning) continue
+      if (s.burnt) {
+        s.ds = 4
+        s.D = Math.max(s.D, DS_FLOOR[4])
+        this.burnouts = (this.burnouts || 0) + 1
+        if (this.burnouts <= 4) this.log(`The fire in a ${BUILDING_TYPES[this.city.byId.get(id).type].name.toLowerCase()} has burnt itself out — nothing left to burn.`, 'info')
+      } else if (s.extinguished && s.ds < 3) s.ds = 3
+    }
     for (const b of city.buildings) {
       const s = this.st.get(b.id)
       if (!s || !s.burning) continue
-      s.burning += dtH
       if (s.trapped > 0 && s.burning > 0.3) {
         const n = s.trapped
         s.trapped = 0
@@ -748,31 +777,9 @@ export class QuakeSim {
         s.outside += s.present * 0.99
         s.present = 0
       }
-      // suppression
-      let inRange = 0
-      for (const st of stations) if (Math.hypot(st.b.x - b.x, st.b.y - b.y) < 50) inRange += st.f
-      const ext = Math.min(0.85, 0.3 * Math.min(inRange, 2.5) * this.waterOk)
-      if (rng.chance(clamp(ext * dtH, 0, 1))) {
-        s.burning = 0
-        if (s.ds < 3) s.ds = 3
-        continue
-      }
-      // spread
-      for (const nid of this.neighbors.get(b.id) || []) {
-        const nb = city.byId.get(nid)
-        const ns = this.st.get(nid)
-        if (!nb || !ns || ns.burning || ns.burnt) continue
-        const p = CONSTRUCTION[nb.construction].fire * (1 - ext * 0.7)
-        if (rng.chance(clamp(p * dtH, 0, 1))) this.ignite(nb, ns)
-      }
-      if (s.burning > 3) {
-        s.burning = 0
-        s.burnt = true
-        s.ds = 4
-        s.D = Math.max(s.D, DS_FLOOR[4])
-      }
     }
   }
+
 
   addDeathsGlobal(n) {
     if (n <= 0) return
