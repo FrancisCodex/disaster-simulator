@@ -14,6 +14,7 @@ import { loadModels } from './quaternius.js'
 
 const HALF = (GRID * CELL) / 2
 const PX = 16 // terrain texture pixels per cell
+const OFF_BLOCK = { y: -1e6, bid: -1 }
 const OUTER = 3600 // half-size of the surrounding landscape (m)
 const _m = new THREE.Matrix4()
 const _r = new THREE.Matrix4()
@@ -110,6 +111,8 @@ export class World {
     this.uNight = { value: 0 }
     this.uTime = { value: 0 }
     this.uRain = { value: 0 }
+    // water sloshing in the shaking: (amplitude m, direction x, direction z)
+    this.uQuake = { value: new THREE.Vector3(0, 1, 0) }
     this.sky = new SkyEnvironment(renderer)
     this.sky.update({ top: new THREE.Color(0x4f7fbf), horizon: new THREE.Color(0xbcd4ea), ground: new THREE.Color(0x3b4535), sunDir: new THREE.Vector3(0.3, 0.8, 0.2), sunCol: new THREE.Color(1, 0.95, 0.85) })
     this.envMaterials = new Set()
@@ -122,7 +125,10 @@ export class World {
     this.smoke = new Particles(scene, 3500, false)
     this.dust = new Particles(scene, 4000, false)
     this.debris = new Debris(scene, 6000)
-    this.debris.surfaceAt = (x, z, src) => this.surfaceAt(x, z, src)
+    // there is no ground beyond the cut-away block: debris thrown past the edge falls away
+    this.debris.surfaceAt = (x, z, src) => (Math.abs(x) > HALF || Math.abs(z) > HALF ? OFF_BLOCK : this.surfaceAt(x, z, src))
+    this.debris.edgeAt = (x, z) => this.groundAt(x, z)
+    this.debris.half = HALF
     this.debris.onLand = (it, v, bid) => this.debrisLanded(it, v, bid)
     this.debris.onShatter = (it) => this.shatter(it)
     this.rain = new Rain(scene)
@@ -137,7 +143,9 @@ export class World {
       if (this.useModels !== false) this.life.models = m
       this.onAssetsLoaded?.()
     })
-    this.showWorld = true
+    // the district is always shown as a cut-away block; the generated landscape
+    // around it is switched off for now (fewer generated assets, faster)
+    this.showWorld = false
     this.blockShake = new THREE.Vector3()
 
     this.highlight = new THREE.LineSegments(
@@ -183,6 +191,9 @@ export class World {
   // ------------------------------------------------------------------ city
   buildCity(city, hour = 12) {
     this.city = city
+    this.clearGround()
+    this.burning = [] // fires of the previous city must not follow us onto the new one
+    this.burningTrees = []
     for (const c of [...this.root.children]) {
       this.root.remove(c)
       c.traverse?.((o) => {
@@ -323,7 +334,143 @@ export class World {
     const { road, walk } = buildRoadMeshes(this.city, this.renderer, (vi, vj) => this.vertexHeight(vi, vj), this.lampTex)
     this.roadMesh = road
     this.walkMesh = walk
+    // remember each vertex's height above the terrain so roads can follow ground movement
+    for (const m of [road, walk]) {
+      const p = m.geometry.attributes.position.array
+      const off = new Float32Array(p.length / 3)
+      for (let q = 0; q < off.length; q++) off[q] = p[q * 3 + 1] - this.vertexHeight(Math.round((p[q * 3] + HALF) / CELL), Math.round((p[q * 3 + 2] + HALF) / CELL))
+      m.userData.off = off
+    }
     this.root.add(road, walk)
+  }
+
+  /** Re-seat road and sidewalk vertices on the (deformed) terrain. */
+  refreshRoadHeights() {
+    for (const m of [this.roadMesh, this.walkMesh]) {
+      if (!m?.userData.off) continue
+      const attr = m.geometry.attributes.position
+      const p = attr.array
+      const off = m.userData.off
+      for (let q = 0; q < off.length; q++) p[q * 3 + 1] = this.vertexHeight(Math.round((p[q * 3] + HALF) / CELL), Math.round((p[q * 3 + 2] + HALF) / CELL)) + off[q]
+      attr.needsUpdate = true
+      m.geometry.computeVertexNormals()
+      m.geometry.computeBoundingSphere()
+    }
+  }
+
+  /** Ground failure from the earthquake: terrain movement, scars, sand boils and fissures. */
+  updateGround(g) {
+    this.groundFx = g
+    if (g.dirtyZ) {
+      g.dirtyZ = false
+      this.updateTerrainHeights()
+      this.refreshRoadHeights()
+      this.buildTrees()
+    }
+    if (g.dirtyFx) {
+      g.dirtyFx = false
+      this.paintTerrain()
+      this.buildGroundMarks()
+    }
+    for (const sl of g.fxQueue.splice(0)) this.landslideFx(g, sl)
+  }
+
+  clearGround() {
+    this.groundFx = null
+    for (const m of [this.boilMesh, this.crackMesh]) {
+      if (!m) continue
+      this.root.remove(m)
+      m.geometry.dispose()
+      m.material.dispose()
+    }
+    this.boilMesh = this.crackMesh = null
+  }
+
+  /** Sand boils and open fissures on top of the road surface (the terrain texture shows the rest). */
+  buildGroundMarks() {
+    const g = this.groundFx
+    const { city } = this
+    const onRoad = (k) => city.cellType[k] === CELL_ROAD && !city.bridge[k]
+    const boils = g.boils.filter((s) => onRoad(s.k))
+    const cracks = g.cracks.filter((c) => onRoad(c.k))
+    if (!this.boilMesh) {
+      this.boilMesh = new THREE.InstancedMesh(new THREE.CylinderGeometry(1, 1.15, 1, 10).translate(0, 0.5, 0), new THREE.MeshStandardMaterial({ color: 0x9a907e, roughness: 1 }), 1600)
+      this.crackMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshStandardMaterial({ color: 0x15130f, roughness: 1 }), 2400)
+      this.boilMesh.receiveShadow = true
+      this.root.add(this.boilMesh, this.crackMesh)
+    }
+    boils.forEach((s, q) => {
+      const x = s.x - HALF
+      const z = s.z - HALF
+      _m.makeScale(s.r, 0.1 + s.r * 0.05, s.r).setPosition(x, this.groundAt(x, z) + 0.04, z)
+      this.boilMesh.setMatrixAt(q, _m)
+    })
+    this.boilMesh.count = boils.length
+    this.boilMesh.instanceMatrix.needsUpdate = true
+    cracks.forEach((c, q) => {
+      const x = c.x - HALF
+      const z = c.z - HALF
+      _m.makeScale(c.len, 0.05, c.w).premultiply(_r.makeRotationY(c.ang))
+      _m.setPosition(x, this.groundAt(x, z) + 0.085, z)
+      this.crackMesh.setMatrixAt(q, _m)
+    })
+    this.crackMesh.count = cracks.length
+    this.crackMesh.instanceMatrix.needsUpdate = true
+  }
+
+  /** Draw scars, deposits, wet liquefied ground, sand boils and fissures into the terrain texture. */
+  paintGroundFx(ctx) {
+    const g = this.groundFx
+    const { noise } = this
+    for (let k = 0; k < GRID * GRID; k++) {
+      const i = k % GRID
+      const j = (k - i) / GRID
+      const n = noise.fbm(i * 0.4, j * 0.4, 2)
+      if (g.slid[k] === 1) ctx.fillStyle = `rgb(${104 + n * 25},${80 + n * 18},${56 + n * 10})`
+      else if (g.slid[k] === 2) ctx.fillStyle = `rgb(${124 + n * 20},${106 + n * 15},${82 + n * 10})`
+      else if (g.liqCount[k]) ctx.fillStyle = `rgba(118,112,98,${Math.min(0.55, 0.25 + g.liqCount[k] * 0.08)})`
+      else continue
+      ctx.fillRect(i * PX, j * PX, PX, PX)
+    }
+    const s = PX / CELL
+    ctx.fillStyle = 'rgba(172,162,140,0.95)'
+    for (const b of g.boils) {
+      ctx.beginPath()
+      ctx.arc(b.x * s, b.z * s, Math.max(1, b.r * s), 0, Math.PI * 2)
+      ctx.fill()
+    }
+    ctx.strokeStyle = 'rgba(25,20,15,0.85)'
+    ctx.lineCap = 'round'
+    for (const c of g.cracks) {
+      const dx = (Math.cos(c.ang) * c.len * s) / 2
+      const dz = (-Math.sin(c.ang) * c.len * s) / 2
+      ctx.lineWidth = Math.max(0.6, c.w * s)
+      ctx.beginPath()
+      ctx.moveTo(c.x * s - dx, c.z * s - dz)
+      ctx.lineTo(c.x * s + dx * 0.2 - dz * 0.25, c.z * s + dz * 0.2 + dx * 0.25)
+      ctx.lineTo(c.x * s + dx, c.z * s + dz)
+      ctx.stroke()
+    }
+  }
+
+  /** Earth and rock pour down the slope from a landslide scar. */
+  landslideFx(g, sl) {
+    const cells = sl.cells.slice(0, 30)
+    for (const k of cells) {
+      const i = k % GRID
+      const j = (k - i) / GRID
+      const x = cellToWorld(i)
+      const z = cellToWorld(j)
+      const y = this.groundAt(x, z)
+      const ax = g.aspX[k]
+      const az = g.aspZ[k]
+      for (let q = 0; q < 4; q++) {
+        const v = 5 + Math.random() * 7
+        this.debris.spawn(x + (Math.random() - 0.5) * CELL, y + 1 + Math.random() * 2, z + (Math.random() - 0.5) * CELL, ax * v, 1 + Math.random() * 2, az * v, 0.8 + Math.random() * 1.8, Math.random() < 0.5 ? 0x6e5a44 : 0x857563)
+      }
+      for (let q = 0; q < 10; q++)
+        this.dust.emit(x + (Math.random() - 0.5) * CELL, y + Math.random() * 3, z + (Math.random() - 0.5) * CELL, ax * 4 + (Math.random() - 0.5) * 3, 1 + Math.random() * 2, az * 4 + (Math.random() - 0.5) * 3, 12, 8, 7 + Math.random() * 5, [0.55, 0.47, 0.38, 0.6], [0.62, 0.56, 0.48, 0])
+    }
   }
 
   paintLamps() {
@@ -634,6 +781,7 @@ export class World {
         ctx.fillStyle = '#6d6047'
         ctx.fillRect((k % GRID) * PX, Math.floor(k / GRID) * PX, PX, PX)
       }
+    if (this.groundFx) this.paintGroundFx(ctx)
     this.terrainTex.needsUpdate = true
   }
 
@@ -643,7 +791,7 @@ export class World {
     const V = GRID + 1
     g.setAttribute('aWater', new THREE.BufferAttribute(new Float32Array(V * V * 4), 4))
     this.waterGeo = g
-    this.waterMat = this.waterMat || this.trackEnv(makeWaterMaterial({ envMap: this.sky.texture, uTime: this.uTime, uRain: this.uRain }))
+    this.waterMat = this.waterMat || this.trackEnv(makeWaterMaterial({ envMap: this.sky.texture, uTime: this.uTime, uRain: this.uRain, uQuake: this.uQuake }))
     this.envMaterials.add(this.waterMat)
     const mesh = new THREE.Mesh(g, this.waterMat)
     mesh.receiveShadow = true
@@ -782,12 +930,15 @@ export class World {
       _m.makeScale(s, 3 * s, s).setPosition(x, y, z)
       trunks.setMatrixAt(q, _m)
       _c.setHSL(0.27 + (t.ox % 0.05), 0.45, 0.22 + (t.s - 0.7) * 0.12)
+      // burnt by fire: a charred, half-bare skeleton
+      const burnt = t.burnt ? 0.5 : 1
+      if (t.burnt) _c.set(0x231f1b)
       if (t.kind === 1) {
-        _m.makeScale(3 * s, 8 * s, 3 * s).setPosition(x, y + 2 * s, z)
+        _m.makeScale(3 * s * burnt, 8 * s * (0.4 + burnt * 0.6), 3 * s * burnt).setPosition(x, y + 2 * s, z)
         cones.setMatrixAt(ki, _m)
-        cones.setColorAt(ki++, _c.offsetHSL(0.03, 0, -0.04))
+        cones.setColorAt(ki++, t.burnt ? _c : _c.offsetHSL(0.03, 0, -0.04))
       } else {
-        _m.makeScale(3.4 * s, 3.2 * s, 3.4 * s).setPosition(x, y + 5 * s, z)
+        _m.makeScale(3.4 * s * burnt, 3.2 * s * burnt, 3.4 * s * burnt).setPosition(x, y + 5 * s, z)
         crowns.setMatrixAt(ci, _m)
         crowns.setColorAt(ci++, _c)
       }
@@ -885,13 +1036,14 @@ export class World {
       H *= a.hScale
       fw *= a.spread
       fd *= a.spread
-      tx = a.tiltX
-      tz = a.tiltZ
+      // permanent lean from a failing foundation, plus any damage tilt
+      tx = a.tiltX + (a.topple ? 0 : a.leanTx || 0)
+      tz = a.tiltZ + (a.topple ? 0 : a.leanTz || 0)
     }
     out.set(fw, 0, 0, 0, 0, H, 0, 0, 0, 0, fd, 0, 0, 0, 0, 1)
     if (tx || tz) out.premultiply(_r.makeRotationFromEuler(_e.set(tx, 0, tz)))
     out.elements[12] = b.cx
-    out.elements[13] = b.base + b.elevated
+    out.elements[13] = b.base + b.elevated - (a?.settle || 0)
     out.elements[14] = b.cz
     if (a?.topple) {
       const T = a.topple
@@ -913,7 +1065,7 @@ export class World {
     const sz = a && !a.rubble ? a.uz * a.vis : 0
     this.bSway.setXYZ(i, sx, sz, a && !a.rubble ? a.sink || 0 : 0)
     const gone = a && (a.hScale < 0.5 || a.topple || a.partial)
-    const top = b.base + b.elevated + r.H
+    const y0 = b.base + b.elevated - (a?.settle || 0)
     const ri = this.roofIndex.get(b.id) ?? -1
     if (ri >= 0) {
       const along = b.fw >= b.fd
@@ -925,7 +1077,7 @@ export class World {
         if (r.tx || r.tz) _m.premultiply(_r.makeRotationFromEuler(_e.set(r.tx, 0, r.tz)))
         _v.set(0, r.H, 0)
         if (r.tx || r.tz) _v.applyEuler(_e.set(r.tx, 0, r.tz))
-        _m.setPosition(b.cx + _v.x + sx, b.base + b.elevated + _v.y, b.cz + _v.z + sz)
+        _m.setPosition(b.cx + _v.x + sx, y0 + _v.y, b.cz + _v.z + sz)
       }
       this.roofMesh.setMatrixAt(ri, _m)
       this.roofMesh.instanceMatrix.needsUpdate = true
@@ -936,7 +1088,13 @@ export class World {
       else {
         const s = (b.seed * 0.2 + 0.25) * Math.min(b.fw, b.fd)
         _m.makeScale(s, 2.6, s * 1.3)
-        _m.setPosition(b.cx + sx + (b.seed - 0.5) * b.fw * 0.3, top, b.cz + sz)
+        _v.set((b.seed - 0.5) * b.fw * 0.3, r.H, 0)
+        if (r.tx || r.tz) {
+          _e.set(r.tx, 0, r.tz)
+          _m.premultiply(_r.makeRotationFromEuler(_e))
+          _v.applyEuler(_e)
+        }
+        _m.setPosition(b.cx + sx + _v.x, y0 + _v.y, b.cz + sz + _v.z)
       }
       this.unitMesh.setMatrixAt(ui, _m)
       this.unitMesh.instanceMatrix.needsUpdate = true
@@ -998,17 +1156,33 @@ export class World {
       const x1 = cellToWorld(sp.i1) - CELL * 0.35
       const z = cellToWorld(sp.j)
       const segs = Math.max(4, Math.round((x1 - x0) / 4))
+      const drop = this.bridgeDrop(sp, x0, x1)
       for (let q = 0; q < segs; q++) {
         const xa = x0 + ((x1 - x0) * q) / segs
         const xb = x0 + ((x1 - x0) * (q + 1)) / segs
         const ya = this.deckAt(xa, z)
         const yb = this.deckAt(xb, z)
         const len = Math.hypot(xb - xa, yb - ya) + 0.05
-        const rz = Math.atan2(yb - ya, xb - xa)
+        let rz = Math.atan2(yb - ya, xb - xa)
         const xm = (xa + xb) / 2
-        const ym = (ya + yb) / 2
-        items.push({ x: xm, z, y: ym - 1.3, sx: len, sz: CELL * 0.98, sy: 1.3, c: 0x8a867c, rz })
+        let ym = (ya + yb) / 2
+        let dark = 0
+        if (drop && xm > drop.a && xm < drop.b) {
+          // the fallen span lies broken in the channel, one end still propped on a pier
+          const f = (xm - drop.a) / (drop.b - drop.a)
+          const bed = city.z[idx(Math.floor((xm + HALF) / CELL), sp.j)]
+          ym = bed + 1.2 + (1 - f) * Math.max(0, ym - bed - 1.2) * 0.35
+          rz = (q % 2 ? 0.18 : -0.12) + (f < 0.5 ? 0.25 : -0.1)
+          dark = 1
+        } else if ((sp.ds ?? 0) >= 3 && Math.abs(xm - (x0 + x1) / 2) < (x1 - x0) * 0.3) {
+          // unseated girders: the deck has dropped off its bearings and steps out of line
+          ym -= q % 3 === 0 ? 0.45 : 0.25
+          rz += q % 2 ? 0.025 : -0.02
+        }
+        const deck = dark ? 0x6c6a64 : 0x8a867c
+        items.push({ x: xm, z, y: ym - 1.3, sx: len, sz: CELL * 0.98, sy: 1.3, c: deck, rz })
         items.push({ x: xm, z, y: ym - 0.02, sx: len, sz: CELL * 0.86, sy: 0.06, c: 0x3d3f43, rz })
+        if (dark && q % 2) continue // railings torn off the fallen span
         items.push({ x: xm, z: z - CELL * 0.46, y: ym, sx: len, sz: 0.35, sy: 1.0, c: 0xb4b0a6, rz })
         items.push({ x: xm, z: z + CELL * 0.46, y: ym, sx: len, sz: 0.35, sy: 1.0, c: 0xb4b0a6, rz })
       }
@@ -1051,6 +1225,31 @@ export class World {
     this.staticMesh = mesh
     this.root.add(mesh)
     this.buildRoadClosures()
+  }
+
+  /** The stretch of deck (between two piers) that fell when a bridge collapsed, in world x. */
+  bridgeDrop(sp, x0 = cellToWorld(sp.i0) + CELL * 0.35, x1 = cellToWorld(sp.i1) - CELL * 0.35) {
+    if (!sp.collapsed) return null
+    const piers = [x0]
+    for (let x = x0 + 12; x < x1 - 8; x += 20) piers.push(x)
+    piers.push(x1)
+    const at = x0 + (x1 - x0) * (sp.dropAt ?? 0.5)
+    for (let q = 0; q < piers.length - 1; q++) if (at >= piers[q] && at <= piers[q + 1]) return { a: piers[q], b: piers[q + 1] }
+    return { a: piers[0], b: piers[1] }
+  }
+
+  /** A bridge was damaged: redraw it, and if a span fell, throw up spray and dust. */
+  bridgeDamaged(sp) {
+    this.rebuildStatic()
+    const drop = this.bridgeDrop(sp)
+    if (!drop) return
+    const z = cellToWorld(sp.j)
+    for (let x = drop.a; x < drop.b; x += 2.5) {
+      const y = this.deckAt(x, z) ?? 0
+      for (let q = 0; q < 4; q++) this.dust.emit(x, y - 1, z + (Math.random() - 0.5) * CELL, (Math.random() - 0.5) * 4, 1 + Math.random() * 3, (Math.random() - 0.5) * 4, 12, 8, 6 + Math.random() * 5, [0.62, 0.6, 0.56, 0.55], [0.75, 0.75, 0.72, 0])
+      this.debris.spawn(x, y - 0.5, z + (Math.random() - 0.5) * CELL * 0.8, (Math.random() - 0.5) * 2, -1, (Math.random() - 0.5) * 2, 0.8 + Math.random() * 1.2, 0x8a867c)
+    }
+    this.life.bridgeCollapsed(sp, drop)
   }
 
   /** Road surface height on a bridge (gentle arch between the two road ends). */
@@ -1183,7 +1382,7 @@ export class World {
 
   // -------------------------------------------------------------- shaking
   /** Queue ground shaking. pga in g, realDur in seconds of real time. */
-  addShake(pga, realDur, M, main = false) {
+  addShake(pga, realDur, M, main = false, field = null) {
     // in cut-away view the shaking starts when the S-waves reach the city
     const lag = this.subsurface.group.visible ? this.subsurface.trigger(M, main) : 0
     const freqs = []
@@ -1191,7 +1390,7 @@ export class World {
     for (let k = 0; k < 5; k++) freqs.push({ f: lowF * (1 + k * 0.8 + Math.random() * 0.5), px: Math.random() * 6.28, pz: Math.random() * 6.28, w: 1 })
     // great earthquakes radiate strong long-period waves that make tall towers resonate
     if (M >= 7.3) freqs.push({ f: 0.14 + Math.random() * 0.12, px: Math.random() * 6.28, pz: Math.random() * 6.28, w: 1.5 + (M - 7.3) })
-    this.shakes.push({ t0: this.realTime + lag, dur: realDur, pga, freqs })
+    this.shakes.push({ t0: this.realTime + lag, dur: realDur, pga, freqs, field })
     return lag
   }
 
@@ -1199,6 +1398,10 @@ export class World {
     let ax = 0
     let az = 0
     let env = 0
+    // the strongest shaking right now, and its surface PGA map (for what people feel)
+    let field = null
+    let frac = 0
+    let best = 0
     for (const s of this.shakes) {
       const tau = t - s.t0
       if (tau < 0 || tau > s.dur) continue
@@ -1214,8 +1417,13 @@ export class World {
       ax += sx * amp
       az += sz * amp
       env = Math.max(env, s.pga * e)
+      if (s.field && s.pga * e > best) {
+        best = s.pga * e
+        field = s.field
+        frac = e
+      }
     }
-    return { ax, az, env }
+    return { ax, az, env, field, frac }
   }
 
   animFor(b) {
@@ -1230,9 +1438,16 @@ export class World {
   }
 
   /** Start a collapse after `delay` seconds of real time. */
-  collapse(b, delay = 0, style = 'quake') {
+  collapse(b, delay = 0, style = 'quake', opts = {}) {
     const a = this.animFor(b)
     if (a.collapse || a.rubble) return
+    if (opts.lean) {
+      // a building leaning on failed ground goes over the way it was already leaning
+      const ang = opts.leanAng
+      a.collapse = { t0: this.realTime + delay, dur: 1, dirX: Math.cos(ang), dirZ: Math.sin(ang), spawned: 0, style, kind: 'topple', theta0: opts.lean, started: false }
+      a.active = true
+      return
+    }
     // Ductile modern frames sway hard and then come down vertically
     // (progressive collapse). Whole-building overturning needs a weak base:
     // liquefied soil (Niigata 1964) or a brittle older frame (Taiwan 2016).
@@ -1291,15 +1506,17 @@ export class World {
     const c = a.collapse
     if (!c.started) {
       c.started = true
+      // a building coming down terrifies everyone who can see and hear it
+      this.life.alarm(b.cx, b.cz, Math.max(25, b.height * 0.8), c.style === 'flood' ? 0.45 : 0.7, 0.97)
       if (c.kind === 'topple') {
         // rigid rotation about the base edge, like a falling column
         a.topple = {
-          theta: 0.06,
+          theta: Math.max(0.06, c.theta0 || 0),
           omega: 0.12,
           ax: c.dirZ,
           az: -c.dirX,
           px: b.cx + (c.dirX * b.fw) / 2,
-          py: b.base + b.elevated,
+          py: b.base + b.elevated - (a.settle || 0),
           pz: b.cz + (c.dirZ * b.fd) / 2,
         }
       } else if (c.kind === 'partial') {
@@ -1525,7 +1742,13 @@ export class World {
     this.lifeCtx = ctx
   }
 
-  update(dt) {
+  /** frozen: the simulation is paused — only the camera moves; everything else holds still. */
+  update(dt, frozen = false) {
+    if (frozen) {
+      this.controls.update()
+      this.renderer.render(this.scene, this.camera)
+      return
+    }
     this.realTime += dt
     this.frameDt = dt
     this.uTime.value += dt
@@ -1533,6 +1756,21 @@ export class World {
     const t = this.realTime
     this.shakes = this.shakes.filter((s) => t - s.t0 < s.dur + 0.1)
     const g = this.groundAccel(t)
+
+    // the river sloshes with the ground and keeps rocking for a while after
+    // the shaking stops (a seiche dies away over tens of seconds)
+    const Q = this.uQuake.value
+    const slosh = clamp(g.env * 2.2, 0, 1.4)
+    if (slosh > Q.x) Q.x += (slosh - Q.x) * Math.min(1, dt * 3)
+    else Q.x *= Math.exp(-dt / 7)
+    const am = Math.hypot(g.ax, g.az)
+    if (g.env > 0.002 && am > 1e-4) {
+      Q.y += (g.ax / am - Q.y) * Math.min(1, dt * 0.6)
+      Q.z += (g.az / am - Q.z) * Math.min(1, dt * 0.6)
+      const n = Math.hypot(Q.y, Q.z) || 1
+      Q.y /= n
+      Q.z /= n
+    }
 
     // cut-away view: the whole block moves with the ground
     this.subsurface.update(dt)
@@ -1599,9 +1837,11 @@ export class World {
     if (this.burning && this.burning.length) {
       for (const b of this.burning) {
         const a = this.anim.get(b.id)
+        const I = a?.burning ?? 1 // growing, fully developed or dying down
         const top = b.base + b.elevated + b.height * (a?.hScale ?? 1)
         const n = Math.min(6, 1 + Math.floor((b.fw * b.fd) / 150))
         for (let q = 0; q < n; q++) {
+          if (Math.random() > 0.25 + I * 0.75) continue
           const x = b.cx + (Math.random() - 0.5) * b.fw * 0.9
           const z = b.cz + (Math.random() - 0.5) * b.fd * 0.9
           const y = b.base + Math.random() * (top - b.base) * 0.9 + 1
@@ -1610,7 +1850,19 @@ export class World {
         }
       }
     }
-    this.life.update(dt, { ...this.lifeCtx, shaking: g.env, night: this.nightF })
+    // burning trees, and debris thrown from burning buildings still alight
+    for (const tr of this.burningTrees || []) {
+      const y = this.groundAt(tr.x, tr.z)
+      const s = tr.t.s
+      if (Math.random() < 0.5 + (tr.I ?? 1) * 0.5) this.fire.emit(tr.x + (Math.random() - 0.5) * 3 * s, y + (2 + Math.random() * 6) * s, tr.z + (Math.random() - 0.5) * 3 * s, 0, 3 + Math.random() * 3, 0, 3 + Math.random() * 3, -1, 0.5 + Math.random() * 0.5, [1, 0.6, 0.2, 0.9], [0.9, 0.25, 0.05, 0])
+      if (Math.random() < 0.15) this.smoke.emit(tr.x, y + 9 * s, tr.z, 0, 4, 0, 6, 7, 5, [0.2, 0.18, 0.16, 0.5], [0.35, 0.34, 0.33, 0])
+    }
+    for (const it of this.debris.items) {
+      if (!(it.burn > 0) || it.dead) continue
+      it.burn -= dt
+      if (Math.random() < 0.35) this.fire.emit(it.x, it.y + it.sy * 0.5, it.z, 0, 2 + Math.random() * 2, 0, 2 + Math.random() * 2, -1, 0.4 + Math.random() * 0.4, [1, 0.55, 0.15, 0.9], [0.9, 0.2, 0.05, 0])
+    }
+    this.life.update(dt, { ...this.lifeCtx, shaking: g.env, field: g.field, frac: g.frac, burning: this.burning, burningTrees: this.burningTrees, fireOf: (b) => this.anim.get(b.id)?.burning ?? 0, night: this.nightF })
     this.fire.update(dt)
     this.smoke.update(dt, 3)
     this.dust.update(dt, 1)
@@ -1628,7 +1880,9 @@ export class World {
     const out = 2 + Math.random() * 5
     const ang = Math.random() * Math.PI * 2
     const size = clamp(Math.sqrt(b.fw * b.fd) * (0.05 + Math.random() * 0.1), 0.6, 4)
-    this.debris.spawn(x, y, z, Math.cos(ang) * out, Math.random() * 3, Math.sin(ang) * out, size, Math.random() < 0.3 ? 0x56524c : b.color, { src: b.id })
+    // a building that was on fire throws out debris that is still burning
+    const burn = (this.anim.get(b.id)?.burning ?? 0) > 0.15 && Math.random() < 0.4 ? 15 + Math.random() * 45 : 0
+    this.debris.spawn(x, y, z, Math.cos(ang) * out, Math.random() * 3, Math.sin(ang) * out, size, burn ? 0x2a2420 : Math.random() < 0.3 ? 0x56524c : b.color, { src: b.id, burn })
   }
 
   spawnDust(b, k = 1, atY) {

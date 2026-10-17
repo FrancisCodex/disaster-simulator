@@ -11,6 +11,7 @@ import {
   BUILDING_TYPES,
   CONSTRUCTION,
   QUAKE_LEVELS,
+  HISTORICAL_QUAKES,
   FLOOD_LEVELS,
   COSTS,
   UPGRADES,
@@ -24,7 +25,28 @@ import { Rng, clamp } from './math.js'
 import { World } from './world.js'
 import { FloodSim } from './floodSim.js'
 import { FloodImpact } from './floodImpact.js'
-import { QuakeSim, demand, mediansFor, damageProbs, collapseProb, cellOfBuilding, soilName, pgaRock } from './quakeSim.js'
+import { QuakeSim, demand, mediansFor, damageProbs, collapseProb, cellOfBuilding, soilName, rockPgaAt, withGeometry, quakeAzimuth, shapeOf, dsFromD, compass } from './quakeSim.js'
+
+/**
+ * The earthquake a set of menu settings describes. settings.quake:
+ *   { mode: 'tier' } uses QUAKE_LEVELS[settings.level];
+ *   { mode: 'historical', id } a HISTORICAL_QUAKES reenactment;
+ *   { mode: 'custom', params: {M, depth, dist, mech, strike, rupture, dip?} }.
+ * Common options: bearing (deg, null = random from the seed), variability, aftershocks.
+ */
+export const CUSTOM_QUAKE = { M: 7.0, depth: 15, dist: 20, mech: 'strike', strike: 30, rupture: 'bilateral' }
+
+export function quakeEventFrom(settings) {
+  const q = settings.quake ?? { mode: 'tier' }
+  let ev
+  if (q.mode === 'historical') {
+    const h = HISTORICAL_QUAKES.find((x) => x.id === q.id) ?? HISTORICAL_QUAKES[0]
+    ev = { ...h, title: `${h.year} ${h.name}`, name: `${h.year} ${h.name}`, example: `Reenacted at ${h.city}, ${h.place}.` }
+  } else if (q.mode === 'custom') {
+    ev = { name: 'Custom earthquake', desc: 'Your own scenario.', example: '', ...CUSTOM_QUAKE, ...q.params }
+  } else ev = { ...QUAKE_LEVELS[clamp(settings.level ?? 3, 0, QUAKE_LEVELS.length - 1)] }
+  return { mech: 'strike', strike: 90, rupture: 'bilateral', ...ev, mode: q.mode ?? 'tier', bearing: q.bearing ?? null, variability: q.variability !== false, aftershocks: q.aftershocks !== false }
+}
 
 export const TOOLS = [
   { key: 'inspect', name: 'Inspect', group: 'General', icon: '🔍', desc: 'Click a building to see its details and risk.' },
@@ -58,7 +80,6 @@ export const START_TIMES = [
   { hour: 19, label: 'Evening', sub: '19:00 — people heading home' },
 ]
 
-const DS_COLORS = ['#4ade80', '#a3e635', '#facc15', '#f97316', '#dc2626']
 
 function heat(t) {
   t = clamp(t, 0, 1)
@@ -90,7 +111,6 @@ export class Game {
     }
     this.bindInput()
     try {
-      this.world.showWorld = localStorage.getItem('metrorisk.showWorld') !== '0'
       this.world.useModels = localStorage.getItem('metrorisk.models') !== 'simple'
     } catch {
       /* storage unavailable: keep the default */
@@ -176,9 +196,20 @@ export class Game {
   updateFault() {
     const s = this.settings
     if (s?.disaster !== 'quake') return this.world.subsurface.setQuake(null)
-    const L = QUAKE_LEVELS[s.level]
-    const az = new Rng((s.seed ^ 0x5bd1e995) >>> 0).float(0, Math.PI * 2)
-    this.world.subsurface.setQuake({ az, dist: L.dist, depth: L.depth, M: L.M })
+    const L = this.quakeEvent()
+    this.world.subsurface.setQuake({ az: L.az, dist: L.dist, depth: L.depth, M: L.M })
+  }
+
+  /** This scenario's earthquake with its epicentre direction and fault geometry (same draw the QuakeSim makes). */
+  quakeEvent() {
+    const s = this.settings
+    const key = JSON.stringify([s.quake, s.level, s.seed])
+    if (this.quakeEvCache?.key !== key) {
+      const ev = quakeEventFrom(s)
+      const az = quakeAzimuth(ev, new Rng((s.seed ^ 0x5bd1e995) >>> 0).float(0, Math.PI * 2))
+      this.quakeEvCache = { key, ev: withGeometry({ ...ev, az }) }
+    }
+    return this.quakeEvCache.ev
   }
 
   /** Vehicles & people: detailed Quaternius models or the built-in procedural ones. */
@@ -206,7 +237,7 @@ export class Game {
   }
 
   get level() {
-    return this.settings.disaster === 'quake' ? QUAKE_LEVELS[this.settings.level] : FLOOD_LEVELS[this.settings.level]
+    return this.settings.disaster === 'quake' ? this.quakeEvent() : FLOOD_LEVELS[this.settings.level]
   }
 
   notify(text, kind = 'info') {
@@ -611,7 +642,9 @@ export class Game {
         const s = this.quake.st.get(b.id)
         if (!s) return null
         if (s.burning) return '#7c2d12'
-        return DS_COLORS[s.collapsed || s.burnt ? 4 : s.ds]
+        if (s.collapsed || s.burnt) return '#7f1d1d'
+        // structural integrity: green intact → red nearly used up
+        return heat(Math.max(s.D / 0.9, s.ds >= 3 ? 0.6 : 0))
       })
     } else if (this.impact) {
       this.world.setColorFn((b) => {
@@ -624,13 +657,13 @@ export class Game {
   }
 
   quakeRisk(b) {
-    const L = QUAKE_LEVELS[this.settings.level]
+    const L = this.quakeEvent()
     const soil = this.city.soil[cellOfBuilding(b)]
-    const R = Math.hypot(L.dist, L.depth)
-    const p = demand(b, soil, L.M, R)
+    const p = demand(b, soil, L.M, rockPgaAt(L, b.cx, b.cz))
     const med = mediansFor(b, L.M, 0)
     const probs = damageProbs(p, med)
-    return { pga: p, soil, pComplete: probs[3], pExtensive: probs[2], pCollapse: probs[3] * collapseProb(b, p, med) }
+    const sh = shapeOf(b)
+    return { pga: p, soil, pComplete: probs[3], pExtensive: probs[2], pCollapse: probs[3] * collapseProb(b, p, med), slender: sh.slender, shapeCap: sh.cap }
   }
 
   // ----------------------------------------------------------- simulation
@@ -650,6 +683,9 @@ export class Game {
     this.speedIdx = settings.disaster === 'quake' ? 0 : 1
     this.simTime = 0
     this.acc = 0
+    this.showDamage = []
+    this.panicLog = null
+    this.groundShowAt = 0
     this.log = []
     this.world.setHighlight(null)
     this.rng = new Rng((settings.seed ^ 0x5bd1e995) >>> 0)
@@ -715,7 +751,8 @@ export class Game {
       w.setEnvironment({ hour, rain, haze })
     }
     w.setLifeContext(this.lifeContext())
-    w.update(dt)
+    // paused: freeze every moving thing (traffic, people, debris, fire, water, shaking)
+    w.update(dt, this.phase === 'sim' && this.paused)
   }
 
   /** What the city's cars and pedestrians need to know about the disaster. */
@@ -839,31 +876,107 @@ export class Game {
     this.simTime = q.time + this.acc
     for (const e of q.events.splice(0)) this.pushLog(e.t, e.text, e.level)
     const w = this.world
+    const fall = (b, delay) => {
+      const s = q.st.get(b.id)
+      w.collapse(b, delay, 'quake', s?.toppled ? { lean: s.lean, leanAng: s.leanAng } : undefined)
+    }
+    // The sim resolves a shock instantly, but its shaking reaches the city a
+    // little later on screen (in cut-away view only once the S-waves arrive).
+    // Damage, tilt, fire and ground failure show when each building is hit.
+    const hitAt = (b, t) => {
+      const a = w.animFor(b)
+      a.hitAt = Math.max(a.hitAt ?? 0, t)
+    }
+    const shown = (a) => !a.hitAt || w.realTime >= a.hitAt
     for (const v of q.pending.splice(0)) {
-      if (v.impact) {
+      if (v.impact || v.quiet) {
         for (const id of v.collapses) {
           const b = this.city.byId.get(id)
-          if (b) w.collapse(b, 0.2 + Math.random() * 0.8)
+          if (!b) continue
+          const d = 0.2 + Math.random() * 0.8
+          hitAt(b, w.realTime + d)
+          fall(b, d)
         }
         for (const id of v.damaged) {
           const b = this.city.byId.get(id)
-          if (b) w.setDamage(b, q.st.get(id).ds)
+          if (b) this.showDamage.push({ b, at: w.realTime + 0.3 })
         }
-        w.refreshColors()
         continue
       }
-      if (v.M < 4.2 && !v.collapses.length) continue
+      const bridges = (v.bridges || []).map((n) => this.city.bridgeSpans[n])
+      if (v.M < 4.2 && !v.collapses.length) {
+        // too weak to animate, but any damage it did still shows
+        for (const id of v.damaged) {
+          const b = this.city.byId.get(id)
+          if (b) this.showDamage.push({ b, at: w.realTime })
+        }
+        for (const sp of bridges) this.showDamage.push({ bridge: sp, at: w.realTime })
+        continue
+      }
       const dur = clamp(v.main ? 2 + (v.M - 4) * 2.4 : 1 + (v.M - 4) * 1.2, 1, 18)
-      const lag = w.addShake(v.pga, dur, v.M, v.main)
+      const lag = w.addShake(v.pga, dur, v.M, v.main, v.field)
+      const t0 = w.realTime + lag
+      this.groundShowAt = Math.max(this.groundShowAt ?? 0, t0 + dur * 0.4)
+      for (const sp of bridges) this.showDamage.push({ bridge: sp, at: t0 + dur * (0.3 + Math.random() * 0.5) })
       for (const id of v.collapses) {
         const b = this.city.byId.get(id)
-        if (b) w.collapse(b, lag + Math.random() * dur * 0.75)
+        if (!b) continue
+        const d = lag + Math.random() * dur * 0.75
+        hitAt(b, w.realTime + d)
+        fall(b, d)
       }
       for (const id of v.damaged) {
         const b = this.city.byId.get(id)
-        if (b) w.setDamage(b, q.st.get(id).ds)
+        if (!b) continue
+        const at = t0 + Math.random() * dur * 0.6
+        hitAt(b, at)
+        this.showDamage.push({ b, at })
       }
-      w.refreshColors()
+    }
+    // damage states whose shaking has now arrived
+    if (this.showDamage.length) {
+      let changed = false
+      this.showDamage = this.showDamage.filter((d) => {
+        if (w.realTime < d.at) return true
+        if (d.bridge) {
+          w.bridgeDamaged(d.bridge)
+          if (d.bridge.ds >= 3) w.life.closeBridge(d.bridge)
+          return false
+        }
+        w.setDamage(d.b, q.st.get(d.b.id)?.ds ?? 0)
+        changed = true
+        return false
+      })
+      if (changed) w.refreshColors()
+    }
+    // foundations settling and tilting on failed ground
+    for (const id of q.moved) {
+      const b = this.city.byId.get(id)
+      const s = q.st.get(id)
+      if (!b || !s) continue
+      const a = w.animFor(b)
+      if (!shown(a)) continue // keep it until the shaking gets there
+      a.settle = s.settle
+      a.leanTx = s.lean * Math.sin(s.leanAng)
+      a.leanTz = -s.lean * Math.cos(s.leanAng)
+      a.active = true
+      w.updateBuilding(b)
+      q.moved.delete(id)
+    }
+    const G = q.ground
+    if ((G.dirtyZ || G.dirtyFx || G.fxQueue.length) && w.realTime >= (this.groundShowAt ?? 0)) {
+      // repainting the terrain is costly: at most every half second of real time
+      const now = performance.now()
+      if (!this.groundT || now - this.groundT > 500) {
+        this.groundT = now
+        w.updateGround(G)
+        // landslide debris cuts the roads it crosses
+        for (const sl of G.slides) {
+          if (sl.blocked) continue
+          sl.blocked = true
+          for (const k of [...sl.cells, ...sl.dep.map((d) => d.k)]) if (w.life.road[k]) w.life.block(k)
+        }
+      }
     }
     this.colorTimer = (this.colorTimer || 0) + 1
     if (this.colorTimer % 20 === 0) {
@@ -872,15 +985,57 @@ export class Game {
         const s = q.st.get(b.id)
         if (!s) continue
         const a = w.animFor(b)
-        a.burning = s.burning ? Math.min(1, s.burning / 2) : 0
-        a.burnt = s.burnt
-        if (s.burning) burning.push(b)
+        // a fire breaks out only once the shaking has reached the building
+        const lit = !!s.burning && w.realTime >= (a.hitAt ?? 0) + 1.5
+        a.burning = lit ? Math.max(0.05, s.fireI ?? 0) : 0 // how fiercely it is burning right now
+        a.burnt = s.burnt && shown(a)
+        if (lit) burning.push(b)
       }
       w.burning = burning
+      // trees on fire, and the charred ones left behind
+      const F = q.fire
+      w.burningTrees = w.realTime >= (this.groundShowAt ?? 0) ? F.burningTrees() : []
+      if (F.treesDirty) {
+        F.treesDirty = false
+        w.buildTrees()
+      }
       if (this.overlay) this.applyColorMode()
       else w.refreshColors()
+      this.logPanic()
     }
   }
+
+  /** Report how the people in the streets are reacting, as it changes. */
+  logPanic() {
+    const P = this.world.life.panicStats()
+    if (P.outside < 10) return
+    const st = (this.panicLog ??= { level: 0, abandoned: 0, stopped: false })
+    const pct = (n) => Math.round((n / P.outside) * 100)
+    const moving = P.fleeing + P.panicking
+    let level = 0
+    if (P.panicking / P.outside > 0.25) level = 3
+    else if (moving / P.outside > 0.3) level = 2
+    else if ((P.alarmed + moving) / P.outside > 0.4) level = 1
+    if (level > st.level) {
+      const text = [
+        '',
+        `People in the streets stop and brace themselves; ${pct(P.alarmed + moving)}% are frightened.`,
+        `Frightened people are leaving the buildings behind for open ground (${pct(moving)}% of those outside).`,
+        `Panic in the streets: ${pct(P.panicking)}% of people outside are running blindly${P.fallen ? `, and ${P.fallen} have been knocked off their feet` : ''}.`,
+      ][level]
+      this.pushLog(this.simTime, text, level >= 3 ? 'bad' : 'warn')
+    } else if (st.level >= 2 && level === 0 && moving / P.outside < 0.05) this.pushLog(this.simTime, 'The streets are calming down; people are returning from open ground.', 'info')
+    st.level = level === 0 && st.level >= 2 && moving / P.outside >= 0.05 ? st.level : level
+    if (P.carsStopped >= Math.max(3, this.world.life.cars.length * 0.25) && !st.stopped) {
+      st.stopped = true
+      this.pushLog(this.simTime, `Drivers have pulled over and stopped (${P.carsStopped} vehicles with hazard lights on).`, 'warn')
+    }
+    if (P.carsAbandoned > 0 && P.carsAbandoned >= Math.max(1, st.abandoned * 2)) {
+      st.abandoned = P.carsAbandoned
+      this.pushLog(this.simTime, `${P.carsAbandoned} car${P.carsAbandoned > 1 ? 's have' : ' has'} been abandoned in the road as people flee on foot.`, 'warn')
+    }
+  }
+
 
   endDisaster() {
     if (this.phase !== 'sim') return
@@ -953,7 +1108,8 @@ export class Game {
         { label: 'Trapped, not rescued in time', value: c.trapped },
         { label: 'Untreated injuries', value: c.injuries },
         { label: 'Fire', value: c.fire },
-        { label: 'Hit by debris outdoors', value: T.outdoorDead },
+        { label: 'Hit by debris outdoors', value: T.outdoorDead - (this.world.life.stats.bridgeDead || 0) },
+        { label: 'Bridge collapse', value: this.world.life.stats.bridgeDead || 0 },
       )
       const cls = Object.entries(q.deathsByClass).sort((a, b) => b[1] - a[1])
       if (cls.length && cls[0][1] >= 1)
@@ -965,6 +1121,17 @@ export class Game {
       const hosp = city.buildings.filter((b) => b.type === 'hospital')
       const downH = hosp.filter((b) => q.facilityFactor(b) === 0).length
       if (downH) lessons.push(`${downH} of ${hosp.length} hospitals were knocked out of service.`)
+      if (q.lateCollapses >= 2) {
+        // which buildings wore out: compare slender and squat ones that fell after surviving the main shock
+        const late = city.buildings.filter((b) => q.st.get(b.id)?.collapsed && q.st.get(b.id).hits > 1)
+        const tall = late.filter((b) => shapeOf(b).slender > 2).length
+        lessons.push(
+          `${q.lateCollapses} buildings survived the first shaking but collapsed later — worn down by aftershocks, fire or their own weight on damaged columns.${tall > late.length / 2 ? ' Most were tall, slender buildings, which lose strength fastest under repeated shaking.' : ''} Damaged buildings should be inspected and evacuated before the next shock.`,
+        )
+      }
+      const G = q.ground.stats()
+      if (G.liquefiedHa >= 0.5) lessons.push(`${G.liquefiedHa.toFixed(1)} ha of sandy riverside ground liquefied${q.leaning ? `, leaving ${q.leaning} building${q.leaning > 1 ? 's' : ''} leaning dangerously` : ''}. Deep foundations or ground improvement keep buildings upright on soft soil.`)
+      if (G.slides) lessons.push(`${G.slides} landslide${G.slides > 1 ? 's' : ''} moved about ${(Math.round(G.slideVol / 1000) * 1000).toLocaleString()} m³ of hillside and cut roads. Steep slopes above homes need retaining walls or should be left unbuilt.`)
       if (L.M >= 9.5) lessons.push(`An M${L.M.toFixed(1)} earthquake is beyond what any current engineering can fully withstand. At this level the goal is saving as many lives as possible, not preventing damage.`)
       if (settings.startHour < 6) lessons.push('At night most people are at home — the safety of houses and apartments matters more than offices.')
     } else {
@@ -1029,7 +1196,27 @@ export class Game {
     if (this.settings?.disaster === 'quake') info.quake = this.quakeRisk(b)
     if (this.quake) {
       const s = this.quake.st.get(id)
-      if (s) info.state = { ds: DAMAGE_STATES[s.collapsed ? 4 : s.ds], collapsed: s.collapsed, dead: s.dead, trapped: s.trapped, injured: s.crit + s.minor, burning: !!s.burning, burnt: s.burnt, present: s.present }
+      if (s) {
+        const G = this.quake.ground
+        const k = cellOfBuilding(b)
+        const liq = G.liqCount[k]
+        info.state = {
+          ds: !s.collapsed && s.lean > 1 / 60 && dsFromD(s.D) < 3 ? 'Unsafe (leaning)' : DAMAGE_STATES[s.collapsed ? 4 : s.ds],
+          collapsed: s.collapsed,
+          toppled: !!s.toppled,
+          integrity: s.collapsed ? 0 : clamp(1 - s.D, 0, 1),
+          hits: s.hits,
+          settle: s.settle,
+          lean: s.lean,
+          groundState: G.slid[k] === 1 ? 'Landslide scar' : G.slid[k] === 2 ? 'Buried by landslide' : liq ? `Liquefied${liq > 1 ? ` (${liq}×)` : ''}` : G.crack[k] > 0.3 ? 'Cracked' : null,
+          dead: s.dead,
+          trapped: s.trapped,
+          injured: s.crit + s.minor,
+          burning: !!s.burning,
+          burnt: s.burnt,
+          present: s.present,
+        }
+      }
     }
     if (this.impact) {
       const s = this.impact.st.get(id)
@@ -1057,7 +1244,7 @@ export class Game {
         expDeaths += pres * (r.pCollapse * 0.13 + (r.pComplete - r.pCollapse) * 0.004 + r.pExtensive * 0.0004)
       }
       out.pga = city.buildings.length ? pgaSum / city.buildings.length : 0
-      out.rockPga = pgaRock(this.level.M, Math.hypot(this.level.dist, this.level.depth))
+      out.rockPga = rockPgaAt(this.quakeEvent(), 0, 0)
       out.expCollapse = expCollapse
       out.expDeaths = expDeaths
     } else {
@@ -1118,7 +1305,7 @@ export class Game {
       }
       if (this.quake) {
         const q = this.quake
-        s.sim.quake = { mainDone: q.mainDone, countdown: Math.max(0, q.mainTime - q.time), shocks: q.shocks.length, lastShock: q.shocks[q.shocks.length - 1] ?? null, maxAfter: Math.max(0, ...q.shocks.filter((x) => !x.main).map((x) => x.M)), fires: q.fires }
+        s.sim.quake = { mainDone: q.mainDone, countdown: Math.max(0, q.mainTime - q.time), shocks: q.shocks.length, lastShock: q.shocks[q.shocks.length - 1] ?? null, maxAfter: Math.max(0, ...q.shocks.filter((x) => !x.main).map((x) => x.M)), fires: q.fires, ground: q.ground.stats(), panic: this.world.life.panicStats(), bridges: q.bridges.filter((b) => b?.ds >= 3).length, bridgesDown: q.bridges.filter((b) => b?.collapsed).length, wind: { speed: q.fire.wind.speed, from: compass(q.fire.wind.dir + Math.PI) }, treesBurning: q.fire.trees.filter((t) => t.fire > 0).length, treesBurnt: q.fire.trees.filter((t) => t.burnt).length }
       }
     }
     if (this.results) s.results = this.results

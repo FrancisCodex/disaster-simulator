@@ -1,7 +1,8 @@
 import { TOOLS } from '../engine/game.js'
 import { UPGRADES, CONSTRUCTION } from '../engine/config.js'
-import { Row, BuildingPanel, WorldToggle, ModelToggle } from './common.jsx'
+import { Row, BuildingPanel, ModelToggle } from './common.jsx'
 import { fmtInt, fmtMoney } from '../engine/math.js'
+import { QuakePhysics } from './QuakeScenario.jsx'
 
 const GROUPS = ['General', 'Build', 'Flood', 'Quake']
 
@@ -25,7 +26,7 @@ export default function PrepareHUD({ s, game }) {
           <div className="text-sm">
             <div className="text-slate-400">Incoming</div>
             <div className="font-semibold text-amber-300">
-              {disaster === 'quake' ? `M${s.level.M.toFixed(1)} earthquake` : `${s.level.name} (${s.level.peak} mm/h)`}
+              {disaster === 'quake' ? `M${s.level.M.toFixed(1)} earthquake${s.level.title ? ` · ${s.level.title}` : ''}` : `${s.level.name} (${s.level.peak} mm/h)`}
             </div>
           </div>
           <div className="h-8 w-px bg-slate-700" />
@@ -84,7 +85,8 @@ export default function PrepareHUD({ s, game }) {
           {s.relocated > 0 && <Row k="Awaiting new homes" v={fmtInt(s.relocated)} accent="text-orange-300" />}
           {disaster === 'quake' ? (
             <>
-              <Row k="Expected shaking (avg)" v={`${p.pga.toFixed(2)} g`} accent="text-amber-300" />
+              <Row k="Structural demand (avg)" v={`${p.pga.toFixed(2)} g`} accent="text-amber-300" />
+              <QuakePhysics ev={s.level} observed={s.level.observed} />
               <Row k="Expected collapses" v={p.expCollapse.toFixed(1)} accent={p.expCollapse >= 1 ? 'text-red-400' : undefined} />
               <Row k="Rough death estimate" v={`~${fmtInt(p.expDeaths)}`} accent={p.expDeaths >= 1 ? 'text-red-400' : undefined} />
               <div className="mt-2 text-[11px] text-slate-500 uppercase">Structures</div>
@@ -156,7 +158,6 @@ export default function PrepareHUD({ s, game }) {
           <button onClick={() => game.toggleOverlay()} className={`rounded-md px-3 py-1.5 text-sm ${s.overlay ? 'bg-amber-500/25 text-amber-200 ring-1 ring-amber-400' : 'text-slate-300 hover:bg-slate-700/60'}`}>
             {disaster === 'quake' ? 'Seismic risk map' : 'Flood risk map'}
           </button>
-          <WorldToggle s={s} game={game} />
           <ModelToggle s={s} game={game} />
           <button onClick={() => game.newGame({ ...s.settings, seed: Math.floor(Math.random() * 999999) })} className="rounded-md px-3 py-1.5 text-sm text-slate-300 hover:bg-slate-700/60">
             New map

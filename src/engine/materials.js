@@ -156,14 +156,27 @@ export function makeBuildingMaterial({ uNight, envMap }) {
  * Animated normals advected with the flow, depth-based colour and
  * transparency, foam on shallow edges and fast water, rain ripples.
  */
-export function makeWaterMaterial({ envMap, uTime, uRain }) {
+export function makeWaterMaterial({ envMap, uTime, uRain, uQuake }) {
   const mat = new THREE.MeshStandardMaterial({ roughness: 0.04, metalness: 0.0, transparent: true, envMap, envMapIntensity: 1.1, side: THREE.DoubleSide })
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = uTime
     shader.uniforms.uRain = uRain
+    shader.uniforms.uQuake = uQuake ?? { value: new THREE.Vector3(0, 1, 0) }
     shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', '#include <common>\nattribute vec4 aWater;\nvarying vec4 vWater;\nvarying vec3 vWorldP;')
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvWater = aWater;')
+      .replace('#include <common>', '#include <common>\nattribute vec4 aWater;\nvarying vec4 vWater;\nvarying vec3 vWorldP;\nuniform float uTime;\nuniform vec3 uQuake;')
+      .replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>
+        vWater = aWater;
+        // ground shaking sets the water sloshing: waves along the shaking direction plus a cross-swell,
+        // biggest where the water is deep enough to move freely
+        if (aWater.x > 0.015 && uQuake.x > 0.001) {
+          vec2 d = uQuake.yz;
+          float ph = dot(position.xz, d) * 0.22 - uTime * 3.4;
+          float ph2 = dot(position.xz, vec2(-d.y, d.x)) * 0.15 - uTime * 2.6;
+          transformed.y += uQuake.x * (0.7 * sin(ph) + 0.3 * sin(ph2)) * clamp(aWater.x / 1.5, 0.2, 1.0);
+        }`,
+      )
       .replace('#include <worldpos_vertex>', '#include <worldpos_vertex>\nvWorldP = (modelMatrix * vec4(transformed, 1.0)).xyz;')
     shader.fragmentShader = shader.fragmentShader
       .replace(
@@ -171,6 +184,7 @@ export function makeWaterMaterial({ envMap, uTime, uRain }) {
         `#include <common>
         uniform float uTime;
         uniform float uRain;
+        uniform vec3 uQuake;
         varying vec4 vWater;
         varying vec3 vWorldP;
         float gFoam = 0.0;
@@ -212,7 +226,9 @@ export function makeWaterMaterial({ envMap, uTime, uRain }) {
         float n = vnoise(vWorldP.xz * 0.35 - flow * uTime * 0.6) * 0.6 + vnoise(vWorldP.xz * 1.3 - flow * uTime) * 0.4;
         float edgeFoam = (1.0 - smoothstep(0.03, 0.2, depth)) * 0.55;
         float rapid = smoothstep(2.4, 5.0, speed) * 0.6;
-        float fm = max(edgeFoam, rapid);
+        // churned up by the shaking
+        float slosh = clamp(uQuake.x * 0.9, 0.0, 0.6);
+        float fm = max(max(edgeFoam, rapid), slosh);
         gFoam = clamp(smoothstep(0.58, 0.92, n + fm * 0.3) * fm, 0.0, 0.7);
         // fast water still shows streaks of turbulence without turning white
         body *= 1.0 + smoothstep(0.8, 3.0, speed) * (n - 0.5) * 0.35;
@@ -224,6 +240,14 @@ export function makeWaterMaterial({ envMap, uTime, uRain }) {
         `#include <normal_fragment_maps>
         {
           vec2 g = waveGrad(vWorldP.xz, flow);
+          if (uQuake.x > 0.001) {
+            // slopes of the sloshing waves (matching the vertex displacement) plus choppy short waves
+            vec2 d = uQuake.yz;
+            vec2 e = vec2(-d.y, d.x);
+            g += d * cos(dot(vWorldP.xz, d) * 0.22 - uTime * 3.4) * 0.22 * 0.7 * uQuake.x;
+            g += e * cos(dot(vWorldP.xz, e) * 0.15 - uTime * 2.6) * 0.15 * 0.3 * uQuake.x;
+            g += vec2(cos(vWorldP.x * 1.7 + uTime * 9.0), sin(vWorldP.z * 1.9 - uTime * 8.0)) * 0.25 * uQuake.x;
+          }
           // raindrop ripples
           if (uRain > 0.01) {
             vec2 c = floor(vWorldP.xz * 0.5);

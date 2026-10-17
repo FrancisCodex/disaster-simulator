@@ -53,6 +53,11 @@ export function BuildingPanel({ info, title = 'Building', onClose }) {
         <div className="mt-2 rounded-md bg-slate-800/60 p-2">
           <div className="mb-1 text-[11px] text-slate-400 uppercase">Scenario risk estimate</div>
           <Row k="Expected shaking" v={`${q.pga.toFixed(2)} g`} />
+          <Row
+            k="Shape"
+            v={`${q.slender < 1 ? 'Squat' : q.slender < 2.5 ? 'Compact' : q.slender < 4 ? 'Slender' : 'Very slender'} (H/B ${q.slender.toFixed(1)})`}
+            accent={q.shapeCap < 0.95 ? 'text-orange-300' : q.shapeCap > 1.05 ? 'text-emerald-300' : undefined}
+          />
           <Row k="Heavy damage" v={pct(q.pExtensive)} accent={q.pExtensive > 0.3 ? 'text-orange-300' : undefined} />
           <Row k="Destroyed" v={pct(q.pComplete)} accent={q.pComplete > 0.2 ? 'text-red-400' : undefined} />
           <Row k="Collapse" v={pct(q.pCollapse)} accent={q.pCollapse > 0.05 ? 'text-red-400' : undefined} />
@@ -61,7 +66,22 @@ export function BuildingPanel({ info, title = 'Building', onClose }) {
       {s && (
         <div className="mt-2 rounded-md bg-slate-800/60 p-2">
           <div className="mb-1 text-[11px] text-slate-400 uppercase">Current state</div>
-          {'ds' in s && <Row k="Damage" v={s.collapsed ? 'Collapsed' : s.burnt ? 'Burnt out' : s.ds} accent={s.collapsed || s.burnt ? 'text-red-400' : undefined} />}
+          {'ds' in s && <Row k="Damage" v={s.collapsed ? (s.toppled ? 'Toppled' : 'Collapsed') : s.burnt ? 'Burnt out' : s.ds} accent={s.collapsed || s.burnt ? 'text-red-400' : undefined} />}
+          {'integrity' in s && !s.collapsed && (
+            <div className="py-0.5">
+              <div className="flex justify-between text-[13px]">
+                <span className="text-slate-400">Structural integrity</span>
+                <span className={`font-medium ${s.integrity < 0.4 ? 'text-red-400' : s.integrity < 0.7 ? 'text-amber-300' : 'text-slate-100'}`}>{Math.round(s.integrity * 100)}%</span>
+              </div>
+              <div className="mt-0.5 h-1.5 overflow-hidden rounded bg-slate-700">
+                <div className={`h-full ${s.integrity < 0.4 ? 'bg-red-500' : s.integrity < 0.7 ? 'bg-amber-400' : 'bg-emerald-400'}`} style={{ width: `${Math.round(s.integrity * 100)}%` }} />
+              </div>
+            </div>
+          )}
+          {s.hits > 0 && <Row k="Damaging shocks" v={fmtInt(s.hits)} />}
+          {s.groundState && <Row k="Ground" v={s.groundState} accent="text-amber-300" />}
+          {s.settle >= 0.01 && <Row k="Settlement" v={`${Math.round(s.settle * 100)} cm`} accent={s.settle > 0.3 ? 'text-orange-300' : undefined} />}
+          {s.lean >= 0.002 && <Row k="Tilt" v={`${((s.lean * 180) / Math.PI).toFixed(1)}°`} accent={s.lean > 1 / 60 ? 'text-red-400' : undefined} />}
           {s.burning && <Row k="Fire" v="Burning" accent="text-orange-400" />}
           {'depthIn' in s && <Row k="Water inside" v={`${s.depthIn.toFixed(2)} m (max ${s.maxIn.toFixed(2)})`} accent={s.depthIn > 1 ? 'text-red-400' : undefined} />}
           {'depthOut' in s && <Row k="Street water" v={`${s.depthOut.toFixed(2)} m · ${s.velocity.toFixed(1)} m/s`} />}
@@ -97,19 +117,6 @@ export function ModelToggle({ s, game }) {
       className="rounded-md px-3 py-1.5 text-sm text-slate-300 hover:bg-slate-700/60 disabled:opacity-40"
     >
       Models: {s.detailedModels ? 'Detailed' : 'Built-in'}
-    </button>
-  )
-}
-
-/** Switch between the full landscape and the cut-away "diorama" of the district. */
-export function WorldToggle({ s, game }) {
-  return (
-    <button
-      onClick={() => game.setShowWorld(!s.showWorld)}
-      title={s.showWorld ? 'Hide the surrounding landscape and show the ground beneath the city (faster)' : 'Show the surrounding landscape'}
-      className={`rounded-md px-3 py-1.5 text-sm ${!s.showWorld ? 'bg-sky-500/25 text-sky-200 ring-1 ring-sky-400' : 'text-slate-300 hover:bg-slate-700/60'}`}
-    >
-      {s.showWorld ? 'Cut-away view' : 'Show surroundings'}
     </button>
   )
 }
