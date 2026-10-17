@@ -24,7 +24,7 @@ import { Rng, clamp } from './math.js'
 import { World } from './world.js'
 import { FloodSim } from './floodSim.js'
 import { FloodImpact } from './floodImpact.js'
-import { QuakeSim, demand, mediansFor, damageProbs, collapseProb, cellOfBuilding, soilName, pgaRock } from './quakeSim.js'
+import { QuakeSim, demand, mediansFor, damageProbs, collapseProb, cellOfBuilding, soilName, pgaRock, shapeOf, dsFromD } from './quakeSim.js'
 
 export const TOOLS = [
   { key: 'inspect', name: 'Inspect', group: 'General', icon: '🔍', desc: 'Click a building to see its details and risk.' },
@@ -58,7 +58,6 @@ export const START_TIMES = [
   { hour: 19, label: 'Evening', sub: '19:00 — people heading home' },
 ]
 
-const DS_COLORS = ['#4ade80', '#a3e635', '#facc15', '#f97316', '#dc2626']
 
 function heat(t) {
   t = clamp(t, 0, 1)
@@ -611,7 +610,9 @@ export class Game {
         const s = this.quake.st.get(b.id)
         if (!s) return null
         if (s.burning) return '#7c2d12'
-        return DS_COLORS[s.collapsed || s.burnt ? 4 : s.ds]
+        if (s.collapsed || s.burnt) return '#7f1d1d'
+        // structural integrity: green intact → red nearly used up
+        return heat(Math.max(s.D / 0.9, s.ds >= 3 ? 0.6 : 0))
       })
     } else if (this.impact) {
       this.world.setColorFn((b) => {
@@ -630,7 +631,8 @@ export class Game {
     const p = demand(b, soil, L.M, R)
     const med = mediansFor(b, L.M, 0)
     const probs = damageProbs(p, med)
-    return { pga: p, soil, pComplete: probs[3], pExtensive: probs[2], pCollapse: probs[3] * collapseProb(b, p, med) }
+    const sh = shapeOf(b)
+    return { pga: p, soil, pComplete: probs[3], pExtensive: probs[2], pCollapse: probs[3] * collapseProb(b, p, med), slender: sh.slender, shapeCap: sh.cap }
   }
 
   // ----------------------------------------------------------- simulation
@@ -839,11 +841,43 @@ export class Game {
     this.simTime = q.time + this.acc
     for (const e of q.events.splice(0)) this.pushLog(e.t, e.text, e.level)
     const w = this.world
+    const fall = (b, delay) => {
+      const s = q.st.get(b.id)
+      w.collapse(b, delay, 'quake', s?.toppled ? { lean: s.lean, leanAng: s.leanAng } : undefined)
+    }
+    // foundations settling and tilting on failed ground
+    for (const id of q.moved) {
+      const b = this.city.byId.get(id)
+      const s = q.st.get(id)
+      if (!b || !s) continue
+      const a = w.animFor(b)
+      a.settle = s.settle
+      a.leanTx = s.lean * Math.sin(s.leanAng)
+      a.leanTz = -s.lean * Math.cos(s.leanAng)
+      a.active = true
+      w.updateBuilding(b)
+    }
+    q.moved.clear()
+    const G = q.ground
+    if (G.dirtyZ || G.dirtyFx || G.fxQueue.length) {
+      // repainting the terrain is costly: at most every half second of real time
+      const now = performance.now()
+      if (!this.groundT || now - this.groundT > 500) {
+        this.groundT = now
+        w.updateGround(G)
+        // landslide debris cuts the roads it crosses
+        for (const sl of G.slides) {
+          if (sl.blocked) continue
+          sl.blocked = true
+          for (const k of [...sl.cells, ...sl.dep.map((d) => d.k)]) if (w.life.road[k]) w.life.blocked[k] = 1
+        }
+      }
+    }
     for (const v of q.pending.splice(0)) {
-      if (v.impact) {
+      if (v.impact || v.quiet) {
         for (const id of v.collapses) {
           const b = this.city.byId.get(id)
-          if (b) w.collapse(b, 0.2 + Math.random() * 0.8)
+          if (b) fall(b, 0.2 + Math.random() * 0.8)
         }
         for (const id of v.damaged) {
           const b = this.city.byId.get(id)
@@ -857,7 +891,7 @@ export class Game {
       const lag = w.addShake(v.pga, dur, v.M, v.main)
       for (const id of v.collapses) {
         const b = this.city.byId.get(id)
-        if (b) w.collapse(b, lag + Math.random() * dur * 0.75)
+        if (b) fall(b, lag + Math.random() * dur * 0.75)
       }
       for (const id of v.damaged) {
         const b = this.city.byId.get(id)
@@ -965,6 +999,17 @@ export class Game {
       const hosp = city.buildings.filter((b) => b.type === 'hospital')
       const downH = hosp.filter((b) => q.facilityFactor(b) === 0).length
       if (downH) lessons.push(`${downH} of ${hosp.length} hospitals were knocked out of service.`)
+      if (q.lateCollapses >= 2) {
+        // which buildings wore out: compare slender and squat ones that fell after surviving the main shock
+        const late = city.buildings.filter((b) => q.st.get(b.id)?.collapsed && q.st.get(b.id).hits > 1)
+        const tall = late.filter((b) => shapeOf(b).slender > 2).length
+        lessons.push(
+          `${q.lateCollapses} buildings survived the first shaking but collapsed later — worn down by aftershocks, fire or their own weight on damaged columns.${tall > late.length / 2 ? ' Most were tall, slender buildings, which lose strength fastest under repeated shaking.' : ''} Damaged buildings should be inspected and evacuated before the next shock.`,
+        )
+      }
+      const G = q.ground.stats()
+      if (G.liquefiedHa >= 0.5) lessons.push(`${G.liquefiedHa.toFixed(1)} ha of sandy riverside ground liquefied${q.leaning ? `, leaving ${q.leaning} building${q.leaning > 1 ? 's' : ''} leaning dangerously` : ''}. Deep foundations or ground improvement keep buildings upright on soft soil.`)
+      if (G.slides) lessons.push(`${G.slides} landslide${G.slides > 1 ? 's' : ''} moved about ${(Math.round(G.slideVol / 1000) * 1000).toLocaleString()} m³ of hillside and cut roads. Steep slopes above homes need retaining walls or should be left unbuilt.`)
       if (L.M >= 9.5) lessons.push(`An M${L.M.toFixed(1)} earthquake is beyond what any current engineering can fully withstand. At this level the goal is saving as many lives as possible, not preventing damage.`)
       if (settings.startHour < 6) lessons.push('At night most people are at home — the safety of houses and apartments matters more than offices.')
     } else {
@@ -1029,7 +1074,27 @@ export class Game {
     if (this.settings?.disaster === 'quake') info.quake = this.quakeRisk(b)
     if (this.quake) {
       const s = this.quake.st.get(id)
-      if (s) info.state = { ds: DAMAGE_STATES[s.collapsed ? 4 : s.ds], collapsed: s.collapsed, dead: s.dead, trapped: s.trapped, injured: s.crit + s.minor, burning: !!s.burning, burnt: s.burnt, present: s.present }
+      if (s) {
+        const G = this.quake.ground
+        const k = cellOfBuilding(b)
+        const liq = G.liqCount[k]
+        info.state = {
+          ds: !s.collapsed && s.lean > 1 / 60 && dsFromD(s.D) < 3 ? 'Unsafe (leaning)' : DAMAGE_STATES[s.collapsed ? 4 : s.ds],
+          collapsed: s.collapsed,
+          toppled: !!s.toppled,
+          integrity: s.collapsed ? 0 : clamp(1 - s.D, 0, 1),
+          hits: s.hits,
+          settle: s.settle,
+          lean: s.lean,
+          groundState: G.slid[k] === 1 ? 'Landslide scar' : G.slid[k] === 2 ? 'Buried by landslide' : liq ? `Liquefied${liq > 1 ? ` (${liq}×)` : ''}` : G.crack[k] > 0.3 ? 'Cracked' : null,
+          dead: s.dead,
+          trapped: s.trapped,
+          injured: s.crit + s.minor,
+          burning: !!s.burning,
+          burnt: s.burnt,
+          present: s.present,
+        }
+      }
     }
     if (this.impact) {
       const s = this.impact.st.get(id)
@@ -1118,7 +1183,7 @@ export class Game {
       }
       if (this.quake) {
         const q = this.quake
-        s.sim.quake = { mainDone: q.mainDone, countdown: Math.max(0, q.mainTime - q.time), shocks: q.shocks.length, lastShock: q.shocks[q.shocks.length - 1] ?? null, maxAfter: Math.max(0, ...q.shocks.filter((x) => !x.main).map((x) => x.M)), fires: q.fires }
+        s.sim.quake = { mainDone: q.mainDone, countdown: Math.max(0, q.mainTime - q.time), shocks: q.shocks.length, lastShock: q.shocks[q.shocks.length - 1] ?? null, maxAfter: Math.max(0, ...q.shocks.filter((x) => !x.main).map((x) => x.M)), fires: q.fires, ground: q.ground.stats() }
       }
     }
     if (this.results) s.results = this.results

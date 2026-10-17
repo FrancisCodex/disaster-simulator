@@ -183,6 +183,7 @@ export class World {
   // ------------------------------------------------------------------ city
   buildCity(city, hour = 12) {
     this.city = city
+    this.clearGround()
     for (const c of [...this.root.children]) {
       this.root.remove(c)
       c.traverse?.((o) => {
@@ -323,7 +324,143 @@ export class World {
     const { road, walk } = buildRoadMeshes(this.city, this.renderer, (vi, vj) => this.vertexHeight(vi, vj), this.lampTex)
     this.roadMesh = road
     this.walkMesh = walk
+    // remember each vertex's height above the terrain so roads can follow ground movement
+    for (const m of [road, walk]) {
+      const p = m.geometry.attributes.position.array
+      const off = new Float32Array(p.length / 3)
+      for (let q = 0; q < off.length; q++) off[q] = p[q * 3 + 1] - this.vertexHeight(Math.round((p[q * 3] + HALF) / CELL), Math.round((p[q * 3 + 2] + HALF) / CELL))
+      m.userData.off = off
+    }
     this.root.add(road, walk)
+  }
+
+  /** Re-seat road and sidewalk vertices on the (deformed) terrain. */
+  refreshRoadHeights() {
+    for (const m of [this.roadMesh, this.walkMesh]) {
+      if (!m?.userData.off) continue
+      const attr = m.geometry.attributes.position
+      const p = attr.array
+      const off = m.userData.off
+      for (let q = 0; q < off.length; q++) p[q * 3 + 1] = this.vertexHeight(Math.round((p[q * 3] + HALF) / CELL), Math.round((p[q * 3 + 2] + HALF) / CELL)) + off[q]
+      attr.needsUpdate = true
+      m.geometry.computeVertexNormals()
+      m.geometry.computeBoundingSphere()
+    }
+  }
+
+  /** Ground failure from the earthquake: terrain movement, scars, sand boils and fissures. */
+  updateGround(g) {
+    this.groundFx = g
+    if (g.dirtyZ) {
+      g.dirtyZ = false
+      this.updateTerrainHeights()
+      this.refreshRoadHeights()
+      this.buildTrees()
+    }
+    if (g.dirtyFx) {
+      g.dirtyFx = false
+      this.paintTerrain()
+      this.buildGroundMarks()
+    }
+    for (const sl of g.fxQueue.splice(0)) this.landslideFx(g, sl)
+  }
+
+  clearGround() {
+    this.groundFx = null
+    for (const m of [this.boilMesh, this.crackMesh]) {
+      if (!m) continue
+      this.root.remove(m)
+      m.geometry.dispose()
+      m.material.dispose()
+    }
+    this.boilMesh = this.crackMesh = null
+  }
+
+  /** Sand boils and open fissures on top of the road surface (the terrain texture shows the rest). */
+  buildGroundMarks() {
+    const g = this.groundFx
+    const { city } = this
+    const onRoad = (k) => city.cellType[k] === CELL_ROAD && !city.bridge[k]
+    const boils = g.boils.filter((s) => onRoad(s.k))
+    const cracks = g.cracks.filter((c) => onRoad(c.k))
+    if (!this.boilMesh) {
+      this.boilMesh = new THREE.InstancedMesh(new THREE.CylinderGeometry(1, 1.15, 1, 10).translate(0, 0.5, 0), new THREE.MeshStandardMaterial({ color: 0x9a907e, roughness: 1 }), 1600)
+      this.crackMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshStandardMaterial({ color: 0x15130f, roughness: 1 }), 2400)
+      this.boilMesh.receiveShadow = true
+      this.root.add(this.boilMesh, this.crackMesh)
+    }
+    boils.forEach((s, q) => {
+      const x = s.x - HALF
+      const z = s.z - HALF
+      _m.makeScale(s.r, 0.1 + s.r * 0.05, s.r).setPosition(x, this.groundAt(x, z) + 0.04, z)
+      this.boilMesh.setMatrixAt(q, _m)
+    })
+    this.boilMesh.count = boils.length
+    this.boilMesh.instanceMatrix.needsUpdate = true
+    cracks.forEach((c, q) => {
+      const x = c.x - HALF
+      const z = c.z - HALF
+      _m.makeScale(c.len, 0.05, c.w).premultiply(_r.makeRotationY(c.ang))
+      _m.setPosition(x, this.groundAt(x, z) + 0.085, z)
+      this.crackMesh.setMatrixAt(q, _m)
+    })
+    this.crackMesh.count = cracks.length
+    this.crackMesh.instanceMatrix.needsUpdate = true
+  }
+
+  /** Draw scars, deposits, wet liquefied ground, sand boils and fissures into the terrain texture. */
+  paintGroundFx(ctx) {
+    const g = this.groundFx
+    const { noise } = this
+    for (let k = 0; k < GRID * GRID; k++) {
+      const i = k % GRID
+      const j = (k - i) / GRID
+      const n = noise.fbm(i * 0.4, j * 0.4, 2)
+      if (g.slid[k] === 1) ctx.fillStyle = `rgb(${104 + n * 25},${80 + n * 18},${56 + n * 10})`
+      else if (g.slid[k] === 2) ctx.fillStyle = `rgb(${124 + n * 20},${106 + n * 15},${82 + n * 10})`
+      else if (g.liqCount[k]) ctx.fillStyle = `rgba(118,112,98,${Math.min(0.55, 0.25 + g.liqCount[k] * 0.08)})`
+      else continue
+      ctx.fillRect(i * PX, j * PX, PX, PX)
+    }
+    const s = PX / CELL
+    ctx.fillStyle = 'rgba(172,162,140,0.95)'
+    for (const b of g.boils) {
+      ctx.beginPath()
+      ctx.arc(b.x * s, b.z * s, Math.max(1, b.r * s), 0, Math.PI * 2)
+      ctx.fill()
+    }
+    ctx.strokeStyle = 'rgba(25,20,15,0.85)'
+    ctx.lineCap = 'round'
+    for (const c of g.cracks) {
+      const dx = (Math.cos(c.ang) * c.len * s) / 2
+      const dz = (-Math.sin(c.ang) * c.len * s) / 2
+      ctx.lineWidth = Math.max(0.6, c.w * s)
+      ctx.beginPath()
+      ctx.moveTo(c.x * s - dx, c.z * s - dz)
+      ctx.lineTo(c.x * s + dx * 0.2 - dz * 0.25, c.z * s + dz * 0.2 + dx * 0.25)
+      ctx.lineTo(c.x * s + dx, c.z * s + dz)
+      ctx.stroke()
+    }
+  }
+
+  /** Earth and rock pour down the slope from a landslide scar. */
+  landslideFx(g, sl) {
+    const cells = sl.cells.slice(0, 30)
+    for (const k of cells) {
+      const i = k % GRID
+      const j = (k - i) / GRID
+      const x = cellToWorld(i)
+      const z = cellToWorld(j)
+      const y = this.groundAt(x, z)
+      const ax = g.aspX[k]
+      const az = g.aspZ[k]
+      for (let q = 0; q < 4; q++) {
+        const v = 5 + Math.random() * 7
+        this.debris.spawn(x + (Math.random() - 0.5) * CELL, y + 1 + Math.random() * 2, z + (Math.random() - 0.5) * CELL, ax * v, 1 + Math.random() * 2, az * v, 0.8 + Math.random() * 1.8, Math.random() < 0.5 ? 0x6e5a44 : 0x857563)
+      }
+      for (let q = 0; q < 10; q++)
+        this.dust.emit(x + (Math.random() - 0.5) * CELL, y + Math.random() * 3, z + (Math.random() - 0.5) * CELL, ax * 4 + (Math.random() - 0.5) * 3, 1 + Math.random() * 2, az * 4 + (Math.random() - 0.5) * 3, 12, 8, 7 + Math.random() * 5, [0.55, 0.47, 0.38, 0.6], [0.62, 0.56, 0.48, 0])
+    }
   }
 
   paintLamps() {
@@ -634,6 +771,7 @@ export class World {
         ctx.fillStyle = '#6d6047'
         ctx.fillRect((k % GRID) * PX, Math.floor(k / GRID) * PX, PX, PX)
       }
+    if (this.groundFx) this.paintGroundFx(ctx)
     this.terrainTex.needsUpdate = true
   }
 
@@ -885,13 +1023,14 @@ export class World {
       H *= a.hScale
       fw *= a.spread
       fd *= a.spread
-      tx = a.tiltX
-      tz = a.tiltZ
+      // permanent lean from a failing foundation, plus any damage tilt
+      tx = a.tiltX + (a.topple ? 0 : a.leanTx || 0)
+      tz = a.tiltZ + (a.topple ? 0 : a.leanTz || 0)
     }
     out.set(fw, 0, 0, 0, 0, H, 0, 0, 0, 0, fd, 0, 0, 0, 0, 1)
     if (tx || tz) out.premultiply(_r.makeRotationFromEuler(_e.set(tx, 0, tz)))
     out.elements[12] = b.cx
-    out.elements[13] = b.base + b.elevated
+    out.elements[13] = b.base + b.elevated - (a?.settle || 0)
     out.elements[14] = b.cz
     if (a?.topple) {
       const T = a.topple
@@ -913,7 +1052,7 @@ export class World {
     const sz = a && !a.rubble ? a.uz * a.vis : 0
     this.bSway.setXYZ(i, sx, sz, a && !a.rubble ? a.sink || 0 : 0)
     const gone = a && (a.hScale < 0.5 || a.topple || a.partial)
-    const top = b.base + b.elevated + r.H
+    const y0 = b.base + b.elevated - (a?.settle || 0)
     const ri = this.roofIndex.get(b.id) ?? -1
     if (ri >= 0) {
       const along = b.fw >= b.fd
@@ -925,7 +1064,7 @@ export class World {
         if (r.tx || r.tz) _m.premultiply(_r.makeRotationFromEuler(_e.set(r.tx, 0, r.tz)))
         _v.set(0, r.H, 0)
         if (r.tx || r.tz) _v.applyEuler(_e.set(r.tx, 0, r.tz))
-        _m.setPosition(b.cx + _v.x + sx, b.base + b.elevated + _v.y, b.cz + _v.z + sz)
+        _m.setPosition(b.cx + _v.x + sx, y0 + _v.y, b.cz + _v.z + sz)
       }
       this.roofMesh.setMatrixAt(ri, _m)
       this.roofMesh.instanceMatrix.needsUpdate = true
@@ -936,7 +1075,13 @@ export class World {
       else {
         const s = (b.seed * 0.2 + 0.25) * Math.min(b.fw, b.fd)
         _m.makeScale(s, 2.6, s * 1.3)
-        _m.setPosition(b.cx + sx + (b.seed - 0.5) * b.fw * 0.3, top, b.cz + sz)
+        _v.set((b.seed - 0.5) * b.fw * 0.3, r.H, 0)
+        if (r.tx || r.tz) {
+          _e.set(r.tx, 0, r.tz)
+          _m.premultiply(_r.makeRotationFromEuler(_e))
+          _v.applyEuler(_e)
+        }
+        _m.setPosition(b.cx + sx + _v.x, y0 + _v.y, b.cz + sz + _v.z)
       }
       this.unitMesh.setMatrixAt(ui, _m)
       this.unitMesh.instanceMatrix.needsUpdate = true
@@ -1230,9 +1375,16 @@ export class World {
   }
 
   /** Start a collapse after `delay` seconds of real time. */
-  collapse(b, delay = 0, style = 'quake') {
+  collapse(b, delay = 0, style = 'quake', opts = {}) {
     const a = this.animFor(b)
     if (a.collapse || a.rubble) return
+    if (opts.lean) {
+      // a building leaning on failed ground goes over the way it was already leaning
+      const ang = opts.leanAng
+      a.collapse = { t0: this.realTime + delay, dur: 1, dirX: Math.cos(ang), dirZ: Math.sin(ang), spawned: 0, style, kind: 'topple', theta0: opts.lean, started: false }
+      a.active = true
+      return
+    }
     // Ductile modern frames sway hard and then come down vertically
     // (progressive collapse). Whole-building overturning needs a weak base:
     // liquefied soil (Niigata 1964) or a brittle older frame (Taiwan 2016).
@@ -1294,12 +1446,12 @@ export class World {
       if (c.kind === 'topple') {
         // rigid rotation about the base edge, like a falling column
         a.topple = {
-          theta: 0.06,
+          theta: Math.max(0.06, c.theta0 || 0),
           omega: 0.12,
           ax: c.dirZ,
           az: -c.dirX,
           px: b.cx + (c.dirX * b.fw) / 2,
-          py: b.base + b.elevated,
+          py: b.base + b.elevated - (a.settle || 0),
           pz: b.cz + (c.dirZ * b.fd) / 2,
         }
       } else if (c.kind === 'partial') {

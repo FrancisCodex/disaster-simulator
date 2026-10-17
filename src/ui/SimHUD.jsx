@@ -50,7 +50,7 @@ export default function SimHUD({ s, game }) {
             </>
           )}
           <button onClick={() => game.toggleOverlay()} className={`rounded-md px-3 py-1.5 text-sm ${s.overlay ? 'bg-amber-500/25 text-amber-200 ring-1 ring-amber-400' : 'text-slate-300 hover:bg-slate-700/60'}`}>
-            {quake ? 'Damage view' : 'Flood depth view'}
+            {quake ? 'Integrity view' : 'Flood depth view'}
           </button>
           <WorldToggle s={s} game={game} />
           <ModelToggle s={s} game={game} />
@@ -96,6 +96,25 @@ export default function SimHUD({ s, game }) {
                     {quake.shocks - 1} aftershocks (M4+){quake.maxAfter ? `, largest M${quake.maxAfter.toFixed(1)}` : ''}
                   </div>
                   <div className="text-xs text-slate-400">{quake.fires} fires started</div>
+                  <div className="mt-2 text-[11px] tracking-wider text-slate-400 uppercase">Standing buildings</div>
+                  <div className="mt-1 h-2 overflow-hidden rounded bg-slate-700">
+                    <div
+                      className={`h-full transition-all ${T.integrity < 0.5 ? 'bg-red-500' : T.integrity < 0.75 ? 'bg-amber-400' : 'bg-emerald-400'}`}
+                      style={{ width: `${Math.round(T.integrity * 100)}%` }}
+                    />
+                  </div>
+                  <div className="mt-1 text-xs text-slate-400">
+                    {Math.round(T.integrity * 100)}% average integrity · {fmtInt(T.weakened)} badly weakened
+                    {T.lateCollapses > 0 && <span className="text-red-300"> · {fmtInt(T.lateCollapses)} fell after the main shock</span>}
+                  </div>
+                  {(quake.ground.liquefiedHa > 0 || quake.ground.slides > 0) && (
+                    <div className="mt-1 text-xs text-amber-300/90">
+                      Ground failure: {quake.ground.liquefiedHa > 0 && `${quake.ground.liquefiedHa.toFixed(1)} ha liquefied`}
+                      {quake.ground.liquefiedHa > 0 && quake.ground.slides > 0 && ' · '}
+                      {quake.ground.slides > 0 && `${quake.ground.slides} landslide${quake.ground.slides > 1 ? 's' : ''}`}
+                      {T.leaning > 0 && ` · ${T.leaning} leaning`}
+                    </div>
+                  )}
                 </>
               )}
             </div>

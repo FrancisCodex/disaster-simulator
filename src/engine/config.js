@@ -24,6 +24,10 @@ export const RIVER_DEPTH = 7.5 // metres below bank at the thalweg
 // medians: PGA (g) at which 50% of buildings reach Slight / Moderate /
 // Extensive / Complete damage (lognormal, β = 0.64). Loosely HAZUS-based.
 export const FRAGILITY_BETA = 0.64
+// fatigue: how fast repeated strong shaking uses up a frame's hysteretic
+// capacity (brittle masonry and non-ductile concrete degrade fastest).
+// fireLoss: integrity lost per hour of fire (unprotected steel softens,
+// timber burns through, concrete spalls slowly).
 
 export const CONSTRUCTION = {
   wood_old: {
@@ -31,6 +35,8 @@ export const CONSTRUCTION = {
     short: 'Old wood',
     medians: [0.18, 0.29, 0.51, 0.77],
     collapse: 0.03,
+    fatigue: 1.1,
+    fireLoss: 0.6,
     fire: 0.3,
     floodDV: 2.0,
     next: 'wood_mod',
@@ -41,6 +47,8 @@ export const CONSTRUCTION = {
     short: 'Wood',
     medians: [0.26, 0.55, 1.28, 2.01],
     collapse: 0.03,
+    fatigue: 0.8,
+    fireLoss: 0.5,
     fire: 0.25,
     floodDV: 2.5,
     next: null,
@@ -51,6 +59,8 @@ export const CONSTRUCTION = {
     short: 'URM',
     medians: [0.13, 0.17, 0.26, 0.37],
     collapse: 0.15,
+    fatigue: 1.45,
+    fireLoss: 0.08,
     fire: 0.06,
     floodDV: 3.5,
     next: 'rc_mod',
@@ -61,6 +71,8 @@ export const CONSTRUCTION = {
     short: 'RC low',
     medians: [0.16, 0.22, 0.36, 0.55],
     collapse: 0.13,
+    fatigue: 1.3,
+    fireLoss: 0.12,
     fire: 0.05,
     floodDV: 6,
     next: 'rc_mod',
@@ -71,6 +83,8 @@ export const CONSTRUCTION = {
     short: 'RC mod',
     medians: [0.21, 0.35, 0.7, 1.1],
     collapse: 0.1,
+    fatigue: 1,
+    fireLoss: 0.1,
     fire: 0.04,
     floodDV: 7,
     next: 'rc_high',
@@ -81,6 +95,8 @@ export const CONSTRUCTION = {
     short: 'RC high',
     medians: [0.28, 0.52, 1.05, 1.65],
     collapse: 0.08,
+    fatigue: 0.85,
+    fireLoss: 0.09,
     fire: 0.04,
     floodDV: 8,
     next: null,
@@ -91,6 +107,8 @@ export const CONSTRUCTION = {
     short: 'Steel',
     medians: [0.3, 0.58, 1.15, 1.85],
     collapse: 0.05,
+    fatigue: 0.75,
+    fireLoss: 0.2,
     fire: 0.04,
     floodDV: 8,
     next: null,
@@ -101,6 +119,8 @@ export const CONSTRUCTION = {
     short: 'Isolated',
     medians: [0.7, 1.1, 1.9, 2.8],
     collapse: 0.03,
+    fatigue: 0.55,
+    fireLoss: 0.09,
     fire: 0.03,
     floodDV: 8,
     next: null,
