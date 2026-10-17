@@ -1,0 +1,554 @@
+{
+ "vehicles": [
+  {
+   "name": "sedan",
+   "count": 6681,
+   "layout": {
+    "position": {
+     "offset": 0,
+     "itemSize": 3
+    },
+    "normal": {
+     "offset": 80172,
+     "itemSize": 3
+    },
+    "color": {
+     "offset": 160344,
+     "itemSize": 3
+    },
+    "aPaint": {
+     "offset": 240516,
+     "itemSize": 1
+    },
+    "index": {
+     "offset": 267240,
+     "type": "u16",
+     "count": 8862
+    }
+   },
+   "length": 4.6,
+   "width": 1.97,
+   "paint": true
+  },
+  {
+   "name": "hatch",
+   "count": 6962,
+   "layout": {
+    "position": {
+     "offset": 0,
+     "itemSize": 3
+    },
+    "normal": {
+     "offset": 83544,
+     "itemSize": 3
+    },
+    "color": {
+     "offset": 167088,
+     "itemSize": 3
+    },
+    "aPaint": {
+     "offset": 250632,
+     "itemSize": 1
+    },
+    "index": {
+     "offset": 278480,
+     "type": "u16",
+     "count": 9372
+    }
+   },
+   "length": 4.04,
+   "width": 2,
+   "paint": true
+  },
+  {
+   "name": "sports",
+   "count": 6851,
+   "layout": {
+    "position": {
+     "offset": 0,
+     "itemSize": 3
+    },
+    "normal": {
+     "offset": 82212,
+     "itemSize": 3
+    },
+    "color": {
+     "offset": 164424,
+     "itemSize": 3
+    },
+    "aPaint": {
+     "offset": 246636,
+     "itemSize": 1
+    },
+    "index": {
+     "offset": 274040,
+     "type": "u16",
+     "count": 9198
+    }
+   },
+   "length": 4.4,
+   "width": 2,
+   "paint": true
+  },
+  {
+   "name": "sports2",
+   "count": 7271,
+   "layout": {
+    "position": {
+     "offset": 0,
+     "itemSize": 3
+    },
+    "normal": {
+     "offset": 87252,
+     "itemSize": 3
+    },
+    "color": {
+     "offset": 174504,
+     "itemSize": 3
+    },
+    "aPaint": {
+     "offset": 261756,
+     "itemSize": 1
+    },
+    "index": {
+     "offset": 290840,
+     "type": "u16",
+     "count": 9444
+    }
+   },
+   "length": 4.2,
+   "width": 2,
+   "paint": true
+  },
+  {
+   "name": "suv",
+   "count": 7369,
+   "layout": {
+    "position": {
+     "offset": 0,
+     "itemSize": 3
+    },
+    "normal": {
+     "offset": 88428,
+     "itemSize": 3
+    },
+    "color": {
+     "offset": 176856,
+     "itemSize": 3
+    },
+    "aPaint": {
+     "offset": 265284,
+     "itemSize": 1
+    },
+    "index": {
+     "offset": 294760,
+     "type": "u16",
+     "count": 9882
+    }
+   },
+   "length": 3.99,
+   "width": 2,
+   "paint": true
+  },
+  {
+   "name": "taxi",
+   "count": 7328,
+   "layout": {
+    "position": {
+     "offset": 0,
+     "itemSize": 3
+    },
+    "normal": {
+     "offset": 87936,
+     "itemSize": 3
+    },
+    "color": {
+     "offset": 175872,
+     "itemSize": 3
+    },
+    "aPaint": {
+     "offset": 263808,
+     "itemSize": 1
+    },
+    "index": {
+     "offset": 293120,
+     "type": "u16",
+     "count": 9834
+    }
+   },
+   "length": 4.67,
+   "width": 2,
+   "paint": false
+  },
+  {
+   "name": "police",
+   "count": 7385,
+   "layout": {
+    "position": {
+     "offset": 0,
+     "itemSize": 3
+    },
+    "normal": {
+     "offset": 88620,
+     "itemSize": 3
+    },
+    "color": {
+     "offset": 177240,
+     "itemSize": 3
+    },
+    "aPaint": {
+     "offset": 265860,
+     "itemSize": 1
+    },
+    "index": {
+     "offset": 295400,
+     "type": "u16",
+     "count": 9696
+    }
+   },
+   "length": 4.2,
+   "width": 2,
+   "paint": false
+  },
+  {
+   "name": "ambulance",
+   "count": 2837,
+   "layout": {
+    "position": {
+     "offset": 0,
+     "itemSize": 3
+    },
+    "normal": {
+     "offset": 34044,
+     "itemSize": 3
+    },
+    "color": {
+     "offset": 68088,
+     "itemSize": 3
+    },
+    "aPaint": {
+     "offset": 102132,
+     "itemSize": 1
+    },
+    "index": {
+     "offset": 113480,
+     "type": "u16",
+     "count": 4902
+    }
+   },
+   "length": 4.43,
+   "width": 2.2,
+   "paint": false
+  },
+  {
+   "name": "bus",
+   "count": 2780,
+   "layout": {
+    "position": {
+     "offset": 0,
+     "itemSize": 3
+    },
+    "normal": {
+     "offset": 33360,
+     "itemSize": 3
+    },
+    "color": {
+     "offset": 66720,
+     "itemSize": 3
+    },
+    "aPaint": {
+     "offset": 100080,
+     "itemSize": 1
+    },
+    "index": {
+     "offset": 111200,
+     "type": "u16",
+     "count": 4578
+    }
+   },
+   "length": 5.86,
+   "width": 2.5,
+   "paint": false
+  },
+  {
+   "name": "schoolbus",
+   "count": 3224,
+   "layout": {
+    "position": {
+     "offset": 0,
+     "itemSize": 3
+    },
+    "normal": {
+     "offset": 38688,
+     "itemSize": 3
+    },
+    "color": {
+     "offset": 77376,
+     "itemSize": 3
+    },
+    "aPaint": {
+     "offset": 116064,
+     "itemSize": 1
+    },
+    "index": {
+     "offset": 128960,
+     "type": "u16",
+     "count": 5346
+    }
+   },
+   "length": 6.13,
+   "width": 2.5,
+   "paint": false
+  }
+ ],
+ "people": [
+  {
+   "name": "male_casual",
+   "count": 750,
+   "layout": {
+    "position": {
+     "offset": 0,
+     "itemSize": 3
+    },
+    "normal": {
+     "offset": 9000,
+     "itemSize": 3
+    },
+    "color": {
+     "offset": 18000,
+     "itemSize": 3
+    },
+    "aPart": {
+     "offset": 27000,
+     "itemSize": 1
+    },
+    "aPivot": {
+     "offset": 30000,
+     "itemSize": 3
+    },
+    "index": {
+     "offset": 39000,
+     "type": "u16",
+     "count": 3417
+    }
+   }
+  },
+  {
+   "name": "male_longsleeve",
+   "count": 753,
+   "layout": {
+    "position": {
+     "offset": 0,
+     "itemSize": 3
+    },
+    "normal": {
+     "offset": 9036,
+     "itemSize": 3
+    },
+    "color": {
+     "offset": 18072,
+     "itemSize": 3
+    },
+    "aPart": {
+     "offset": 27108,
+     "itemSize": 1
+    },
+    "aPivot": {
+     "offset": 30120,
+     "itemSize": 3
+    },
+    "index": {
+     "offset": 39156,
+     "type": "u16",
+     "count": 3438
+    }
+   }
+  },
+  {
+   "name": "male_shirt",
+   "count": 762,
+   "layout": {
+    "position": {
+     "offset": 0,
+     "itemSize": 3
+    },
+    "normal": {
+     "offset": 9144,
+     "itemSize": 3
+    },
+    "color": {
+     "offset": 18288,
+     "itemSize": 3
+    },
+    "aPart": {
+     "offset": 27432,
+     "itemSize": 1
+    },
+    "aPivot": {
+     "offset": 30480,
+     "itemSize": 3
+    },
+    "index": {
+     "offset": 39624,
+     "type": "u16",
+     "count": 3489
+    }
+   }
+  },
+  {
+   "name": "male_suit",
+   "count": 773,
+   "layout": {
+    "position": {
+     "offset": 0,
+     "itemSize": 3
+    },
+    "normal": {
+     "offset": 9276,
+     "itemSize": 3
+    },
+    "color": {
+     "offset": 18552,
+     "itemSize": 3
+    },
+    "aPart": {
+     "offset": 27828,
+     "itemSize": 1
+    },
+    "aPivot": {
+     "offset": 30920,
+     "itemSize": 3
+    },
+    "index": {
+     "offset": 40196,
+     "type": "u16",
+     "count": 3573
+    }
+   }
+  },
+  {
+   "name": "female_alternative",
+   "count": 613,
+   "layout": {
+    "position": {
+     "offset": 0,
+     "itemSize": 3
+    },
+    "normal": {
+     "offset": 7356,
+     "itemSize": 3
+    },
+    "color": {
+     "offset": 14712,
+     "itemSize": 3
+    },
+    "aPart": {
+     "offset": 22068,
+     "itemSize": 1
+    },
+    "aPivot": {
+     "offset": 24520,
+     "itemSize": 3
+    },
+    "index": {
+     "offset": 31876,
+     "type": "u16",
+     "count": 2619
+    }
+   }
+  },
+  {
+   "name": "female_casual",
+   "count": 696,
+   "layout": {
+    "position": {
+     "offset": 0,
+     "itemSize": 3
+    },
+    "normal": {
+     "offset": 8352,
+     "itemSize": 3
+    },
+    "color": {
+     "offset": 16704,
+     "itemSize": 3
+    },
+    "aPart": {
+     "offset": 25056,
+     "itemSize": 1
+    },
+    "aPivot": {
+     "offset": 27840,
+     "itemSize": 3
+    },
+    "index": {
+     "offset": 36192,
+     "type": "u16",
+     "count": 2937
+    }
+   }
+  },
+  {
+   "name": "female_dress",
+   "count": 720,
+   "layout": {
+    "position": {
+     "offset": 0,
+     "itemSize": 3
+    },
+    "normal": {
+     "offset": 8640,
+     "itemSize": 3
+    },
+    "color": {
+     "offset": 17280,
+     "itemSize": 3
+    },
+    "aPart": {
+     "offset": 25920,
+     "itemSize": 1
+    },
+    "aPivot": {
+     "offset": 28800,
+     "itemSize": 3
+    },
+    "index": {
+     "offset": 37440,
+     "type": "u16",
+     "count": 3147
+    }
+   }
+  },
+  {
+   "name": "female_tanktop",
+   "count": 590,
+   "layout": {
+    "position": {
+     "offset": 0,
+     "itemSize": 3
+    },
+    "normal": {
+     "offset": 7080,
+     "itemSize": 3
+    },
+    "color": {
+     "offset": 14160,
+     "itemSize": 3
+    },
+    "aPart": {
+     "offset": 21240,
+     "itemSize": 1
+    },
+    "aPivot": {
+     "offset": 23600,
+     "itemSize": 3
+    },
+    "index": {
+     "offset": 30680,
+     "type": "u16",
+     "count": 2571
+    }
+   }
+  }
+ ]
+}

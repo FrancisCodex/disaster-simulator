@@ -17,8 +17,8 @@ export const CELL_BANK = 3
 export const CELL_PARK = 4
 export const CELL_POND = 5
 
-export const RIVER_HALF_WIDTH = 2.4 // cells
-export const RIVER_DEPTH = 4.5 // metres below bank
+export const RIVER_HALF_WIDTH = 3.2 // cells (≈64 m wide channel)
+export const RIVER_DEPTH = 7.5 // metres below bank at the thalweg
 
 // ---------------------------------------------------------------- Structures
 // medians: PGA (g) at which 50% of buildings reach Slight / Moderate /

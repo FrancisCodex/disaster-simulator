@@ -115,6 +115,7 @@ export function generateCity(typeKey, seed) {
   const bridge = new Uint8Array(N * N)
   const buildingAt = new Int32Array(N * N).fill(-1)
   const levee = new Float32Array(N * N)
+  const roadAxis = new Uint8Array(N * N) // bit 1: runs east–west, bit 2: runs north–south
   const riverCenter = new Float32Array(N)
   const bankZ = new Float32Array(N)
 
@@ -125,7 +126,7 @@ export function generateCity(typeKey, seed) {
   const ph = rng.float(0, Math.PI * 2)
   for (let j = 0; j < N; j++) {
     riverCenter[j] = baseX + amp * Math.sin((j / N) * Math.PI * 2 * f1 + ph) + nz.fbm(j * 0.05, 11.3, 2) * 4
-    bankZ[j] = 12 - j * CELL * 0.001
+    bankZ[j] = 20 - j * CELL * 0.0015
   }
   // The town grows on the wide side of the river, close to it (as towns do).
   const cx = clamp(N / 2 - side * rng.float(6, 12), 25, 75)
@@ -136,20 +137,26 @@ export function generateCity(typeKey, seed) {
       const k = idx(i, j)
       const d = Math.abs(i + 0.5 - riverCenter[j])
       if (d < RIVER_HALF_WIDTH) {
+        // U-shaped channel: flat-ish bed, steep banks
         const t = d / RIVER_HALF_WIDTH
-        z[k] = bankZ[j] - RIVER_DEPTH * (1 - t * t)
+        z[k] = bankZ[j] - RIVER_DEPTH * (1 - Math.pow(t, 3.2)) + nz.fbm(i * 0.3, j * 0.3, 2) * 0.4
         cellType[k] = CELL_RIVER
         soil[k] = 2
         continue
       }
       const dd = d - RIVER_HALF_WIDTH
-      const hills = (nz.fbm(i * 0.03, j * 0.03, 4) * 9 + 3) * smoothstep(6, 40, dd)
+      // floodplain → river terrace → rolling hills → ridges at the valley edges
+      const floodplain = Math.max(0, dd - 1.5) * 0.07
+      const terrace = smoothstep(10, 20, dd + nz.fbm(i * 0.05 + 7, j * 0.05, 2) * 6) * 3.5
+      const hills = (nz.fbm(i * 0.028, j * 0.028, 5) * 16 + 7) * smoothstep(14, 55, dd)
+      const ridged = (1 - Math.abs(nz.fbm(i * 0.02 + 31, j * 0.02 + 17, 4))) ** 2
+      const edge = Math.max(Math.abs(i - N / 2), Math.abs(j - N / 2)) / (N / 2)
+      const ridges = ridged * 22 * smoothstep(0.62, 1.0, edge) * smoothstep(20, 45, dd)
       const micro = nz.fbm(i * 0.14 + 50, j * 0.14 + 50, 2) * 0.7 * smoothstep(1, 5, dd)
-      const rise = Math.max(0, dd - 2) * 0.1
-      z[k] = Math.max(bankZ[j] + 0.25, bankZ[j] + 0.45 + rise + hills + micro)
+      z[k] = Math.max(bankZ[j] + 0.25, bankZ[j] + 0.45 + floodplain + terrace + Math.max(-2, hills) + ridges + micro)
       if (dd < 1.3) cellType[k] = CELL_BANK
       const above = z[k] - bankZ[j]
-      soil[k] = dd < 18 && above < 2.5 ? 2 : above > 9 ? 0 : 1
+      soil[k] = dd < 18 && above < 2.5 ? 2 : above > 14 ? 0 : 1
     }
   }
 
@@ -164,6 +171,7 @@ export function generateCity(typeKey, seed) {
     bridge,
     buildingAt,
     levee,
+    roadAxis,
     riverCenter,
     bankZ,
     center: { i: cx, j: cy },
@@ -194,11 +202,15 @@ export function generateCity(typeKey, seed) {
       const inCity = dist < P.radius
       if (!(inCity || (main && dist < P.radius * 2.2))) continue
       if (cellType[k] === CELL_RIVER) {
-        if (ry && !rx && (main || inCity)) bridge[k] = 1
+        if (ry && !rx && (main || inCity)) {
+          bridge[k] = 1
+          roadAxis[k] = 1
+        }
         continue
       }
       if (cellType[k] === CELL_BANK && rx && !ry) continue
       cellType[k] = CELL_ROAD
+      roadAxis[k] = (ry ? 1 : 0) | (rx ? 2 : 0)
     }
   }
   // remove bridges that don't connect roads on both banks
@@ -210,6 +222,29 @@ export function generateCity(typeKey, seed) {
     const l = first > 0 && cellType[idx(first - 1, j)] === CELL_ROAD
     const r = last < N - 1 && cellType[idx(last + 1, j)] === CELL_ROAD
     if (!l || !r) for (let i = first; i <= last; i++) bridge[idx(i, j)] = 0
+  }
+  // Each bridge spans from the first ordinary road cell on one bank to the
+  // first on the other; bank cells under the deck belong to the bridge.
+  // Roads that reach the river without a bridge become dead ends.
+  city.bridgeSpans = []
+  for (let j = 0; j < N; j++) {
+    let first = -1
+    let last = -1
+    for (let i = 0; i < N; i++) if (bridge[idx(i, j)]) (first < 0 && (first = i), (last = i))
+    if (first >= 0) {
+      let i0 = first - 1
+      while (i0 > 0 && cellType[idx(i0, j)] === CELL_ROAD && z[idx(i0, j)] - bankZ[j] < 0.6 && Math.abs(i0 + 0.5 - riverCenter[j]) < RIVER_HALF_WIDTH + 1.6) i0--
+      let i1 = last + 1
+      while (i1 < N - 1 && cellType[idx(i1, j)] === CELL_ROAD && z[idx(i1, j)] - bankZ[j] < 0.6 && Math.abs(i1 + 0.5 - riverCenter[j]) < RIVER_HALF_WIDTH + 1.6) i1++
+      for (let i = i0 + 1; i < i1; i++) bridge[idx(i, j)] = 1
+      city.bridgeSpans.push({ j, i0, i1, h0: z[idx(i0, j)], h1: z[idx(i1, j)] })
+    }
+  }
+  for (let k = 0; k < N * N; k++) {
+    if (cellType[k] !== CELL_ROAD || bridge[k]) continue
+    const i = k % N
+    const d = Math.abs(i + 0.5 - riverCenter[(k - i) / N])
+    if (d < RIVER_HALF_WIDTH + 1.3) cellType[k] = CELL_BANK
   }
 
   // ------------------------------------------------------------ lots
@@ -243,7 +278,15 @@ export function generateCity(typeKey, seed) {
     if (x < 1 || y < 1 || x + w > N - 1 || y + d > N - 1) return false
     for (let j = y; j < y + d; j++)
       for (let i = x; i < x + w; i++) if (cellType[idx(i, j)] !== CELL_GRASS || buildingAt[idx(i, j)] >= 0) return false
-    return true
+    // too steep to build on without major earthworks
+    let zlo = Infinity
+    let zhi = -Infinity
+    for (let j = y; j < y + d; j++)
+      for (let i = x; i < x + w; i++) {
+        zlo = Math.min(zlo, z[idx(i, j)])
+        zhi = Math.max(zhi, z[idx(i, j)])
+      }
+    return zhi - zlo < 1.6 * Math.max(w, d)
   }
 
   const minLot = { house: 1, apartment: 2, office: 2, tower: 3, industrial: 2 }

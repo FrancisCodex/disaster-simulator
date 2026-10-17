@@ -1,5 +1,5 @@
 import { SPEEDS } from '../engine/config.js'
-import { Stat, BuildingPanel } from './common.jsx'
+import { Stat, BuildingPanel, WorldToggle, ModelToggle } from './common.jsx'
 import { fmtInt, fmtMoney } from '../engine/math.js'
 
 const fmtT = (t) => {
@@ -52,6 +52,8 @@ export default function SimHUD({ s, game }) {
           <button onClick={() => game.toggleOverlay()} className={`rounded-md px-3 py-1.5 text-sm ${s.overlay ? 'bg-amber-500/25 text-amber-200 ring-1 ring-amber-400' : 'text-slate-300 hover:bg-slate-700/60'}`}>
             {quake ? 'Damage view' : 'Flood depth view'}
           </button>
+          <WorldToggle s={s} game={game} />
+          <ModelToggle s={s} game={game} />
         </div>
       </div>
 
