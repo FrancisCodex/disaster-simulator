@@ -10,6 +10,7 @@ import { makeBuildingMaterial, makeSwayDepthMaterial, makeWaterMaterial, SkyEnvi
 import { CityLife } from './cityLife.js'
 import { buildRoadMeshes } from './roads.js'
 import { Subsurface } from './subsurface.js'
+import { loadModels } from './quaternius.js'
 
 const HALF = (GRID * CELL) / 2
 const PX = 16 // terrain texture pixels per cell
@@ -129,6 +130,13 @@ export class World {
     this.lifeCtx = {}
     this.impactAcc = new Map()
     this.subsurface = new Subsurface(this)
+    // CC0 Quaternius vehicles and people stream in; built-in models are used until then
+    loadModels().then((m) => {
+      if (!m) return
+      this.modelAssets = m
+      if (this.useModels !== false) this.life.models = m
+      this.onAssetsLoaded?.()
+    })
     this.showWorld = true
     this.blockShake = new THREE.Vector3()
 
@@ -1481,7 +1489,7 @@ export class World {
     this.hemi.intensity = lerp(1.05, 1.0, dayF) * (1 - overcast * 0.15)
     this.hemi.color.set(0xdfeeff).lerp(new THREE.Color(0x9fb4e0), 1 - dayF)
     this.hemi.groundColor.set(0x4a5a3a).lerp(new THREE.Color(0x3a3530), 1 - dayF)
-    this.renderer.toneMappingExposure = lerp(1.7, 1.05, dayF)
+    this.renderer.toneMappingExposure = lerp(1.45, 1.05, dayF)
     const daySky = new THREE.Color(0x9cc1e3).lerp(new THREE.Color(0x7b8590), overcast)
     const nightSky = new THREE.Color(0x24324f)
     const sky = nightSky.clone().lerp(daySky, dayF).lerp(new THREE.Color(0xe7a072), warm * 0.4 * (1 - overcast))
@@ -1492,15 +1500,15 @@ export class World {
     this.scene.fog.far = lerp(5600, 1500, Math.max(overcast, haze * 0.6))
     this.rainIntensity = rain
     this.uRain.value = rain
-    if (this.terrainMat) this.terrainMat.emissiveIntensity = night * 1.3
+    if (this.terrainMat) this.terrainMat.emissiveIntensity = night * 0.55
     if (this.roadMesh) {
       // wet asphalt turns glossy and mirrors the street lights
       const wet = clamp(rain / 8, 0, 1)
-      this.roadMesh.material.emissiveIntensity = night * 1.1
+      this.roadMesh.material.emissiveIntensity = night * 0.5
       this.roadMesh.material.roughness = lerp(0.88, 0.22, wet)
       this.roadMesh.material.envMapIntensity = wet
       if (!this.roadMesh.material.envMap) this.trackEnv(this.roadMesh.material)
-      this.walkMesh.material.emissiveIntensity = night * 1.1
+      this.walkMesh.material.emissiveIntensity = night * 0.45
       this.walkMesh.material.roughness = lerp(0.9, 0.45, wet)
     }
     // refresh reflections now and then as the sky changes
@@ -1607,7 +1615,8 @@ export class World {
     this.smoke.update(dt, 3)
     this.dust.update(dt, 1)
     this.debris.update(dt)
-    this.rain.update(dt, this.rainIntensity || 0, this.controls.target)
+    // drops stop on roofs and streets; in cut-away view it only rains over the block
+    this.rain.update(dt, this.rainIntensity || 0, this.controls.target, (x, z) => this.surfaceAt(x, z).y, this.subsurface.group.visible ? HALF - 2 : 0)
     this.renderer.render(this.scene, this.camera)
   }
 

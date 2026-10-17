@@ -115,6 +115,7 @@ export function generateCity(typeKey, seed) {
   const bridge = new Uint8Array(N * N)
   const buildingAt = new Int32Array(N * N).fill(-1)
   const levee = new Float32Array(N * N)
+  const roadAxis = new Uint8Array(N * N) // bit 1: runs east–west, bit 2: runs north–south
   const riverCenter = new Float32Array(N)
   const bankZ = new Float32Array(N)
 
@@ -170,6 +171,7 @@ export function generateCity(typeKey, seed) {
     bridge,
     buildingAt,
     levee,
+    roadAxis,
     riverCenter,
     bankZ,
     center: { i: cx, j: cy },
@@ -200,11 +202,15 @@ export function generateCity(typeKey, seed) {
       const inCity = dist < P.radius
       if (!(inCity || (main && dist < P.radius * 2.2))) continue
       if (cellType[k] === CELL_RIVER) {
-        if (ry && !rx && (main || inCity)) bridge[k] = 1
+        if (ry && !rx && (main || inCity)) {
+          bridge[k] = 1
+          roadAxis[k] = 1
+        }
         continue
       }
       if (cellType[k] === CELL_BANK && rx && !ry) continue
       cellType[k] = CELL_ROAD
+      roadAxis[k] = (ry ? 1 : 0) | (rx ? 2 : 0)
     }
   }
   // remove bridges that don't connect roads on both banks

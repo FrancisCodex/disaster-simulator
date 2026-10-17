@@ -86,7 +86,7 @@ export function vehicleGeometry(type) {
     // box truck: cab + cargo box
     parts.push(paint(profile([[1.6, 0.5], [3.4, 0.5], [3.42, 1.4], [3.2, 2.5], [1.6, 2.6]], 2.3), BODY))
     parts.push(paint(profile([[3.22, 1.6], [3.05, 2.4], [2.3, 2.45], [2.3, 1.6]], 2.34, 0.02), GLASS))
-    parts.push(paint(new THREE.BoxGeometry(5.0, 2.9, 2.4).translate(-1.0, 2.05, 0), [0.92, 0.92, 0.9]))
+    parts.push(paint(new THREE.BoxGeometry(5.0, 2.7, 2.2).translate(-1.0, 1.95, 0), [0.92, 0.92, 0.9]))
     parts.push(paint(new THREE.BoxGeometry(6.8, 0.25, 1.0).translate(0, 0.55, 0), TRIM))
     parts.push(...wheels([2.6, -1.8, -2.9], 0.48, 0.32, 2.0), ...lights(3.42, -3.52, 0.9, 1.15))
   }

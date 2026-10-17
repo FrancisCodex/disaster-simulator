@@ -87,6 +87,20 @@ export function Notice({ notice }) {
   )
 }
 
+/** Vehicles & people: detailed Quaternius models or the built-in procedural ones. */
+export function ModelToggle({ s, game }) {
+  return (
+    <button
+      onClick={() => game.setModelStyle(!s.detailedModels)}
+      disabled={!s.modelsReady}
+      title="Switch vehicles and people between the detailed (Quaternius) models and the simpler built-in ones"
+      className="rounded-md px-3 py-1.5 text-sm text-slate-300 hover:bg-slate-700/60 disabled:opacity-40"
+    >
+      Models: {s.detailedModels ? 'Detailed' : 'Built-in'}
+    </button>
+  )
+}
+
 /** Switch between the full landscape and the cut-away "diorama" of the district. */
 export function WorldToggle({ s, game }) {
   return (

@@ -111,4 +111,6 @@ Contributions are welcome. Please keep the science honest: cite a source when yo
 
 ## License
 
-MIT
+MIT for the code.
+
+Vehicle and character models in `public/models/quaternius/` are by [Quaternius](https://quaternius.com) (Cars, Public Transport, Animated Men and Animated Women packs) and are released under CC0. Licence files are in `public/models/quaternius/licenses/`; the Public Transport pack has no licence file, but its page states CC0. They are converted from FBX with `node scripts/convert-quaternius.mjs <folder with the FBX files>`. The **Models** button switches between them and the built-in procedural models.

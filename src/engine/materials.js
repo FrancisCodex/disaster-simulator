@@ -131,8 +131,9 @@ export function makeBuildingMaterial({ uNight, envMap }) {
             vec3 avg = mix(wallC, glass, cover * 0.9);
             diffuseColor.rgb = mix(facade, avg, far);
             gWin = win * (1.0 - far * 0.6);
-            float litChance = floorI < 0.5 && style > 0.5 ? 0.85 : 0.5;
-            gLit = (win * (1.0 - far) + cover * far) * step(1.0 - litChance, rnd2);
+            // about a third of rooms lit at night; distant facades glow far less
+            float litChance = floorI < 0.5 && style > 0.5 ? 0.6 : 0.3;
+            gLit = (win * (1.0 - far) + cover * far * 0.35) * step(1.0 - litChance, rnd2);
             gLitCol = mix(vec3(1.0, 0.74, 0.42), vec3(0.85, 0.9, 1.0), step(0.7, hash12(vec2(rnd2 * 91.0, rnd * 37.0))));
           } else if (N.y > 0.5) {
             // flat roof: gravel membrane with a lighter parapet edge
@@ -145,7 +146,7 @@ export function makeBuildingMaterial({ uNight, envMap }) {
       )
       .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\nroughnessFactor = mix(roughnessFactor, 0.06, gWin);')
       .replace('#include <metalnessmap_fragment>', '#include <metalnessmap_fragment>\nmetalnessFactor = mix(metalnessFactor, 0.35, gWin);')
-      .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += gLit * uNight * vInfo.w * gLitCol * 1.6;')
+      .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += gLit * uNight * vInfo.w * gLitCol * 0.8;')
   }
   return mat
 }

@@ -7,18 +7,15 @@
 //    or to high ground; anyone caught in deep moving water is swept away.
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
-import { GRID, CELL, CELL_ROAD, CELL_RIVER, CELL_POND, CELL_PARK } from './config.js'
+import { GRID, CELL, CELL_RIVER, CELL_POND, CELL_PARK } from './config.js'
 import { idx, cellToWorld } from './cityGen.js'
 import { clamp } from './math.js'
 import { vehicleGeometry, vehicleMaterial, VEHICLE_TYPES, VEHICLE_LENGTH, personGeometry, personMaterial } from './assets.js'
 import { KERB } from './roads.js'
+import { analyzeRoads, AVENUE, JUNCTION, STREET, END, BEND } from './roadNet.js'
+import { vehicleModelMaterial, personModelMaterial } from './quaternius.js'
 
-const DIRS = [
-  [1, 0],
-  [0, 1],
-  [-1, 0],
-  [0, -1],
-]
+import { DIRS } from './roadNet.js'
 const right = (d) => [-DIRS[d][1], DIRS[d][0]]
 const dirOf = (x, z) => (x > 0.5 ? 0 : z > 0.5 ? 1 : x < -0.5 ? 2 : 3)
 const CAR_COLORS = ['#f2f2f0', '#f2f2f0', '#e9e9e6', '#1c1d20', '#1c1d20', '#9aa0a6', '#6b7178', '#b3261e', '#1f4e8c', '#2f5d3a', '#d8c9a3', '#8a5a2b', '#3b4a5c']
@@ -33,7 +30,7 @@ const _s = new THREE.Vector3()
 const _p = new THREE.Vector3()
 const _c = new THREE.Color()
 const HALF = (GRID * CELL) / 2
-const LANE = 2.3 // lane offset from the road centre line
+const LANE = 1.4 // lane centre on a two-way street (2.8 m lanes between the kerbs)
 const WALK = 4.1 // sidewalk path offset from the road centre line
 
 function lightsMaterial() {
@@ -68,7 +65,7 @@ export class CityLife {
   dispose() {
     for (const c of [...this.group.children]) {
       this.group.remove(c)
-      if (!Object.values(this.vehicleGeos).includes(c.geometry) && c.geometry !== this.personGeo) c.geometry?.dispose()
+      if (!c.userData.sharedGeometry) c.geometry?.dispose()
       c.material?.dispose?.()
     }
   }
@@ -78,35 +75,33 @@ export class CityLife {
     this.city = city
     this.stats = { pedDead: 0, carDead: 0, carsCrushed: 0, swept: 0 }
     const N = GRID
-    const road = new Uint8Array(N * N)
-    for (let k = 0; k < N * N; k++) road[k] = city.cellType[k] === CELL_ROAD || city.bridge[k] ? 1 : 0
+    const net = analyzeRoads(city)
+    this.net = net
+    this.deadCache = null
+    const road = net.road
     this.road = road
     this.blocked = new Uint8Array(N * N)
-    const nbr = new Uint8Array(N * N)
+    // cars: where they may drive next; pedestrians: where the sidewalks go
+    const carOut = net.carOut
+    this.carOut = carOut
+    this.walkOut = net.walkOut
     const inter = new Uint8Array(N * N)
     const roadCells = []
-    for (let j = 0; j < N; j++)
-      for (let i = 0; i < N; i++) {
-        const k = idx(i, j)
-        if (!road[k]) continue
-        let m = 0
-        let c = 0
-        DIRS.forEach(([dx, dz], d) => {
-          const ii = i + dx
-          const jj = j + dz
-          if (ii >= 0 && jj >= 0 && ii < N && jj < N && road[idx(ii, jj)]) {
-            m |= 1 << d
-            c++
-          }
-        })
-        nbr[k] = m
-        if (c >= 3) inter[k] = 1
-        if (c >= 1) roadCells.push(k)
-      }
-    this.nbr = nbr
+    for (let k = 0; k < N * N; k++) {
+      if (!road[k]) continue
+      if (net.kind[k] === JUNCTION) inter[k] = 1
+      roadCells.push(k)
+    }
     this.inter = inter
+    // every cell of one intersection shares the same signal timing
+    const phase = []
     this.signalOffset = new Float32Array(N * N)
-    for (let k = 0; k < N * N; k++) if (inter[k]) this.signalOffset[k] = rng() * 30
+    for (let k = 0; k < N * N; k++) {
+      const c = net.cluster[k]
+      if (c < 0) continue
+      if (phase[c] === undefined) phase[c] = rng() * 30
+      this.signalOffset[k] = phase[c]
+    }
 
     const base = { rural: [40, 110], metropolis: [230, 560], megacity: [440, 1150] }[city.type]
     // fewer people out late at night, rush-hour peaks in the morning and evening
@@ -116,18 +111,32 @@ export class CityLife {
 
     // ---------------- vehicles
     this.cars = []
-    const mix = city.type === 'rural' ? { sedan: 0.3, hatch: 0.2, suv: 0.3, van: 0.12, truck: 0.08 } : { sedan: 0.36, hatch: 0.22, suv: 0.2, van: 0.1, truck: 0.05, bus: 0.07 }
-    const usable = roadCells.filter((k) => nbr[k] && !inter[k] && !city.bridge[k])
-    for (let n = 0; n < counts[0] && usable.length; n++) {
+    const K = this.models
+    // detailed models (Quaternius)
+    const mix = K
+      ? city.type === 'rural'
+        ? { sedan: 0.32, hatch: 0.24, suv: 0.3, sports: 0.06, police: 0.04, ambulance: 0.02, schoolbus: 0.02 }
+        : { sedan: 0.26, hatch: 0.2, suv: 0.18, sports: 0.05, sports2: 0.04, taxi: city.type === 'megacity' ? 0.12 : 0.07, police: 0.03, ambulance: 0.02, bus: 0.05, schoolbus: 0.02 }
+      : city.type === 'rural'
+        ? { sedan: 0.3, hatch: 0.2, suv: 0.3, van: 0.12, truck: 0.08 }
+        : { sedan: 0.36, hatch: 0.22, suv: 0.2, van: 0.1, truck: 0.05, bus: 0.07 }
+    const lengthOf = (t) => (K && K.cars[t] ? K.cars[t].length : VEHICLE_LENGTH[t])
+    const usable = roadCells.filter((k) => carOut[k] && !inter[k] && !city.bridge[k])
+    this.usable = usable
+    const taken = new Set()
+    for (let n = 0, tries = 0; n < counts[0] && usable.length && tries < counts[0] * 4; tries++) {
       const k = usable[Math.floor(rng() * usable.length)]
-      const dirs = [0, 1, 2, 3].filter((d) => nbr[k] & (1 << d))
+      if (taken.has(k)) continue
+      taken.add(k)
+      n++
+      const dirs = [0, 1, 2, 3].filter((d) => carOut[k] & (1 << d))
       let r = rng()
       let type = 'sedan'
       for (const [t, w] of Object.entries(mix)) if ((r -= w) <= 0) {
         type = t
         break
       }
-      const heavy = type === 'bus' || type === 'truck'
+      const heavy = /bus|truck|garbage|fire|delivery/.test(type)
       this.cars.push({
         k,
         dir: dirs[Math.floor(rng() * dirs.length)],
@@ -135,23 +144,31 @@ export class CityLife {
         speed: 0,
         max: (heavy ? 9 : 10.5 + rng() * 4.5) * (city.type === 'megacity' ? 0.85 : 1),
         type,
-        len: VEHICLE_LENGTH[type],
-        color: type === 'bus' ? (rng() < 0.5 ? '#e0b12b' : '#d9dde0') : type === 'truck' ? '#f2f2f0' : pick(CAR_COLORS, rng),
+        len: lengthOf(type),
+        // detailed models keep their own livery unless the body is flagged as paint
+        color: K && K.cars[type] ? (K.cars[type].paint ? pick(CAR_COLORS, rng) : '#ffffff') : type === 'bus' ? (rng() < 0.5 ? '#e0b12b' : '#d9dde0') : type === 'truck' ? '#f2f2f0' : pick(CAR_COLORS, rng),
         x: 0,
         z: 0,
         y: 0,
         yaw: 0,
         state: 'drive',
+        id: n,
         occupants: type === 'bus' ? 12 + Math.floor(rng() * 20) : 1 + Math.floor(rng() * 2),
+        lane: rng() < 0.5 ? 0 : 1,
         wait: 0,
         roll: 0,
         init: true,
       })
     }
     this.vMeshes = {}
-    for (const type of VEHICLE_TYPES) {
+    for (const type of new Set([...VEHICLE_TYPES, ...Object.keys(mix)])) {
       const list = this.cars.filter((c) => c.type === type)
-      const mesh = new THREE.InstancedMesh(this.vehicleGeos[type], vehicleMaterial(this.world.envTexture), Math.max(1, list.length))
+      if (!list.length) continue
+      const km = K?.cars[type]
+      const geo = km ? km.geometry : this.vehicleGeos[type]
+      const mat = km ? vehicleModelMaterial(this.world.envTexture) : vehicleMaterial(this.world.envTexture)
+      const mesh = new THREE.InstancedMesh(geo, mat, list.length)
+      mesh.userData.sharedGeometry = true
       mesh.count = list.length
       mesh.castShadow = true
       list.forEach((c, i) => {
@@ -185,15 +202,19 @@ export class CityLife {
 
     // ---------------- pedestrians
     this.peds = []
-    const walkable = roadCells.filter((k) => nbr[k] && !inter[k])
+    const walkable = roadCells.filter((k) => this.walkOut[k] && !inter[k])
     for (let n = 0; n < counts[1] && walkable.length; n++) {
       const k = walkable[Math.floor(rng() * walkable.length)]
-      const dirs = [0, 1, 2, 3].filter((d) => nbr[k] & (1 << d))
+      const dirs = [0, 1, 2, 3].filter((d) => this.walkOut[k] & (1 << d))
+      const dir = dirs[Math.floor(rng() * dirs.length)]
+      let side = rng() < 0.5 ? 1 : -1
+      if (!net.hasWalk(k, dir, side)) side = -side
+      if (!net.hasWalk(k, dir, side)) continue
       this.peds.push({
         k,
-        dir: dirs[Math.floor(rng() * dirs.length)],
+        dir,
         t: rng(),
-        side: rng() < 0.5 ? 1 : -1,
+        side,
         speed: 1.15 + rng() * 0.5,
         x: 0,
         z: 0,
@@ -207,26 +228,39 @@ export class CityLife {
         plan: null,
       })
     }
-    const pg = this.personGeo.clone()
-    const np = Math.max(1, this.peds.length)
-    const pants = new Float32Array(np * 3)
-    const skin = new Float32Array(np * 3)
-    const hair = new Float32Array(np * 3)
-    this.pedWalk = new THREE.InstancedBufferAttribute(new Float32Array(np * 2), 2).setUsage(THREE.DynamicDrawUsage)
-    this.peds.forEach((p, i) => {
-      _c.set(pick(PANTS, rng)).toArray(pants, i * 3)
-      _c.set(pick(SKIN, rng)).toArray(skin, i * 3)
-      _c.set(pick(HAIR, rng)).toArray(hair, i * 3)
+    // one instanced mesh per character model, each with its own walk attribute
+    this.pedMeshes = []
+    const models = K ? K.people : [null]
+    models.forEach((model, mIdx) => {
+      const list = this.peds.filter((p, i) => i % models.length === mIdx)
+      if (!list.length) return
+      const n = list.length
+      const pg = model ? model.geometry.clone() : this.personGeo.clone()
+      const walk = new THREE.InstancedBufferAttribute(new Float32Array(n * 2), 2).setUsage(THREE.DynamicDrawUsage)
+      pg.setAttribute('aWalk', walk)
+      if (!model) {
+        const pants = new Float32Array(n * 3)
+        const skin = new Float32Array(n * 3)
+        const hair = new Float32Array(n * 3)
+        for (let i = 0; i < n; i++) {
+          _c.set(pick(PANTS, rng)).toArray(pants, i * 3)
+          _c.set(pick(SKIN, rng)).toArray(skin, i * 3)
+          _c.set(pick(HAIR, rng)).toArray(hair, i * 3)
+        }
+        pg.setAttribute('aPants', new THREE.InstancedBufferAttribute(pants, 3))
+        pg.setAttribute('aSkin', new THREE.InstancedBufferAttribute(skin, 3))
+        pg.setAttribute('aHair', new THREE.InstancedBufferAttribute(hair, 3))
+      }
+      const mesh = new THREE.InstancedMesh(pg, model ? personModelMaterial() : personMaterial(), n)
+      mesh.castShadow = false // shadows of 1.7 m figures are invisible from city height
+      list.forEach((p, i) => {
+        p.pm = this.pedMeshes.length
+        p.mi = i
+        mesh.setColorAt(i, model ? _c.setScalar(1) : _c.set(p.color))
+      })
+      this.pedMeshes.push({ mesh, walk })
+      this.group.add(mesh)
     })
-    pg.setAttribute('aPants', new THREE.InstancedBufferAttribute(pants, 3))
-    pg.setAttribute('aSkin', new THREE.InstancedBufferAttribute(skin, 3))
-    pg.setAttribute('aHair', new THREE.InstancedBufferAttribute(hair, 3))
-    pg.setAttribute('aWalk', this.pedWalk)
-    this.pedMesh = new THREE.InstancedMesh(pg, personMaterial(), np)
-    this.pedMesh.count = this.peds.length
-    this.pedMesh.castShadow = false // shadows of 1.7 m figures are invisible from city height
-    this.peds.forEach((p, i) => this.pedMesh.setColorAt(i, _c.set(p.color)))
-    this.group.add(this.pedMesh)
 
     this.buildStreetLights()
     this.buildSignals()
@@ -253,6 +287,8 @@ export class CityLife {
         const fi = i - DIRS[d][0]
         const fj = j - DIRS[d][1]
         if (fi < 0 || fj < 0 || fi >= GRID || fj >= GRID || !road[idx(fi, fj)]) continue
+        const fk = idx(fi, fj)
+        if (inter[fk] || !(this.carOut[fk] & (1 << d))) continue
         const [rx, rz] = right(d)
         const x = cellToWorld(i) - DIRS[d][0] * 4.7 + rx * 4.7
         const z = cellToWorld(j) - DIRS[d][1] * 4.7 + rz * 4.7
@@ -472,12 +508,15 @@ export class CityLife {
     const j = (k - i) / GRID
     const dx = Math.abs(x - cellToWorld(i))
     const dz = Math.abs(z - cellToWorld(j))
-    if (this.inter[k]) return !(dx > 2.8 && dz > 2.8)
-    const ew = this.nbr[k] & 0b0101
-    const ns = this.nbr[k] & 0b1010
-    if (ew && !ns) return dz < 2.8
-    if (ns && !ew) return dx < 2.8
-    return dx < 2.8 || dz < 2.8
+    const net = this.net
+    if (net.isJ(k)) return !(dx > 2.8 && dz > 2.8)
+    const perp = net.axis[k] === 1 ? z - cellToWorld(j) : x - cellToWorld(i)
+    if (net.kind[k] === AVENUE) {
+      // the median side is all carriageway; the sidewalk is on the outer side
+      const toTwin = DIRS[net.twin[k]][net.axis[k] === 1 ? 1 : 0]
+      return perp * toTwin > -2.8
+    }
+    return Math.abs(perp) < 2.8
   }
 
   blockAround(b) {
@@ -545,8 +584,8 @@ export class CityLife {
     this.updateCars(dt, ctx, shaking)
     this.updatePeds(dt, ctx, shaking)
     this.carLights.material.uniforms.uNight.value = ctx.night
-    this.lampGlow.material.uniforms.uNight.value = ctx.night
-    this.lampHeadMat.emissiveIntensity = ctx.night * 3
+    this.lampGlow.material.uniforms.uNight.value = ctx.night * 0.45
+    this.lampHeadMat.emissiveIntensity = ctx.night * 1.2
   }
 
   pedAhead(c, k, fx, fz, rx, rz) {
@@ -561,13 +600,27 @@ export class CityLife {
   }
 
   updateCars(dt, ctx, shaking) {
-    const { cars, nbr, inter, blocked } = this
-    const lanes = new Map()
+    const { cars, inter, blocked, net } = this
+    const grid = new Map()
+    const byCluster = new Map()
+    const byCell = new Map()
+    this.byCell = byCell
     for (const c of cars) {
-      if (c.state !== 'drive') continue
-      const key = c.k * 4 + c.dir
-      let a = lanes.get(key)
-      if (!a) lanes.set(key, (a = []))
+      if (c.state === 'drive') {
+        let b = byCell.get(c.k)
+        if (!b) byCell.set(c.k, (b = []))
+        b.push(c)
+      }
+      if (c.state === 'drive' && inter[c.k]) {
+        const cl = net.cluster[c.k]
+        let b = byCluster.get(cl)
+        if (!b) byCluster.set(cl, (b = []))
+        b.push(c)
+      }
+      if (c.init) continue
+      const key = this.cellOf(c.x, c.z)
+      let a = grid.get(key)
+      if (!a) grid.set(key, (a = []))
       a.push(c)
     }
     const fire = this.world.fire
@@ -585,72 +638,63 @@ export class CityLife {
         }
       }
       if (c.state === 'drive') {
+        if (!c.path) this.enterCell(c, c.k, c.dir, null)
         const [dx, dz] = DIRS[c.dir]
         const nk = idx(clamp(ci + dx, 0, GRID - 1), clamp(cj + dz, 0, GRID - 1))
         let desired = c.max
         if (shaking > 0.02) desired = 0
         else if (ctx.quake && ctx.quakeT > 0) desired = c.max * 0.45
         if (ctx.flood && ctx.rain > 25) desired *= 0.7
-        if (inter[c.k]) desired = Math.min(desired, 8) // slow through junctions
-        // vehicle ahead in the same lane
-        let gap = 99
-        for (const o of lanes.get(c.k * 4 + c.dir) || []) if (o !== c && o.t > c.t) gap = Math.min(gap, (o.t - c.t) * CELL - (o.len + c.len) / 2)
-        for (const o of lanes.get(nk * 4 + c.dir) || []) gap = Math.min(gap, (1 - c.t + o.t) * CELL - (o.len + c.len) / 2)
-        if (gap < 12) desired = Math.min(desired, Math.max(0, (gap - 2) * 1.2))
-        // people on the road ahead: always yield
+        // slow for corners: tighter arcs, lower speed
+        if (c.path.turn) desired = Math.min(desired, c.path.turn === 2 ? 3 : c.path.radius < 4 ? 4.5 : 7)
+        else if (inter[c.k]) desired = Math.min(desired, 9)
+        // following: vehicles ahead on our own path
+        const { gap } = this.clearAhead(c, grid, inter[c.k])
+        if (gap < 30) desired = Math.min(desired, Math.sqrt(2 * 5.5 * Math.max(0, gap - 2.0)))
+        if (gap < 0.3) c.speed = 0
+        // people in the road ahead: always yield
         const [rx, rz] = right(c.dir)
         const fx = Math.cos(c.yaw)
         const fz = -Math.sin(c.yaw)
         const ped = Math.min(this.pedAhead(c, c.k, fx, fz, rx, rz), this.pedAhead(c, nk, fx, fz, rx, rz))
         if (ped < 10) desired = Math.min(desired, Math.max(0, (ped - 1.5) * 1.1))
-        // traffic signals and debris in the road
-        if (c.t < 0.5 && !inter[c.k]) {
-          const stop = (0.45 - c.t) * CELL
-          let mustStop = blocked[nk]
-          if (inter[nk]) {
-            const st = this.signalState(nk, c.dir)
-            if (st === 'R' || (st === 'Y' && c.t < 0.3)) mustStop = true
-          }
-          if (mustStop) desired = Math.min(desired, Math.max(0, stop * 0.8))
+        // decide the turn before reaching the intersection
+        if (inter[nk] && !inter[c.k] && c.planK !== nk) {
+          const r = Math.random()
+          c.planK = nk
+          c.planDir = r < 0.6 ? c.dir : r < 0.8 ? (c.dir + 1) % 4 : (c.dir + 3) % 4
+          if (this.deadAhead(this.turnExit(nk, c.dir, c.planDir), c.planDir)) c.planDir = c.dir
         }
+        // approaching an intersection: signal, then right of way
+        if (inter[nk] && !inter[c.k]) {
+          const stopAt = Math.max(0, (0.42 - c.t) * c.path.len)
+          let hold = !!blocked[nk]
+          const st = this.signalState(nk, c.dir)
+          if (st === 'R' || (st === 'Y' && c.t < 0.3)) hold = true
+          if (!hold && c.t > 0.15) hold = !this.mayEnter(c, nk, byCluster, byCell, st)
+          if (hold) {
+            c.gateWait = (c.gateWait || 0) + dt
+            desired = Math.min(desired, Math.sqrt(2 * 5.5 * stopAt))
+            if (c.t >= 0.42) desired = 0
+          } else c.gateWait = 0
+        } else if (blocked[nk]) desired = Math.min(desired, Math.sqrt(2 * 5.5 * Math.max(0, (0.42 - c.t) * c.path.len)))
         if (desired < 0.3 && c.speed < 0.3) c.wait += dt
         else c.wait = 0
-        if (c.wait > 25 && gap < 12 && !blocked[nk] && ped > 10) desired = 2 // creep past a jam
+        if (c.wait > 90) this.respawn(c) // last resort: wreckage has sealed the road
         const acc = desired > c.speed ? 2.2 : 6.5
         c.speed += clamp(desired - c.speed, -acc * dt, acc * dt)
-        c.t += (c.speed * dt) / CELL
+        c.t += (c.speed * dt) / c.path.len
         if (c.t >= 1) {
-          c.t -= 1
-          c.k = nk
-          const back = (c.dir + 2) % 4
-          const ni = nk % GRID
-          const nj = Math.floor(nk / GRID)
-          const opts = [0, 1, 2, 3].filter((d) => d !== back && nbr[nk] & (1 << d) && !blocked[idx(ni + DIRS[d][0], nj + DIRS[d][1])])
-          if (!opts.length) c.dir = back
-          else if (opts.includes(c.dir) && Math.random() < 0.6) {
-            /* straight on */
-          } else c.dir = opts[Math.floor(Math.random() * opts.length)]
-          if (!(nbr[nk] & (1 << c.dir))) c.dir = back
+          const p3 = c.path.p3
+          const inDir = c.dir
+          c.t = (c.t - 1) * (c.path.len / 10)
+          this.enterCell(c, nk, inDir, p3)
         }
-        const ii = c.k % GRID
-        const jj = (c.k - ii) / GRID
-        const [ex, ez] = DIRS[c.dir]
-        const [lx, lz] = right(c.dir)
-        const tx = cellToWorld(ii) + ex * (c.t - 0.5) * CELL + lx * LANE
-        const tz = cellToWorld(jj) + ez * (c.t - 0.5) * CELL + lz * LANE
-        const targetYaw = Math.atan2(-ez, ex)
-        if (c.init) {
-          c.x = tx
-          c.z = tz
-          c.yaw = targetYaw
-          c.init = false
-        }
-        const k = Math.min(1, dt * 6)
-        c.x += (tx - c.x) * k
-        c.z += (tz - c.z) * k
-        let dy = targetYaw - c.yaw
-        dy = Math.atan2(Math.sin(dy), Math.cos(dy))
-        c.yaw += dy * Math.min(1, dt * 5)
+        const pt = this.pathPoint(c.path, Math.min(1, c.t))
+        c.x = pt.x
+        c.z = pt.z
+        c.yaw = pt.yaw
+        if (c.init) c.init = false
         c.y = this.heightAt(this.cellOf(c.x, c.z), c.x, c.z)
         c.roll = 0
       } else if (c.state === 'float') {
@@ -709,6 +753,293 @@ export class CityLife {
     this.carLights.geometry.attributes.position.needsUpdate = true
   }
 
+  /** Distance to the nearest vehicle in our path (bumper to bumper), and which one. */
+  clearAhead(c, grid, inJunction) {
+    const fx = Math.cos(c.yaw)
+    const fz = -Math.sin(c.yaw)
+    const ci = Math.floor((c.x + HALF) / CELL)
+    const cj = Math.floor((c.z + HALF) / CELL)
+    let gap = 99
+    let blocker = null
+    const halfW = c.len > 8 ? 1.3 : 1.0
+    for (let dj = -2; dj <= 2; dj++)
+      for (let di = -2; di <= 2; di++) {
+        const ii = ci + di
+        const jj = cj + dj
+        if (ii < 0 || jj < 0 || ii >= GRID || jj >= GRID) continue
+        for (const o of grid.get(idx(ii, jj)) || []) {
+          if (o === c) continue
+          const dx = o.x - c.x
+          const dz = o.z - c.z
+          const along = dx * fx + dz * fz
+          const lat = Math.abs(dx * fz - dz * fx)
+          if (along <= 0 || along > 24) continue
+          // follow traffic going our way; crossing traffic is handled by right of way,
+          // except a vehicle stopped right across our path
+          const cosRel = Math.cos(o.yaw - c.yaw)
+          const moving = o.state === 'drive' && o.speed > 0.5
+          if (cosRel < 0.4 && (moving || inJunction || along > 8)) continue
+          // the other vehicle's half-width across our path depends on its heading
+          const rel = Math.abs(Math.sin(o.yaw - c.yaw))
+          const oHalf = (o.len > 8 ? 1.3 : 1.0) * (1 - rel) + (o.len / 2) * rel
+          if (lat > halfW + oHalf + 0.25) continue
+          const g = along - c.len / 2 - ((o.len / 2) * (1 - rel) + (o.len > 8 ? 1.3 : 1.0) * rel)
+          if (g < gap) {
+            gap = g
+            blocker = o
+          }
+        }
+      }
+    // while turning, also look where the curve ends: someone just inside the street we're turning into
+    if (c.path?.turn) {
+      const p3 = c.path.p3
+      const ex = DIRS[c.dir][0]
+      const ez = DIRS[c.dir][1]
+      const remaining = (1 - c.t) * c.path.len
+      const ii = Math.floor((p3.x + HALF) / CELL)
+      const jj = Math.floor((p3.z + HALF) / CELL)
+      for (let dj = -1; dj <= 1; dj++)
+        for (let di = -1; di <= 1; di++) {
+          const a = ii + di
+          const b = jj + dj
+          if (a < 0 || b < 0 || a >= GRID || b >= GRID) continue
+          for (const o of grid.get(idx(a, b)) || []) {
+            if (o === c) continue
+            const ax = o.x - p3.x
+            const az = o.z - p3.z
+            const along = ax * ex + az * ez
+            const lat = Math.abs(ax * ez - az * ex)
+            if (lat > 1.8 || along < -o.len || along > 12) continue
+            const g = remaining + along - (o.len + c.len) / 2
+            if (g < gap) {
+              gap = g
+              blocker = o
+            }
+          }
+        }
+    }
+    return { gap, blocker }
+  }
+
+  /** Offset from the cell centre line (to the right of travel) for a lane. */
+  laneOffset(k, lane) {
+    if (this.net.kind[k] === AVENUE) return lane ? -2.4 : 1.1
+    return LANE
+  }
+
+  /** Check the mirrors: is the other lane clear beside and ahead of us? */
+  laneFree(c, k, next, dir, lane) {
+    for (const cell of [k, next, c.prevK ?? k]) {
+      for (const o of this.byCell?.get(cell) || []) {
+        if (o === c || o.dir !== dir) continue
+        if (o.lane === lane || o.path?.turn) return false
+      }
+    }
+    return true
+  }
+
+  /** Does driving from cell k in direction d only lead to a dead end? */
+  deadAhead(k, d) {
+    const key = k * 4 + d
+    if (!this.deadCache) this.deadCache = new Map()
+    let v = this.deadCache.get(key)
+    if (v !== undefined) return v
+    v = false
+    let cell = k
+    for (let q = 0; q < 40; q++) {
+      const kind = this.net.kind[cell]
+      if (kind === END) {
+        v = true
+        break
+      }
+      if (kind === JUNCTION || kind === BEND || !this.road[cell]) break
+      const i = (cell % GRID) + DIRS[d][0]
+      const j = Math.floor(cell / GRID) + DIRS[d][1]
+      if (i < 0 || j < 0 || i >= GRID || j >= GRID) break
+      cell = idx(i, j)
+    }
+    this.deadCache.set(key, v)
+    return v
+  }
+
+  /** First cell past the intersection that starts at k when travelling dir. */
+  beyond(k, dir) {
+    let cell = k
+    for (let q = 0; q < 4 && this.inter[cell]; q++) {
+      const i = (cell % GRID) + DIRS[dir][0]
+      const j = Math.floor(cell / GRID) + DIRS[dir][1]
+      if (i < 0 || j < 0 || i >= GRID || j >= GRID) break
+      cell = idx(i, j)
+    }
+    return cell
+  }
+
+  /**
+   * Enter cell k having travelled inDir. Chooses where to leave (straight, turn,
+   * U-turn at a dead end), which lane, and builds the curve from p0 (the end
+   * of the previous curve) to the exit edge.
+   */
+  enterCell(c, k, inDir, p0) {
+    const { carOut, inter, blocked, net } = this
+    const prevK = c.k
+    c.prevK = prevK
+    const entering = inter[k] && !inter[prevK]
+    c.k = k
+    const i = k % GRID
+    const j = (k - i) / GRID
+    const back = (inDir + 2) % 4
+    const opts = [0, 1, 2, 3].filter((d) => d !== back && carOut[k] & (1 << d) && !blocked[idx(i + DIRS[d][0], j + DIRS[d][1])])
+    if (entering) {
+      c.entryDir = inDir
+      c.exitDir = c.planK === k ? c.planDir : inDir
+    }
+    // drivers avoid streets that only lead to a dead end
+    const through = opts.filter((d) => !this.deadAhead(idx(i + DIRS[d][0], j + DIRS[d][1]), d))
+    const pickFrom = through.length ? through : opts
+    let dir = inDir
+    if (!opts.length) dir = carOut[k] & (1 << back) ? back : inDir
+    else if (inter[k]) {
+      if (opts.includes(c.exitDir)) dir = c.exitDir
+      else if (!opts.includes(inDir)) dir = c.exitDir = pickFrom[Math.floor(Math.random() * pickFrom.length)]
+      if (through.length && !through.includes(dir)) dir = c.exitDir = through.includes(inDir) ? inDir : through[Math.floor(Math.random() * through.length)]
+    } else if (!(pickFrom.includes(inDir) && Math.random() < 0.7)) dir = pickFrom[Math.floor(Math.random() * pickFrom.length)]
+    if (!inter[k]) c.entryDir = c.exitDir = -1
+    c.dir = dir
+    // lane at the exit edge
+    const ni = i + DIRS[dir][0]
+    const nj = j + DIRS[dir][1]
+    const next = ni >= 0 && nj >= 0 && ni < GRID && nj < GRID ? idx(ni, nj) : k
+    const roadAhead = inter[next] ? this.beyond(next, dir) : next
+    const avenueAhead = net.kind[roadAhead] === AVENUE || net.kind[k] === AVENUE
+    if (!avenueAhead) c.lane = 0
+    else if (dir !== inDir) c.lane = dir === (inDir + 1) % 4 ? 0 : 1 // right turns into the kerb lane, left into the inner lane
+    else if (net.kind[k] === AVENUE && Math.random() < 0.12 && this.laneFree(c, k, next, dir, 1 - c.lane)) c.lane = 1 - c.lane // occasional, gradual lane change
+    else if (net.kind[prevK] !== AVENUE && net.kind[k] === AVENUE) c.lane = Math.random() < 0.5 ? 0 : 1
+    const offOut = avenueAhead ? (c.lane ? -2.4 : 1.1) : LANE
+    const [ex, ez] = DIRS[dir]
+    const [rx, rz] = right(dir)
+    const cx = cellToWorld(i)
+    const cz = cellToWorld(j)
+    const p3 = { x: cx + ex * CELL * 0.5 + rx * offOut, z: cz + ez * CELL * 0.5 + rz * offOut }
+    if (!p0) {
+      const [qx, qz] = right(inDir)
+      const off = this.laneOffset(k, c.lane)
+      p0 = { x: cx - DIRS[inDir][0] * CELL * 0.5 + qx * off, z: cz - DIRS[inDir][1] * CELL * 0.5 + qz * off }
+    }
+    const [ix, iz] = DIRS[inDir]
+    let p1
+    let p2
+    let turn = 0
+    if (dir === inDir) {
+      p1 = { x: p0.x + ix * CELL * 0.35, z: p0.z + iz * CELL * 0.35 }
+      p2 = { x: p3.x - ex * CELL * 0.35, z: p3.z - ez * CELL * 0.35 }
+    } else if (dir === back) {
+      turn = 2 // U-turn
+      p1 = { x: p0.x + ix * 6, z: p0.z + iz * 6 }
+      p2 = { x: p3.x - ex * 6, z: p3.z - ez * 6 }
+    } else {
+      turn = 1
+      const a = Math.abs((p3.x - p0.x) * ix + (p3.z - p0.z) * iz)
+      const b = Math.abs((p3.x - p0.x) * ex + (p3.z - p0.z) * ez)
+      p1 = { x: p0.x + ix * a * 0.55, z: p0.z + iz * a * 0.55 }
+      p2 = { x: p3.x - ex * b * 0.55, z: p3.z - ez * b * 0.55 }
+    }
+    const path = { p0, p1, p2, p3, turn, radius: turn === 1 ? Math.min(Math.abs((p3.x - p0.x) * ix + (p3.z - p0.z) * iz), Math.abs((p3.x - p0.x) * ex + (p3.z - p0.z) * ez)) : 99, len: 0 }
+    let len = 0
+    let prev = p0
+    for (let q = 1; q <= 8; q++) {
+      const pt = this.pathPoint(path, q / 8)
+      len += Math.hypot(pt.x - prev.x, pt.z - prev.z)
+      prev = pt
+    }
+    path.len = Math.max(1, len)
+    c.path = path
+  }
+
+  /** Position and heading on a cubic Bézier path. */
+  pathPoint(p, t) {
+    const u = 1 - t
+    const a = u * u * u
+    const b = 3 * u * u * t
+    const cc = 3 * u * t * t
+    const d = t * t * t
+    const x = a * p.p0.x + b * p.p1.x + cc * p.p2.x + d * p.p3.x
+    const z = a * p.p0.z + b * p.p1.z + cc * p.p2.z + d * p.p3.z
+    const tx = 3 * u * u * (p.p1.x - p.p0.x) + 6 * u * t * (p.p2.x - p.p1.x) + 3 * t * t * (p.p3.x - p.p2.x)
+    const tz = 3 * u * u * (p.p1.z - p.p0.z) + 6 * u * t * (p.p2.z - p.p1.z) + 3 * t * t * (p.p3.z - p.p2.z)
+    return { x, z, yaw: Math.atan2(-tz, tx) }
+  }
+
+  /**
+   * Right of way at an intersection: no conflicting movement inside it, room
+   * to leave it (don't block the box), and left turns yield to oncoming traffic.
+   */
+  mayEnter(c, nk, byCluster, byCell, signal) {
+    const { inter, net } = this
+    const opp = (c.dir + 2) % 4
+    const left = (c.dir + 3) % 4
+    const myTurn = c.planK === nk ? c.planDir : c.dir
+    for (const o of byCluster.get(net.cluster[nk]) || []) {
+      if (o === c || o.entryDir === c.dir) continue
+      const oStraight = o.exitDir === o.entryDir
+      const oRight = o.exitDir === (o.entryDir + 1) % 4
+      const meStraight = myTurn === c.dir
+      const meRight = myTurn === (c.dir + 1) % 4
+      if (o.entryDir === opp && (oStraight || oRight) && (meStraight || meRight)) continue // opposite flows don't cross
+      return false
+    }
+    // room on the far side?
+    const exitCell = this.beyond(nk, c.dir)
+    const target = myTurn === c.dir ? exitCell : this.turnExit(nk, c.dir, myTurn)
+    for (const o of byCell.get(target) || []) if (o.dir === myTurn && o.t < 0.6 && o.speed < 2) return false
+    // a left turn waits for a gap in oncoming traffic (unless the light is ending)
+    if (myTurn === left && signal === 'G') {
+      const oncoming = this.beyond(nk, c.dir)
+      for (const cell of [oncoming]) {
+        for (const o of byCell.get(cell) || []) {
+          if (o.dir !== opp || o.speed < 0.5) continue
+          const oTurn = o.planK >= 0 && inter[o.planK] && net.cluster[o.planK] === net.cluster[nk] ? o.planDir : o.dir
+          if (oTurn !== (opp + 3) % 4) return false
+        }
+      }
+      for (const o of byCluster.get(net.cluster[nk]) || []) if (o.entryDir === opp) return false
+    }
+    return true
+  }
+
+  /** Cell where a turning vehicle leaves the intersection that starts at nk. */
+  turnExit(nk, inDir, outDir) {
+    let cell = nk
+    for (let q = 0; q < 4 && this.inter[cell]; q++) {
+      if (this.carOut[cell] & (1 << outDir)) return this.beyond(cell, outDir)
+      const i = (cell % GRID) + DIRS[inDir][0]
+      const j = Math.floor(cell / GRID) + DIRS[inDir][1]
+      if (i < 0 || j < 0 || i >= GRID || j >= GRID) break
+      cell = idx(i, j)
+    }
+    return cell
+  }
+
+  /** A car with nowhere to go reappears somewhere else on the network. */
+  respawn(c) {
+    let k = this.usable[0]
+    for (let tries = 0; tries < 30; tries++) {
+      k = this.usable[Math.floor(Math.random() * this.usable.length)]
+      const x = cellToWorld(k % GRID)
+      const z = cellToWorld(Math.floor(k / GRID))
+      if (!this.cars.some((o) => o !== c && Math.abs(o.x - x) < 9 && Math.abs(o.z - z) < 9)) break
+    }
+    const dirs = [0, 1, 2, 3].filter((d) => this.carOut[k] & (1 << d))
+    c.dir = dirs[Math.floor(Math.random() * dirs.length)]
+    c.t = 0.5
+    c.speed = 0
+    c.wait = 0
+    c.planK = -1
+    c.k = k
+    this.enterCell(c, k, c.dir, null)
+    c.init = true
+  }
+
   /** Point on the sidewalk path for (cell, direction, progress, side). */
   walkPoint(k, dir, t, side) {
     const i = k % GRID
@@ -720,7 +1051,8 @@ export class CityLife {
 
   /** Choose what to do at the end of a block: cross on the green, turn the corner, or cross this street. */
   planAtCorner(p, nk) {
-    const { nbr } = this
+    const nbr = this.walkOut
+    const net = this.net
     const ni = nk % GRID
     const nj = Math.floor(nk / GRID)
     const [rx, rz] = right(p.dir)
@@ -732,17 +1064,21 @@ export class CityLife {
       const tk = idx(ni + DIRS[turnDir][0], nj + DIRS[turnDir][1])
       const [nrx, nrz] = right(turnDir)
       const back = DIRS[(p.dir + 2) % 4]
-      return { kind: 'turn', dir: turnDir, k: tk, side: Math.sign(nrx * back[0] + nrz * back[1]) || 1 }
+      const side = Math.sign(nrx * back[0] + nrz * back[1]) || 1
+      if (!net.isJ(tk) && net.hasWalk(tk, turnDir, side)) return { kind: 'turn', dir: turnDir, k: tk, side }
     }
     if (canStraight && r < 0.85) return { kind: 'straight' }
-    return { kind: 'cross' } // cross the street we are on, then walk back
+    // cross the street we are on, then walk back — never across a divided avenue
+    if (net.kind[p.k] === STREET && net.hasWalk(p.k, (p.dir + 2) % 4, p.side)) return { kind: 'cross' }
+    return canStraight ? { kind: 'straight' } : { kind: 'back' }
   }
 
   updatePeds(dt, ctx, shaking) {
-    const { peds, nbr, city, inter } = this
+    const { peds, city, inter, net } = this
+    const nbr = this.walkOut
     const quakeAlarm = shaking > 0.03 || (ctx.quake && ctx.quakeT > 0)
-    const walkAttr = this.pedWalk.array
-    peds.forEach((p, n) => {
+
+    peds.forEach((p) => {
       const k = this.cellOf(p.x, p.z)
       const i = k % GRID
       const j = (k - i) / GRID
@@ -816,6 +1152,11 @@ export class CityLife {
               p.side = p.plan.side
               p.t = 0
               p.plan = null
+            } else if (!hold && p.plan.kind === 'back') {
+              p.dir = (p.dir + 2) % 4
+              p.side = -p.side
+              p.t = 1 - p.t
+              p.plan = null
             } else if (!hold && p.plan.kind === 'cross') {
               // walk across the road we're on (cars on it are held at the red)
               p.dir = (p.dir + 2) % 4
@@ -854,6 +1195,7 @@ export class CityLife {
                 p.side = best
                 p.t = 0.5
               }
+              if (!net.isJ(p.k) && !net.hasWalk(p.k, p.dir, p.side)) p.side = -p.side
             }
             const [nx, nz] = this.walkPoint(p.k, p.dir, p.t, p.side)
             p.yaw = Math.atan2(-(nz - p.z), nx - p.x) || p.yaw
@@ -914,12 +1256,15 @@ export class CityLife {
       const s = hidden ? 0 : 1
       _s.set(s, s, s)
       _m.compose(_p, _q, _s)
-      this.pedMesh.setMatrixAt(n, _m)
-      walkAttr[n * 2] = p.phase
-      walkAttr[n * 2 + 1] = lying ? 0 : stride
+      const pm = this.pedMeshes[p.pm]
+      pm.mesh.setMatrixAt(p.mi, _m)
+      pm.walk.array[p.mi * 2] = p.phase
+      pm.walk.array[p.mi * 2 + 1] = lying ? 0 : stride
     })
-    this.pedMesh.instanceMatrix.needsUpdate = true
-    this.pedWalk.needsUpdate = true
+    for (const pm of this.pedMeshes) {
+      pm.mesh.instanceMatrix.needsUpdate = true
+      pm.walk.needsUpdate = true
+    }
   }
 
   steer(p, tx, tz, speed, dt) {

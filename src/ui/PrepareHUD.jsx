@@ -1,6 +1,6 @@
 import { TOOLS } from '../engine/game.js'
 import { UPGRADES, CONSTRUCTION } from '../engine/config.js'
-import { Row, BuildingPanel, WorldToggle } from './common.jsx'
+import { Row, BuildingPanel, WorldToggle, ModelToggle } from './common.jsx'
 import { fmtInt, fmtMoney } from '../engine/math.js'
 
 const GROUPS = ['General', 'Build', 'Flood', 'Quake']
@@ -157,6 +157,7 @@ export default function PrepareHUD({ s, game }) {
             {disaster === 'quake' ? 'Seismic risk map' : 'Flood risk map'}
           </button>
           <WorldToggle s={s} game={game} />
+          <ModelToggle s={s} game={game} />
           <button onClick={() => game.newGame({ ...s.settings, seed: Math.floor(Math.random() * 999999) })} className="rounded-md px-3 py-1.5 text-sm text-slate-300 hover:bg-slate-700/60">
             New map
           </button>

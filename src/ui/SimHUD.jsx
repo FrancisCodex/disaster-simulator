@@ -1,5 +1,5 @@
 import { SPEEDS } from '../engine/config.js'
-import { Stat, BuildingPanel, WorldToggle } from './common.jsx'
+import { Stat, BuildingPanel, WorldToggle, ModelToggle } from './common.jsx'
 import { fmtInt, fmtMoney } from '../engine/math.js'
 
 const fmtT = (t) => {
@@ -53,6 +53,7 @@ export default function SimHUD({ s, game }) {
             {quake ? 'Damage view' : 'Flood depth view'}
           </button>
           <WorldToggle s={s} game={game} />
+          <ModelToggle s={s} game={game} />
         </div>
       </div>
 

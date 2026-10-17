@@ -255,13 +255,21 @@ export class Rain {
   }
 
   reset(i, cx, cz, randomY) {
-    const x = cx + (Math.random() - 0.5) * 700
-    const z = cz + (Math.random() - 0.5) * 700
-    const y = randomY ? Math.random() * 320 : 320
+    let x = cx + (Math.random() - 0.5) * 700
+    let z = cz + (Math.random() - 0.5) * 700
+    if (this.bounds) {
+      x = Math.max(-this.bounds, Math.min(this.bounds, x))
+      z = Math.max(-this.bounds, Math.min(this.bounds, z))
+    }
+    const top = (this.ground ? this.ground(x, z) : 0) + 320
+    const y = randomY ? top - Math.random() * 320 : top
     this.pos.set([x, y, z, x + 0.4, y - 4, z], i * 6)
   }
 
-  update(dt, intensity, center) {
+  /** ground(x,z): surface height so drops stop on roofs and roads; bounds: keep rain over the district only (cut-away view). */
+  update(dt, intensity, center, ground = null, bounds = 0) {
+    this.ground = ground
+    this.bounds = bounds
     const n = Math.min(this.max, Math.round(intensity * 140))
     this.count = n
     this.geo.setDrawRange(0, n * 2)
@@ -272,7 +280,10 @@ export class Rain {
     for (let i = 0; i < n; i++) {
       p[i * 6 + 1] -= fall
       p[i * 6 + 4] -= fall
-      if (p[i * 6 + 4] < center.y - 20) this.reset(i, center.x, center.z, false)
+      const x = p[i * 6]
+      const z = p[i * 6 + 2]
+      const floor = ground ? ground(x, z) : center.y - 20
+      if (p[i * 6 + 4] < floor) this.reset(i, center.x, center.z, false)
     }
     this.geo.attributes.position.needsUpdate = true
   }

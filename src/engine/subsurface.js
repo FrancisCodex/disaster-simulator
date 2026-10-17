@@ -144,7 +144,7 @@ export class Subsurface {
     }
     const bottom = new THREE.Mesh(new THREE.PlaneGeometry(GRID * CELL, GRID * CELL).rotateX(Math.PI / 2).translate(0, BOTTOM, 0), new THREE.MeshStandardMaterial({ color: 0x2e2b29, roughness: 1 }))
     this.group.add(bottom)
-    this.label = new THREE.Sprite(new THREE.SpriteMaterial({ transparent: true, depthTest: false }))
+    this.label = new THREE.Sprite(new THREE.SpriteMaterial({ transparent: true }))
     this.label.visible = false
     this.label.renderOrder = 20
     this.group.add(this.label)
