@@ -1,6 +1,40 @@
 import { SPEEDS } from '../engine/config.js'
-import { Stat, BuildingPanel, WorldToggle, ModelToggle } from './common.jsx'
+import { Stat, BuildingPanel, ModelToggle } from './common.jsx'
 import { fmtInt, fmtMoney } from '../engine/math.js'
+
+/** How the people outside are reacting: calm → frightened → fleeing → panicking. */
+function PanicBar({ p }) {
+  if (!p || !p.outside) return null
+  const parts = [
+    ['calm', p.calm, 'bg-emerald-500'],
+    ['frightened', p.alarmed, 'bg-amber-400'],
+    ['fleeing', p.fleeing, 'bg-orange-500'],
+    ['panicking', p.panicking, 'bg-red-500'],
+  ]
+  return (
+    <div className="mt-2">
+      <div className="text-[11px] tracking-wider text-slate-400 uppercase">People outside</div>
+      <div className="mt-1 flex h-2 overflow-hidden rounded bg-slate-700">
+        {parts.map(([k, n, c]) => (
+          <div key={k} className={`${c} h-full transition-all`} style={{ width: `${(n / p.outside) * 100}%` }} title={`${k}: ${n}`} />
+        ))}
+      </div>
+      <div className="mt-1 text-[11px] text-slate-400">
+        {parts
+          .filter(([, n]) => n > 0)
+          .map(([k, n]) => `${Math.round((n / p.outside) * 100)}% ${k}`)
+          .join(' · ')}
+        {(p.carsStopped > 0 || p.carsAbandoned > 0) && (
+          <div>
+            {p.carsStopped > 0 && `${p.carsStopped} cars pulled over`}
+            {p.carsStopped > 0 && p.carsAbandoned > 0 && ' · '}
+            {p.carsAbandoned > 0 && <span className="text-orange-300">{p.carsAbandoned} abandoned</span>}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
 
 const fmtT = (t) => {
   const h = Math.floor(t / 3600)
@@ -52,7 +86,6 @@ export default function SimHUD({ s, game }) {
           <button onClick={() => game.toggleOverlay()} className={`rounded-md px-3 py-1.5 text-sm ${s.overlay ? 'bg-amber-500/25 text-amber-200 ring-1 ring-amber-400' : 'text-slate-300 hover:bg-slate-700/60'}`}>
             {quake ? 'Integrity view' : 'Flood depth view'}
           </button>
-          <WorldToggle s={s} game={game} />
           <ModelToggle s={s} game={game} />
         </div>
       </div>
@@ -115,6 +148,12 @@ export default function SimHUD({ s, game }) {
                       {T.leaning > 0 && ` · ${T.leaning} leaning`}
                     </div>
                   )}
+                  {quake.bridges > 0 && (
+                    <div className="mt-1 text-xs text-red-300">
+                      {quake.bridges} bridge{quake.bridges > 1 ? 's' : ''} closed{quake.bridgesDown ? `, ${quake.bridgesDown} collapsed` : ''}
+                    </div>
+                  )}
+                  <PanicBar p={quake.panic} />
                 </>
               )}
             </div>

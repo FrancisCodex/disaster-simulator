@@ -14,6 +14,7 @@ import { loadModels } from './quaternius.js'
 
 const HALF = (GRID * CELL) / 2
 const PX = 16 // terrain texture pixels per cell
+const OFF_BLOCK = { y: -1e6, bid: -1 }
 const OUTER = 3600 // half-size of the surrounding landscape (m)
 const _m = new THREE.Matrix4()
 const _r = new THREE.Matrix4()
@@ -122,7 +123,10 @@ export class World {
     this.smoke = new Particles(scene, 3500, false)
     this.dust = new Particles(scene, 4000, false)
     this.debris = new Debris(scene, 6000)
-    this.debris.surfaceAt = (x, z, src) => this.surfaceAt(x, z, src)
+    // there is no ground beyond the cut-away block: debris thrown past the edge falls away
+    this.debris.surfaceAt = (x, z, src) => (Math.abs(x) > HALF || Math.abs(z) > HALF ? OFF_BLOCK : this.surfaceAt(x, z, src))
+    this.debris.edgeAt = (x, z) => this.groundAt(x, z)
+    this.debris.half = HALF
     this.debris.onLand = (it, v, bid) => this.debrisLanded(it, v, bid)
     this.debris.onShatter = (it) => this.shatter(it)
     this.rain = new Rain(scene)
@@ -137,7 +141,9 @@ export class World {
       if (this.useModels !== false) this.life.models = m
       this.onAssetsLoaded?.()
     })
-    this.showWorld = true
+    // the district is always shown as a cut-away block; the generated landscape
+    // around it is switched off for now (fewer generated assets, faster)
+    this.showWorld = false
     this.blockShake = new THREE.Vector3()
 
     this.highlight = new THREE.LineSegments(
@@ -1144,17 +1150,33 @@ export class World {
       const x1 = cellToWorld(sp.i1) - CELL * 0.35
       const z = cellToWorld(sp.j)
       const segs = Math.max(4, Math.round((x1 - x0) / 4))
+      const drop = this.bridgeDrop(sp, x0, x1)
       for (let q = 0; q < segs; q++) {
         const xa = x0 + ((x1 - x0) * q) / segs
         const xb = x0 + ((x1 - x0) * (q + 1)) / segs
         const ya = this.deckAt(xa, z)
         const yb = this.deckAt(xb, z)
         const len = Math.hypot(xb - xa, yb - ya) + 0.05
-        const rz = Math.atan2(yb - ya, xb - xa)
+        let rz = Math.atan2(yb - ya, xb - xa)
         const xm = (xa + xb) / 2
-        const ym = (ya + yb) / 2
-        items.push({ x: xm, z, y: ym - 1.3, sx: len, sz: CELL * 0.98, sy: 1.3, c: 0x8a867c, rz })
+        let ym = (ya + yb) / 2
+        let dark = 0
+        if (drop && xm > drop.a && xm < drop.b) {
+          // the fallen span lies broken in the channel, one end still propped on a pier
+          const f = (xm - drop.a) / (drop.b - drop.a)
+          const bed = city.z[idx(Math.floor((xm + HALF) / CELL), sp.j)]
+          ym = bed + 1.2 + (1 - f) * Math.max(0, ym - bed - 1.2) * 0.35
+          rz = (q % 2 ? 0.18 : -0.12) + (f < 0.5 ? 0.25 : -0.1)
+          dark = 1
+        } else if ((sp.ds ?? 0) >= 3 && Math.abs(xm - (x0 + x1) / 2) < (x1 - x0) * 0.3) {
+          // unseated girders: the deck has dropped off its bearings and steps out of line
+          ym -= q % 3 === 0 ? 0.45 : 0.25
+          rz += q % 2 ? 0.025 : -0.02
+        }
+        const deck = dark ? 0x6c6a64 : 0x8a867c
+        items.push({ x: xm, z, y: ym - 1.3, sx: len, sz: CELL * 0.98, sy: 1.3, c: deck, rz })
         items.push({ x: xm, z, y: ym - 0.02, sx: len, sz: CELL * 0.86, sy: 0.06, c: 0x3d3f43, rz })
+        if (dark && q % 2) continue // railings torn off the fallen span
         items.push({ x: xm, z: z - CELL * 0.46, y: ym, sx: len, sz: 0.35, sy: 1.0, c: 0xb4b0a6, rz })
         items.push({ x: xm, z: z + CELL * 0.46, y: ym, sx: len, sz: 0.35, sy: 1.0, c: 0xb4b0a6, rz })
       }
@@ -1197,6 +1219,31 @@ export class World {
     this.staticMesh = mesh
     this.root.add(mesh)
     this.buildRoadClosures()
+  }
+
+  /** The stretch of deck (between two piers) that fell when a bridge collapsed, in world x. */
+  bridgeDrop(sp, x0 = cellToWorld(sp.i0) + CELL * 0.35, x1 = cellToWorld(sp.i1) - CELL * 0.35) {
+    if (!sp.collapsed) return null
+    const piers = [x0]
+    for (let x = x0 + 12; x < x1 - 8; x += 20) piers.push(x)
+    piers.push(x1)
+    const at = x0 + (x1 - x0) * (sp.dropAt ?? 0.5)
+    for (let q = 0; q < piers.length - 1; q++) if (at >= piers[q] && at <= piers[q + 1]) return { a: piers[q], b: piers[q + 1] }
+    return { a: piers[0], b: piers[1] }
+  }
+
+  /** A bridge was damaged: redraw it, and if a span fell, throw up spray and dust. */
+  bridgeDamaged(sp) {
+    this.rebuildStatic()
+    const drop = this.bridgeDrop(sp)
+    if (!drop) return
+    const z = cellToWorld(sp.j)
+    for (let x = drop.a; x < drop.b; x += 2.5) {
+      const y = this.deckAt(x, z) ?? 0
+      for (let q = 0; q < 4; q++) this.dust.emit(x, y - 1, z + (Math.random() - 0.5) * CELL, (Math.random() - 0.5) * 4, 1 + Math.random() * 3, (Math.random() - 0.5) * 4, 12, 8, 6 + Math.random() * 5, [0.62, 0.6, 0.56, 0.55], [0.75, 0.75, 0.72, 0])
+      this.debris.spawn(x, y - 0.5, z + (Math.random() - 0.5) * CELL * 0.8, (Math.random() - 0.5) * 2, -1, (Math.random() - 0.5) * 2, 0.8 + Math.random() * 1.2, 0x8a867c)
+    }
+    this.life.bridgeCollapsed(sp, drop)
   }
 
   /** Road surface height on a bridge (gentle arch between the two road ends). */
@@ -1329,7 +1376,7 @@ export class World {
 
   // -------------------------------------------------------------- shaking
   /** Queue ground shaking. pga in g, realDur in seconds of real time. */
-  addShake(pga, realDur, M, main = false) {
+  addShake(pga, realDur, M, main = false, field = null) {
     // in cut-away view the shaking starts when the S-waves reach the city
     const lag = this.subsurface.group.visible ? this.subsurface.trigger(M, main) : 0
     const freqs = []
@@ -1337,7 +1384,7 @@ export class World {
     for (let k = 0; k < 5; k++) freqs.push({ f: lowF * (1 + k * 0.8 + Math.random() * 0.5), px: Math.random() * 6.28, pz: Math.random() * 6.28, w: 1 })
     // great earthquakes radiate strong long-period waves that make tall towers resonate
     if (M >= 7.3) freqs.push({ f: 0.14 + Math.random() * 0.12, px: Math.random() * 6.28, pz: Math.random() * 6.28, w: 1.5 + (M - 7.3) })
-    this.shakes.push({ t0: this.realTime + lag, dur: realDur, pga, freqs })
+    this.shakes.push({ t0: this.realTime + lag, dur: realDur, pga, freqs, field })
     return lag
   }
 
@@ -1345,6 +1392,10 @@ export class World {
     let ax = 0
     let az = 0
     let env = 0
+    // the strongest shaking right now, and its surface PGA map (for what people feel)
+    let field = null
+    let frac = 0
+    let best = 0
     for (const s of this.shakes) {
       const tau = t - s.t0
       if (tau < 0 || tau > s.dur) continue
@@ -1360,8 +1411,13 @@ export class World {
       ax += sx * amp
       az += sz * amp
       env = Math.max(env, s.pga * e)
+      if (s.field && s.pga * e > best) {
+        best = s.pga * e
+        field = s.field
+        frac = e
+      }
     }
-    return { ax, az, env }
+    return { ax, az, env, field, frac }
   }
 
   animFor(b) {
@@ -1444,6 +1500,8 @@ export class World {
     const c = a.collapse
     if (!c.started) {
       c.started = true
+      // a building coming down terrifies everyone who can see and hear it
+      this.life.alarm(b.cx, b.cz, Math.max(25, b.height * 0.8), c.style === 'flood' ? 0.45 : 0.7, 0.97)
       if (c.kind === 'topple') {
         // rigid rotation about the base edge, like a falling column
         a.topple = {
@@ -1763,7 +1821,7 @@ export class World {
         }
       }
     }
-    this.life.update(dt, { ...this.lifeCtx, shaking: g.env, night: this.nightF })
+    this.life.update(dt, { ...this.lifeCtx, shaking: g.env, field: g.field, frac: g.frac, burning: this.burning, night: this.nightF })
     this.fire.update(dt)
     this.smoke.update(dt, 3)
     this.dust.update(dt, 1)

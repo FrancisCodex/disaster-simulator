@@ -170,6 +170,7 @@ export class QuakeSim {
       })
     }
     this.ground = new GroundFailure(city, rng)
+    this.bridges = []
     this.moved = new Set() // buildings whose settlement or tilt changed (for the renderer)
     this.lateCollapses = 0 // stood through the main shock, fell later
     this.leaning = 0
@@ -276,6 +277,91 @@ export class QuakeSim {
     return ev
   }
 
+  /** Bridge decks on neighbouring rows (the two halves of an avenue) are one bridge. */
+  bridgeGroups() {
+    if (this._bridgeGroups) return this._bridgeGroups
+    const spans = this.city.bridgeSpans || []
+    const groups = []
+    spans.forEach((sp, n) => {
+      const g = groups.find((gr) => gr.some((m) => Math.abs(spans[m].j - sp.j) === 1 && spans[m].i0 <= sp.i1 && sp.i0 <= spans[m].i1))
+      if (g) g.push(n)
+      else groups.push([n])
+    })
+    const names = groups.map((g) => {
+      const j = g.reduce((s, n) => s + spans[n].j, 0) / g.length
+      return j < GRID * 0.4 ? 'northern' : j > GRID * 0.6 ? 'southern' : 'central'
+    })
+    // two bridges on the same side of town get told apart by order
+    const label = names.map((nm, q) => (names.filter((x) => x === nm).length > 1 ? `${nm} bridge #${names.slice(0, q + 1).filter((x) => x === nm).length}` : `${nm} bridge`))
+    this._bridgeGroups = groups.map((g, q) => ({ spans: g, name: label[q] }))
+    return this._bridgeGroups
+  }
+
+  /**
+   * Bridges: HAZUS-style fragility for a conventionally designed multi-span
+   * girder bridge (medians in spectral acceleration at 1 s, which grows
+   * relative to PGA for larger, longer-period earthquakes), weakened by earlier
+   * damage, plus unseating when liquefied banks spread and pull the abutments
+   * apart (Niigata 1964, Kobe 1995). Returns the spans whose state changed.
+   */
+  bridgeShock(shock, field) {
+    const { city, rng } = this
+    const spans = city.bridgeSpans || []
+    const changed = []
+    const sa1 = clamp(0.35 + 0.15 * (shock.M - 5), 0.3, 1)
+    const med = [0.25, 0.35, 0.45, 0.7]
+    const G = this.ground
+    this.bridgeGroups().forEach((grp, n) => {
+      const s = (this.bridges[n] ??= { ds: 0, D: 0, collapsed: false, spread: 0, name: grp.name })
+      if (s.collapsed) return
+      let a = 0
+      let spread = 0
+      for (const m of grp.spans) {
+        const sp = spans[m]
+        for (let i = sp.i0; i <= sp.i1; i++) a = Math.max(a, field[idx(i, sp.j)])
+        // the banks under the abutments spreading toward the river
+        for (const i of [sp.i0, sp.i0 + 1, sp.i1 - 1, sp.i1]) spread = Math.max(spread, G.spread[idx(i, sp.j)])
+      }
+      const sa = a * sa1 * (this.variability ? Math.exp(rng.normal() * 0.3) : 1)
+      const res = residual(s.D)
+      const u = rng.next()
+      let ds = 0
+      for (let k = 3; k >= 0; k--)
+        if (u < normCdf(Math.log(sa / (med[k] * res)) / 0.6)) {
+          ds = k + 1
+          break
+        }
+      const dSpread = spread - s.spread
+      s.spread = spread
+      // abutments pushed toward the channel: bearings and joints first, then the girders lose their seats
+      if (spread > 0.2) ds = Math.max(ds, 2)
+      if (spread > 0.5) ds = Math.max(ds, 3)
+      const D0 = s.D
+      s.D = Math.max(s.D + 0.25 * Math.max(0, (sa - med[0] * res) / (med[3] - med[0])) ** 2 + dSpread * 0.4, DS_FLOOR[ds])
+      const newDs = Math.max(s.ds, ds, dsFromD(s.D))
+      let collapse = false
+      if (newDs === 4 && (s.ds < 4 || s.D - D0 > 0.1)) collapse = rng.chance(spread > 1 ? 0.8 : 0.4)
+      if (newDs === s.ds && !collapse) return
+      s.ds = newDs
+      s.collapsed = collapse
+      const dropAt = 0.25 + rng.next() * 0.45 // which span falls
+      for (const m of grp.spans) {
+        spans[m].ds = newDs
+        spans[m].collapsed = collapse
+        if (collapse) spans[m].dropAt = dropAt
+        changed.push(m)
+      }
+      const sp = spans[grp.spans[0]]
+      const len = (sp.i1 - sp.i0) * CELL
+      const what = `the ${grp.name} (${len.toFixed(0)} m)`
+      if (collapse) this.log(`A span of ${what} collapsed into the river${spread > 1 ? ' — the liquefied banks spread and pulled its supports apart' : ''}. The crossing is cut.`, 'bad')
+      else if (newDs >= 3) this.log(`${what[0].toUpperCase()}${what.slice(1)} is badly damaged${spread > 0.5 ? ' (its abutments moved with the spreading banks)' : ''} and has been closed.`, 'warn')
+      else if (newDs === 2) this.log(`${what[0].toUpperCase()}${what.slice(1)} has cracked bearings and joints; traffic slowed for inspection.`, 'info')
+    })
+    return changed
+  }
+
+
   applyShock(shock) {
     const { city, rng } = this
     let pgaSum = 0
@@ -295,15 +381,24 @@ export class QuakeSim {
     const half = (GRID * CELL) / 2
     let pgaGround = 0
     let nGround = 0
-    const g = this.ground.shock(shock.M, (k) => {
+    const surfacePga = (k) => {
       const i = k % GRID
       const j = (k - i) / GRID
       const r = rockPgaAt(shock, (i + 0.5) * CELL - half, (j + 0.5) * CELL - half) * eventTerm
-      const a = r * siteFactor(SOIL_VS30[city.soil[k]], r)
+      return r * siteFactor(SOIL_VS30[city.soil[k]], r)
+    }
+    // surface PGA everywhere: what people feel, and what the ground and bridges take
+    const field = new Float32Array(GRID * GRID)
+    const g = this.ground.shock(shock.M, (k) => {
+      const a = surfacePga(k)
+      field[k] = a
       pgaGround += a
       nGround++
       return a
     })
+    for (let k = 0; k < field.length; k++) if (!field[k]) field[k] = surfacePga(k) // river channel
+    vis.field = field
+    vis.bridges = this.bridgeShock(shock, field)
     const buried = this.slideTargets(g.slides)
     for (const b of city.buildings) {
       if (b.removed) continue

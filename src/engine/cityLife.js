@@ -1,8 +1,13 @@
 // City life: traffic (lanes, car-following, working traffic signals),
 // pedestrians on the sidewalks who cross at crosswalks on a green, street
 // lights — and how they all react to a disaster.
-//  • Earthquake: drivers brake, people run away from buildings to open ground,
-//    falling debris crushes cars (some catch fire) and strikes pedestrians.
+//  • Earthquake: everyone carries a fear level set by the shaking they feel
+//    where they are (Modified Mercalli: IV felt, V–VI many frightened, VII
+//    hard to stand / people run outdoors, VIII+ general panic), raised by
+//    collapses and fires nearby and by their own temperament. Frightened
+//    people stop and brace, then head for open ground away from buildings;
+//    panicked ones run. Drivers slow, then brake and pull over; some abandon
+//    their cars. Falling debris crushes cars and strikes pedestrians.
 //  • Flood: cars stall, then float off with the current; people head indoors
 //    or to high ground; anyone caught in deep moving water is swept away.
 import * as THREE from 'three'
@@ -14,6 +19,11 @@ import { vehicleGeometry, vehicleMaterial, VEHICLE_TYPES, VEHICLE_LENGTH, person
 import { KERB } from './roads.js'
 import { analyzeRoads, AVENUE, JUNCTION, STREET, END, BEND } from './roadNet.js'
 import { vehicleModelMaterial, personModelMaterial } from './quaternius.js'
+import { mmiFromPga } from './quakePhysics.js'
+
+/** Fear (0..1) from felt shaking (surface PGA in g): none at intensity IV (felt outdoors by few), ¼ at V, ½ at VI, ¾ at VII, full at VIII. */
+const PANIC = 0.88 // fear above which people run blindly
+const fearOfShaking = (pga) => (pga < 0.004 ? 0 : clamp((mmiFromPga(pga) - 4) / 4, 0, 1))
 
 import { DIRS } from './roadNet.js'
 const right = (d) => [-DIRS[d][1], DIRS[d][0]]
@@ -93,6 +103,23 @@ export class CityLife {
       roadCells.push(k)
     }
     this.inter = inter
+    // roads that run off the edge of the district: traffic leaves and arrives there
+    const legal = (k, d) => (net.kind[k] === AVENUE ? net.oneway[k] === d : net.kind[k] === STREET || net.kind[k] === END ? (net.axis[k] === 1 ? d % 2 === 0 : d % 2 === 1) : false)
+    this.edgeExit = new Uint8Array(N * N)
+    this.edgeEntries = []
+    for (const k of roadCells) {
+      if (city.bridge[k]) continue
+      const i = k % N
+      const j = (k - i) / N
+      for (let d = 0; d < 4; d++) {
+        const oi = i + DIRS[d][0]
+        const oj = j + DIRS[d][1]
+        if (oi >= 0 && oj >= 0 && oi < N && oj < N) continue
+        if (legal(k, d)) this.edgeExit[k] |= 1 << d // drive out through this side
+        const inward = (d + 2) % 4
+        if (legal(k, inward)) this.edgeEntries.push({ k, d: inward }) // arrive from this side
+      }
+    }
     // every cell of one intersection shares the same signal timing
     const phase = []
     this.signalOffset = new Float32Array(N * N)
@@ -154,6 +181,9 @@ export class CityLife {
         state: 'drive',
         id: n,
         occupants: type === 'bus' ? 12 + Math.floor(rng() * 20) : 1 + Math.floor(rng() * 2),
+        fear: 0,
+        trait: 0.5 + rng() ** 1.6 * 0.9, // how easily this driver is frightened (most are steady)
+        pull: 0,
         lane: rng() < 0.5 ? 0 : 1,
         wait: 0,
         roll: 0,
@@ -203,7 +233,9 @@ export class CityLife {
     // ---------------- pedestrians
     this.peds = []
     const walkable = roadCells.filter((k) => this.walkOut[k] && !inter[k])
-    for (let n = 0; n < counts[1] && walkable.length; n++) {
+    // a hidden reserve stands in for drivers and passengers who abandon their cars
+    const reserve = Math.min(240, Math.round(this.cars.length * 0.6))
+    for (let n = 0; n < counts[1] + reserve && walkable.length; n++) {
       const k = walkable[Math.floor(rng() * walkable.length)]
       const dirs = [0, 1, 2, 3].filter((d) => this.walkOut[k] & (1 << d))
       const dir = dirs[Math.floor(rng() * dirs.length)]
@@ -220,9 +252,11 @@ export class CityLife {
         z: 0,
         y: 0,
         yaw: 0,
-        mode: 'walk',
+        mode: n < counts[1] ? 'walk' : 'reserve',
         phase: rng() * 10,
-        panic: 2.8 + rng() * 2,
+        panic: 2.8 + rng() * 2, // sprinting speed when panicking (m/s)
+        fear: 0,
+        trait: 0.5 + rng() ** 1.6 * 0.9, // temperament: most people stay level-headed, a few are easily panicked
         color: pick(SHIRTS, rng),
         init: true,
         plan: null,
@@ -529,13 +563,49 @@ export class CityLife {
       }
   }
 
+  /** A badly damaged bridge is closed: traffic stops at its ends and nobody walks onto it. */
+  closeBridge(sp) {
+    for (let i = sp.i0 + 1; i < sp.i1; i++) {
+      const k = idx(i, sp.j)
+      this.blocked[k] = 1
+      this.walkOut[k] = 0
+    }
+    this.deadCache = null
+  }
+
+  /** A span fell: whoever was on that stretch of deck goes down with it. */
+  bridgeCollapsed(sp, drop) {
+    this.closeBridge(sp)
+    const z = cellToWorld(sp.j)
+    const on = (x, zz) => Math.abs(zz - z) < CELL * 0.55 && x > drop.a - 1 && x < drop.b + 1
+    for (const c of this.cars) {
+      if (c.state === 'exit' || c.state === 'sunk' || !on(c.x, c.z)) continue
+      c.state = 'sunk'
+      c.speed = 0
+      c.y = this.world.groundAt(c.x, c.z) + 0.4
+      c.roll = (Math.random() - 0.5) * 0.8
+      const dead = Math.round(c.occupants * 0.6)
+      c.occupants -= dead
+      this.stats.carDead += dead
+      this.stats.bridgeDead = (this.stats.bridgeDead || 0) + dead
+    }
+    for (const p of this.peds) {
+      if (p.mode === 'dead' || p.mode === 'reserve' || !on(p.x, p.z)) continue
+      p.mode = 'dead'
+      p.cause = 'bridge'
+      p.fallen = true
+      this.stats.pedDead++
+      this.stats.bridgeDead = (this.stats.bridgeDead || 0) + 1
+    }
+  }
+
   /** Something heavy landed at (x,z): crush cars, strike pedestrians. */
   hitArea(x, z, r, energy) {
     let killed = 0
     let crushed = 0
     if (energy < 4000) return { killed, crushed }
     for (const p of this.peds) {
-      if (p.mode === 'dead' || p.mode === 'indoors') continue
+      if (p.mode === 'dead' || p.mode === 'indoors' || p.mode === 'reserve') continue
       if (Math.hypot(p.x - x, p.z - z) < r + 0.5) {
         p.mode = 'dead'
         p.cause = 'debris'
@@ -562,18 +632,26 @@ export class CityLife {
 
   // ------------------------------------------------------------ update
   /**
-   * ctx: { shaking (g), quake, quakeT (s since main shock), flood, warned,
+   * ctx: { shaking (g), field + frac (surface PGA map of the current shaking and its envelope), burning,
+   *        quake, quakeT (s since main shock), flood, warned,
    *        depthAt(k), flowAt(i,j) → [vx,vz], night (0..1) }
    */
   update(dt, ctx) {
     if (!this.cars) return
     dt = Math.min(dt, 0.05)
     this.time += dt
-    const shaking = ctx.shaking || 0
+    // surface PGA (g) being felt right now in cell k
+    this.felt = ctx.field ? (k) => ctx.field[k] * ctx.frac : () => 0
+    // standing near a burning building is frightening, and people keep away from it
+    this.fireTimer = (this.fireTimer || 0) + dt
+    if (this.fireTimer > 0.5 && ctx.burning?.length) {
+      this.fireTimer = 0
+      for (const b of ctx.burning) this.alarm(b.cx, b.cz, 22, 0.25, 0.5)
+    }
     // pedestrians currently out on the carriageway, per cell (for drivers to yield)
     this.crossing = new Map()
     for (const p of this.peds) {
-      if (p.mode === 'dead' || p.mode === 'indoors') continue
+      if (p.mode === 'dead' || p.mode === 'indoors' || p.mode === 'reserve') continue
       const k = this.cellOf(p.x, p.z)
       if (!this.onCarriageway(k, p.x, p.z)) continue
       let a = this.crossing.get(k)
@@ -581,11 +659,77 @@ export class CityLife {
       a.push(p)
     }
     this.updateSignals(dt)
-    this.updateCars(dt, ctx, shaking)
-    this.updatePeds(dt, ctx, shaking)
+    this.updateCars(dt, ctx)
+    this.updatePeds(dt, ctx)
     this.carLights.material.uniforms.uNight.value = ctx.night
     this.lampGlow.material.uniforms.uNight.value = ctx.night * 0.45
     this.lampHeadMat.emissiveIntensity = ctx.night * 1.2
+  }
+
+  /**
+   * Something frightening happened at (x, z): a collapse, a fire. Fear rises
+   * with closeness (e-folding distance r), and people flee away from it.
+   * cap limits how frightened a distant, ongoing threat (like a fire) can make anyone.
+   */
+  alarm(x, z, r, strength, cap = 1) {
+    const reach = r * 3
+    for (const p of this.peds || []) {
+      if (p.mode === 'dead' || p.mode === 'indoors' || p.mode === 'reserve') continue
+      const d = Math.hypot(p.x - x, p.z - z)
+      if (d > reach) continue
+      const add = strength * Math.exp(-d / r) * p.trait
+      p.fear = Math.max(p.fear, Math.min(cap, p.fear + add))
+      if (add > 0.15) p.threat = { x, z, until: this.time + 25 }
+    }
+    for (const c of this.cars || []) {
+      if (c.state !== 'drive') continue
+      const d = Math.hypot(c.x - x, c.z - z)
+      if (d > reach) continue
+      const add = strength * Math.exp(-d / r) * c.trait
+      c.fear = Math.max(c.fear, Math.min(cap, c.fear + add))
+      if (add > 0.3) c.threatUntil = this.time + 20 // something came down right by the car
+    }
+  }
+
+  /** How the people outside are behaving: for the HUD and the event log. */
+  panicStats() {
+    const s = { outside: 0, calm: 0, alarmed: 0, fleeing: 0, panicking: 0, fallen: 0, carsStopped: 0, carsAbandoned: 0 }
+    for (const p of this.peds || []) {
+      if (p.mode === 'dead' || p.mode === 'indoors' || p.mode === 'reserve') continue
+      s.outside++
+      if (p.mode === 'fallen') s.fallen++
+      if (p.fear >= PANIC) s.panicking++
+      else if (p.fear >= 0.55) s.fleeing++
+      else if (p.fear >= 0.2) s.alarmed++
+      else s.calm++
+    }
+    for (const c of this.cars || []) {
+      if (c.state === 'abandoned') s.carsAbandoned++
+      else if (c.state === 'drive' && c.halt) s.carsStopped++
+    }
+    return s
+  }
+
+  /** Drivers and passengers get out and run; the car stays where it stopped. */
+  abandonCar(c) {
+    c.state = 'abandoned'
+    c.halt = true
+    const [rx, rz] = right(c.dir)
+    let n = Math.min(c.occupants, c.type === 'bus' || c.type === 'schoolbus' ? 6 : 3)
+    for (const p of this.peds) {
+      if (n <= 0) break
+      if (p.mode !== 'reserve') continue
+      n--
+      const side = Math.random() < 0.7 ? 1 : -1
+      p.x = c.x + rx * 1.4 * side + (Math.random() - 0.5) * c.len * 0.6
+      p.z = c.z + rz * 1.4 * side + (Math.random() - 0.5) * c.len * 0.6
+      p.init = false
+      p.fear = Math.max(c.fear, 0.6)
+      p.mode = 'flee'
+      p.field = this.safeField
+    }
+    this.stats.abandoned = (this.stats.abandoned || 0) + 1
+    c.occupants = 0 // they are on foot now
   }
 
   pedAhead(c, k, fx, fz, rx, rz) {
@@ -599,7 +743,7 @@ export class CityLife {
     return 99
   }
 
-  updateCars(dt, ctx, shaking) {
+  updateCars(dt, ctx) {
     const { cars, inter, blocked, net } = this
     const grid = new Map()
     const byCluster = new Map()
@@ -642,8 +786,18 @@ export class CityLife {
         const [dx, dz] = DIRS[c.dir]
         const nk = idx(clamp(ci + dx, 0, GRID - 1), clamp(cj + dz, 0, GRID - 1))
         let desired = c.max
-        if (shaking > 0.02) desired = 0
-        else if (ctx.quake && ctx.quakeT > 0) desired = c.max * 0.45
+        // Drivers feel weak shaking late, if at all. Strong shaking feels like a
+        // burst tyre and makes steering hard: they brake and pull over to the
+        // kerb, and wait there until they've calmed down. The worst-frightened leave the car.
+        const here = this.felt(c.k)
+        // a moving car's suspension hides about one intensity unit (MMI VII: "noticed by persons driving")
+        c.fear = Math.max(c.fear - dt * 0.01, Math.min(1, fearOfShaking(here * 0.5) * c.trait))
+        c.halt = c.fear > 0.45 || here > 0.25 || (c.halt && c.fear > 0.3)
+        if (c.halt) desired = 0
+        else if (c.fear > 0.15 || here > 0.02) desired = c.max * 0.5
+        else if (ctx.quake && ctx.quakeT > 0) desired = c.max * 0.6 // cracked roads, debris, signals out
+        // most drivers stay with their cars; they get out and run when something collapses right beside them, or in sheer terror
+        if (c.halt && c.speed < 0.3 && Math.random() < dt * (c.threatUntil > this.time ? 0.12 * c.fear : c.fear > 0.95 ? 0.04 : 0)) this.abandonCar(c)
         if (ctx.flood && ctx.rain > 25) desired *= 0.7
         // slow for corners: tighter arcs, lower speed
         if (c.path.turn) desired = Math.min(desired, c.path.turn === 2 ? 3 : c.path.radius < 4 ? 4.5 : 7)
@@ -684,15 +838,29 @@ export class CityLife {
         const acc = desired > c.speed ? 2.2 : 6.5
         c.speed += clamp(desired - c.speed, -acc * dt, acc * dt)
         c.t += (c.speed * dt) / c.path.len
-        if (c.t >= 1) {
+        if (c.t >= 1 && c.exiting) {
+          // past the edge of the district: drive on and fade away
+          c.state = 'exit'
+          c.exitD = 0
+          c.t = 1
+        } else if (c.t >= 1) {
           const p3 = c.path.p3
           const inDir = c.dir
           c.t = (c.t - 1) * (c.path.len / 10)
           this.enterCell(c, nk, inDir, p3)
         }
+        if (c.fadeIn !== undefined) {
+          c.fadeIn += c.speed * dt
+          c.scale = Math.min(1, 0.1 + c.fadeIn / 9)
+          if (c.scale >= 1) c.fadeIn = undefined
+        }
         const pt = this.pathPoint(c.path, Math.min(1, c.t))
-        c.x = pt.x
-        c.z = pt.z
+        // pulling over: ease toward the kerb while stopped, back out when moving off
+        c.pull += ((c.halt ? 1 : 0) - c.pull) * Math.min(1, dt * (c.speed > 0.5 || !c.halt ? 1.6 : 0.8))
+        const [px, pz] = right(c.dir)
+        const kerb = c.path.turn || inter[c.k] ? 0 : c.pull * 1.2
+        c.x = pt.x + px * kerb
+        c.z = pt.z + pz * kerb
         c.yaw = pt.yaw
         if (c.init) c.init = false
         c.y = this.heightAt(this.cellOf(c.x, c.z), c.x, c.z)
@@ -720,6 +888,15 @@ export class CityLife {
         if (d < 0.3) c.state = 'stalled'
       } else if (c.state === 'stalled') {
         c.speed = 0
+      } else if (c.state === 'exit') {
+        const fx = Math.cos(c.yaw)
+        const fz = -Math.sin(c.yaw)
+        const v = Math.max(4, c.speed)
+        c.exitD += v * dt
+        c.x += fx * v * dt
+        c.z += fz * v * dt
+        c.scale = Math.max(0, 1 - c.exitD / 10)
+        if (c.exitD > 10) this.enterFromEdge(c)
       }
       if (c.fire > 0) {
         c.fire -= dt
@@ -736,13 +913,16 @@ export class CityLife {
         c.mesh.setColorAt(c.mi, _c.set(c.color).multiplyScalar(0.45))
         touched.add(c.mesh)
       }
-      const flat = c.state === 'crushed' || c.state === 'burnt' ? 0.45 : 1
+      const flat = c.state === 'crushed' || c.state === 'burnt' ? 0.45 : c.state === 'sunk' ? 0.8 : 1
+      const sc = c.scale ?? 1
       _p.set(c.x, c.y, c.z)
       _q.setFromEuler(_e.set(c.roll, c.yaw, flat < 1 ? 0.05 : 0, 'YXZ'))
-      _s.set(1, flat, 1)
+      _s.set(sc, flat * sc, sc)
       _m.compose(_p, _q, _s)
       c.mesh.setMatrixAt(c.mi, _m)
-      const lit = c.state === 'drive' || c.state === 'stalled' ? 1 : 0
+      // stopped on the shoulder: hazard lights blink
+      const hazard = c.halt && c.state === 'drive' && Math.sin(this.time * 7 + n) < 0
+      const lit = (c.state === 'drive' || c.state === 'stalled') && sc > 0.6 && !hazard ? 1 : 0
       const fx = Math.cos(c.yaw)
       const fz = -Math.sin(c.yaw)
       const L = c.len * 0.5
@@ -849,7 +1029,7 @@ export class CityLife {
     for (let q = 0; q < 40; q++) {
       const kind = this.net.kind[cell]
       if (kind === END) {
-        v = true
+        v = !(this.edgeExit[cell] & (1 << d)) // a road that leaves the map is a way out, not a dead end
         break
       }
       if (kind === JUNCTION || kind === BEND || !this.road[cell]) break
@@ -897,7 +1077,13 @@ export class CityLife {
     const through = opts.filter((d) => !this.deadAhead(idx(i + DIRS[d][0], j + DIRS[d][1]), d))
     const pickFrom = through.length ? through : opts
     let dir = inDir
-    if (!opts.length) dir = carOut[k] & (1 << back) ? back : inDir
+    // carry on off the map where the road leaves the district
+    const exits = [0, 1, 2, 3].filter((d) => d !== back && this.edgeExit[k] & (1 << d))
+    c.exiting = false
+    if (exits.length && (!opts.length || Math.random() < 0.6)) {
+      dir = exits[Math.floor(Math.random() * exits.length)]
+      c.exiting = true
+    } else if (!opts.length) dir = carOut[k] & (1 << back) ? back : inDir
     else if (inter[k]) {
       if (opts.includes(c.exitDir)) dir = c.exitDir
       else if (!opts.includes(inDir)) dir = c.exitDir = pickFrom[Math.floor(Math.random() * pickFrom.length)]
@@ -1020,6 +1206,35 @@ export class CityLife {
     return cell
   }
 
+  /** A car that drove off the map is replaced by one arriving on another road into the district. */
+  enterFromEdge(c) {
+    const E = this.edgeEntries
+    let e = null
+    for (let tries = 0; tries < 12 && E.length; tries++) {
+      const cand = E[Math.floor(Math.random() * E.length)]
+      if (this.blocked[cand.k]) continue
+      const x = cellToWorld(cand.k % GRID)
+      const z = cellToWorld(Math.floor(cand.k / GRID))
+      if (this.cars.some((o) => o !== c && o.state !== 'exit' && Math.abs(o.x - x) < 12 && Math.abs(o.z - z) < 12)) continue
+      e = cand
+      break
+    }
+    c.scale = 1
+    c.fadeIn = undefined
+    c.exiting = false
+    c.state = 'drive'
+    if (!e) return this.respawn(c)
+    c.k = e.k
+    c.dir = e.d
+    c.t = 0
+    c.speed = c.max * 0.6
+    c.wait = 0
+    c.planK = -1
+    this.enterCell(c, e.k, e.d, null)
+    c.scale = 0.1
+    c.fadeIn = 0
+  }
+
   /** A car with nowhere to go reappears somewhere else on the network. */
   respawn(c) {
     let k = this.usable[0]
@@ -1073,19 +1288,26 @@ export class CityLife {
     return canStraight ? { kind: 'straight' } : { kind: 'back' }
   }
 
-  updatePeds(dt, ctx, shaking) {
+  updatePeds(dt, ctx) {
     const { peds, city, inter, net } = this
     const nbr = this.walkOut
-    const quakeAlarm = shaking > 0.03 || (ctx.quake && ctx.quakeT > 0)
 
     peds.forEach((p) => {
+      if (p.mode === 'reserve') {
+        // not out yet: still sitting in a car
+        _m.makeScale(0, 0, 0)
+        this.pedMeshes[p.pm].mesh.setMatrixAt(p.mi, _m)
+        return
+      }
       const k = this.cellOf(p.x, p.z)
       const i = k % GRID
       const j = (k - i) / GRID
       const depth = ctx.depthAt ? ctx.depthAt(k) : 0
       let lying = false
       let hidden = false
+      let crouch = false
       let stride = 0
+      if (!ctx.flood && p.mode !== 'dead' && p.mode !== 'indoors' && p.mode !== 'swept') this.quakeReaction(p, k, dt)
       if (p.mode === 'walk' || p.mode === 'flee' || p.mode === 'safe' || p.mode === 'toIndoors') {
         if (ctx.flood && depth > 0.45) {
           const [vx, vz] = ctx.flowAt(i, j)
@@ -1093,9 +1315,6 @@ export class CityLife {
             p.mode = 'swept'
             p.sweptT = 0
           }
-        } else if (quakeAlarm && p.mode === 'walk') {
-          p.mode = 'flee'
-          p.field = this.safeField
         } else if (ctx.flood && (ctx.warned || depth > 0.08 || ctx.rain > 35) && (p.mode === 'walk' || p.mode === 'safe')) {
           let best = null
           for (let dj = -3; dj <= 3 && !best; dj++)
@@ -1203,20 +1422,42 @@ export class CityLife {
             p.z = nz
           }
         }
+      } else if (p.mode === 'brace') {
+        // stopped where they stand, crouched, waiting for the shaking to pass
+        crouch = true
+      } else if (p.mode === 'fallen') {
+        // thrown off their feet
+        lying = true
+        p.fallT -= dt
+        if (p.fallT <= 0) {
+          p.mode = p.fear > 0.55 ? 'flee' : 'brace'
+          p.field = this.safeField
+        }
       } else if (p.mode === 'flee') {
-        const f = p.field[k]
-        if (f === -1 || f === -2) {
+        const f = (p.field ?? this.safeField)[k]
+        // panicked people run flat out and erratically; frightened ones walk briskly
+        const pace = ctx.flood ? p.panic : p.fear >= PANIC ? p.panic : 1.6 + p.fear * 1.2
+        const wobble = ctx.flood ? 3 : 1.5 + p.fear * 4
+        const away = p.threat && p.threat.until > this.time && Math.hypot(p.x - p.threat.x, p.z - p.threat.z) < 40
+        if (away) {
+          // get away from the collapse or fire first
+          const dx = p.x - p.threat.x
+          const dz = p.z - p.threat.z
+          const d = Math.hypot(dx, dz) || 1
+          if (this.steer(p, p.x + (dx / d) * 6 + Math.sin(p.phase * 3.1) * wobble, p.z + (dz / d) * 6 + Math.cos(p.phase * 2.7) * wobble, pace, dt)) stride = 0.85
+        } else if (f === -1 || f === -2) {
           p.mode = 'safe'
           p.hx = p.x + (Math.random() - 0.5) * 6
           p.hz = p.z + (Math.random() - 0.5) * 6
         } else {
-          const tx = cellToWorld(i + DIRS[f][0]) + Math.sin(p.phase * 7.3) * 3
-          const tz = cellToWorld(j + DIRS[f][1]) + Math.cos(p.phase * 5.1) * 3
-          if (this.steer(p, tx, tz, p.panic, dt)) stride = 0.85
+          const tx = cellToWorld(i + DIRS[f][0]) + Math.sin(p.phase * 7.3) * wobble
+          const tz = cellToWorld(j + DIRS[f][1]) + Math.cos(p.phase * 5.1) * wobble
+          if (this.steer(p, tx, tz, pace, dt)) stride = pace > 2.6 ? 0.85 : 0.6
         }
       } else if (p.mode === 'safe') {
         if (Math.hypot(p.hx - p.x, p.hz - p.z) > 0.5 && this.steer(p, p.hx, p.hz, 1, dt)) stride = 0.35
-        if (!quakeAlarm && !ctx.flood && Math.random() < dt * 0.02 && this.road[k] && !inter[k]) {
+        // in the open they wait; once calm (and the ground is still) they go back to their day
+        if (!ctx.flood && p.fear < 0.2 && this.felt(k) < 0.005 && Math.random() < dt * 0.02 && this.road[k] && !inter[k]) {
           p.mode = 'walk'
           p.k = k
           p.t = 0.5
@@ -1244,7 +1485,7 @@ export class CityLife {
         hidden = depth > 1.6
       } else if (p.mode === 'dead') {
         lying = true
-        hidden = depth > 0.4
+        hidden = depth > 0.4 || p.fallen // fell into the river with a bridge span
       }
 
       const ground = this.heightAt(k, p.x, p.z)
@@ -1254,7 +1495,7 @@ export class CityLife {
       _p.set(p.x, p.y + (lying ? 0.15 : 0), p.z)
       _q.setFromEuler(_e.set(lying ? -Math.PI / 2 : 0, p.yaw + Math.PI / 2, 0, 'YXZ'))
       const s = hidden ? 0 : 1
-      _s.set(s, s, s)
+      _s.set(s, crouch ? s * 0.55 : s, s)
       _m.compose(_p, _q, _s)
       const pm = this.pedMeshes[p.pm]
       pm.mesh.setMatrixAt(p.mi, _m)
@@ -1265,6 +1506,40 @@ export class CityLife {
       pm.mesh.instanceMatrix.needsUpdate = true
       pm.walk.needsUpdate = true
     }
+  }
+
+  /**
+   * Fear and the immediate reaction to an earthquake. Most people stop and
+   * brace while the ground moves (drop, cover, hold on), then walk out to open
+   * ground away from buildings; the panicked run straight away; at intensity
+   * VIII and above some are thrown off their feet. Fear fades over a minute or
+   * two once the shaking stops, and each aftershock brings it back.
+   */
+  quakeReaction(p, k, dt) {
+    const here = this.felt(k)
+    p.fear = Math.max(p.fear - dt * 0.012, Math.min(1, fearOfShaking(here) * p.trait))
+    const f = p.fear
+    if (here > 0.25 && p.mode !== 'fallen' && Math.random() < dt * (here - 0.2) * 1.2) {
+      p.mode = 'fallen'
+      p.fallT = 1.5 + Math.random() * 3
+      return
+    }
+    const flee = () => {
+      p.mode = 'flee'
+      p.field = this.safeField
+    }
+    if (p.mode === 'walk') {
+      if (f >= PANIC) flee()
+      else if (f > 0.2 && here > 0.01) p.mode = 'brace'
+      else if (f > 0.55) flee()
+    } else if (p.mode === 'brace') {
+      if (f >= PANIC) flee()
+      else if (here < 0.004) {
+        // the shaking has stopped
+        if (f > 0.35) flee()
+        else p.mode = 'walk'
+      }
+    } else if (p.mode === 'safe' && f > 0.75 && p.threat && p.threat.until > this.time) flee()
   }
 
   steer(p, tx, tz, speed, dt) {
@@ -1282,6 +1557,6 @@ export class CityLife {
   outdoorCount() {
     let n = 0
     for (const c of this.cars || []) n += c.occupants
-    return n + (this.peds?.length || 0)
+    return n + (this.peds || []).filter((p) => p.mode !== 'reserve').length
   }
 }

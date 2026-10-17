@@ -162,6 +162,7 @@ export class Debris {
       color,
       age: 0,
       dead: false,
+      rimY: undefined,
     })
     _c.set(color)
     if (!d) _c.offsetHSL(0, 0, (Math.random() - 0.5) * 0.15)
@@ -188,6 +189,15 @@ export class Debris {
         it.rx += it.wx * h
         it.ry += it.wy * h
         it.rz += it.wz * h
+        // thrown past the edge of the district: gone once it drops below the rim
+        if (this.half && (Math.abs(it.x) > this.half || Math.abs(it.z) > this.half)) {
+          if (it.rimY === undefined) it.rimY = this.edgeAt(it.x, it.z)
+          if (it.y < it.rimY - 8) {
+            it.dead = true
+            break
+          }
+          continue
+        }
         // lands on the ground, or on the roof of a standing building
         const surf = this.surfaceAt(it.x, it.z, it.age < 0.6 ? it.src : -1)
         const g = surf.y + it.sy * 0.5

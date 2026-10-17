@@ -111,7 +111,6 @@ export class Game {
     }
     this.bindInput()
     try {
-      this.world.showWorld = localStorage.getItem('metrorisk.showWorld') !== '0'
       this.world.useModels = localStorage.getItem('metrorisk.models') !== 'simple'
     } catch {
       /* storage unavailable: keep the default */
@@ -685,6 +684,7 @@ export class Game {
     this.simTime = 0
     this.acc = 0
     this.showDamage = []
+    this.panicLog = null
     this.groundShowAt = 0
     this.log = []
     this.world.setHighlight(null)
@@ -902,18 +902,21 @@ export class Game {
         }
         continue
       }
+      const bridges = (v.bridges || []).map((n) => this.city.bridgeSpans[n])
       if (v.M < 4.2 && !v.collapses.length) {
         // too weak to animate, but any damage it did still shows
         for (const id of v.damaged) {
           const b = this.city.byId.get(id)
           if (b) this.showDamage.push({ b, at: w.realTime })
         }
+        for (const sp of bridges) this.showDamage.push({ bridge: sp, at: w.realTime })
         continue
       }
       const dur = clamp(v.main ? 2 + (v.M - 4) * 2.4 : 1 + (v.M - 4) * 1.2, 1, 18)
-      const lag = w.addShake(v.pga, dur, v.M, v.main)
+      const lag = w.addShake(v.pga, dur, v.M, v.main, v.field)
       const t0 = w.realTime + lag
       this.groundShowAt = Math.max(this.groundShowAt ?? 0, t0 + dur * 0.4)
+      for (const sp of bridges) this.showDamage.push({ bridge: sp, at: t0 + dur * (0.3 + Math.random() * 0.5) })
       for (const id of v.collapses) {
         const b = this.city.byId.get(id)
         if (!b) continue
@@ -934,6 +937,11 @@ export class Game {
       let changed = false
       this.showDamage = this.showDamage.filter((d) => {
         if (w.realTime < d.at) return true
+        if (d.bridge) {
+          w.bridgeDamaged(d.bridge)
+          if (d.bridge.ds >= 3) w.life.closeBridge(d.bridge)
+          return false
+        }
         w.setDamage(d.b, q.st.get(d.b.id)?.ds ?? 0)
         changed = true
         return false
@@ -985,6 +993,38 @@ export class Game {
       w.burning = burning
       if (this.overlay) this.applyColorMode()
       else w.refreshColors()
+      this.logPanic()
+    }
+  }
+
+  /** Report how the people in the streets are reacting, as it changes. */
+  logPanic() {
+    const P = this.world.life.panicStats()
+    if (P.outside < 10) return
+    const st = (this.panicLog ??= { level: 0, abandoned: 0, stopped: false })
+    const pct = (n) => Math.round((n / P.outside) * 100)
+    const moving = P.fleeing + P.panicking
+    let level = 0
+    if (P.panicking / P.outside > 0.25) level = 3
+    else if (moving / P.outside > 0.3) level = 2
+    else if ((P.alarmed + moving) / P.outside > 0.4) level = 1
+    if (level > st.level) {
+      const text = [
+        '',
+        `People in the streets stop and brace themselves; ${pct(P.alarmed + moving)}% are frightened.`,
+        `Frightened people are leaving the buildings behind for open ground (${pct(moving)}% of those outside).`,
+        `Panic in the streets: ${pct(P.panicking)}% of people outside are running blindly${P.fallen ? `, and ${P.fallen} have been knocked off their feet` : ''}.`,
+      ][level]
+      this.pushLog(this.simTime, text, level >= 3 ? 'bad' : 'warn')
+    } else if (st.level >= 2 && level === 0 && moving / P.outside < 0.05) this.pushLog(this.simTime, 'The streets are calming down; people are returning from open ground.', 'info')
+    st.level = level === 0 && st.level >= 2 && moving / P.outside >= 0.05 ? st.level : level
+    if (P.carsStopped >= Math.max(3, this.world.life.cars.length * 0.25) && !st.stopped) {
+      st.stopped = true
+      this.pushLog(this.simTime, `Drivers have pulled over and stopped (${P.carsStopped} vehicles with hazard lights on).`, 'warn')
+    }
+    if (P.carsAbandoned > 0 && P.carsAbandoned >= Math.max(1, st.abandoned * 2)) {
+      st.abandoned = P.carsAbandoned
+      this.pushLog(this.simTime, `${P.carsAbandoned} car${P.carsAbandoned > 1 ? 's have' : ' has'} been abandoned in the road as people flee on foot.`, 'warn')
     }
   }
 
@@ -1060,7 +1100,8 @@ export class Game {
         { label: 'Trapped, not rescued in time', value: c.trapped },
         { label: 'Untreated injuries', value: c.injuries },
         { label: 'Fire', value: c.fire },
-        { label: 'Hit by debris outdoors', value: T.outdoorDead },
+        { label: 'Hit by debris outdoors', value: T.outdoorDead - (this.world.life.stats.bridgeDead || 0) },
+        { label: 'Bridge collapse', value: this.world.life.stats.bridgeDead || 0 },
       )
       const cls = Object.entries(q.deathsByClass).sort((a, b) => b[1] - a[1])
       if (cls.length && cls[0][1] >= 1)
@@ -1256,7 +1297,7 @@ export class Game {
       }
       if (this.quake) {
         const q = this.quake
-        s.sim.quake = { mainDone: q.mainDone, countdown: Math.max(0, q.mainTime - q.time), shocks: q.shocks.length, lastShock: q.shocks[q.shocks.length - 1] ?? null, maxAfter: Math.max(0, ...q.shocks.filter((x) => !x.main).map((x) => x.M)), fires: q.fires, ground: q.ground.stats() }
+        s.sim.quake = { mainDone: q.mainDone, countdown: Math.max(0, q.mainTime - q.time), shocks: q.shocks.length, lastShock: q.shocks[q.shocks.length - 1] ?? null, maxAfter: Math.max(0, ...q.shocks.filter((x) => !x.main).map((x) => x.M)), fires: q.fires, ground: q.ground.stats(), panic: this.world.life.panicStats(), bridges: q.bridges.filter((b) => b?.ds >= 3).length, bridgesDown: q.bridges.filter((b) => b?.collapsed).length }
       }
     }
     if (this.results) s.results = this.results
