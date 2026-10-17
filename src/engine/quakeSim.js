@@ -9,12 +9,22 @@ import { GRID, CELL, CONSTRUCTION, FRAGILITY_BETA, QUAKE_CASUALTY, QUAKE_CASUALT
 import { occupancyAt, idx } from './cityGen.js'
 import { GroundFailure } from './groundFailure.js'
 import { normCdf, clamp } from './math.js'
+import { sourceParams, faultGeometry, siteDistances, rockPga, siteFactor, gmpeFor, MECHANISMS, SOIL_VS30 } from './quakePhysics.js'
 
-// Campbell (1997)-style attenuation, mean horizontal PGA on rock (g).
-export function pgaRock(M, R) {
-  const f = 0.149 * Math.exp(0.647 * M)
-  return Math.exp(-3.512 + 0.904 * M - 1.328 * Math.log(Math.sqrt(R * R + f * f)))
+/** World position (m) → district coordinates (km) used by the fault geometry. */
+const km = (m) => m / 1000
+
+/** Median rock PGA (g) at world position (x, z) in metres for an event with geometry. */
+export function rockPgaAt(ev, x, z) {
+  return rockPga(ev, siteDistances(ev.geo, km(x), km(z)))
 }
+
+/** Attach rupture size and fault geometry to an event {M, depth, dist, az, mech, strike, rupture}. */
+export function withGeometry(ev) {
+  const src = sourceParams(ev)
+  return { ...ev, src, geo: faultGeometry(ev, src) }
+}
+
 // Significant shaking duration grows quickly with magnitude.
 export const shakingDuration = (M) => Math.pow(10, 0.5 * M - 2.2)
 export const durationFactor = (M) => clamp(Math.pow(shakingDuration(M) / 15, 0.25), 0.6, 3)
@@ -26,9 +36,13 @@ export function soilAmp(soil, pga) {
 const SOIL_NAMES = ['Rock', 'Stiff soil', 'Soft alluvium (liquefiable)']
 export const soilName = (s) => SOIL_NAMES[s]
 
-/** Effective damaging intensity (PGA-equivalent, g) at a building. */
-export function demand(b, soil, M, R) {
-  const rock = pgaRock(M, R)
+/**
+ * Effective damaging intensity (PGA-equivalent, g) at a building, from the
+ * median rock PGA there. This is a structural demand index, not the measured
+ * PGA: soft soils amplify the longer-period motion that damages buildings even
+ * where they de-amplify peak acceleration, and long shaking does more damage.
+ */
+export function demand(b, soil, M, rock) {
   let p = rock * soilAmp(soil, rock) * durationFactor(M)
   if (M > 9.3) p *= 1 + (M - 9.3) * 0.8 // ground failure, metres of permanent offset
   if (b.floors >= 10) p *= 1 + 0.15 * Math.max(0, M - 7) * Math.min(1.2, 0.5 + (b.floors - 10) / 20) // long-period resonance
@@ -107,6 +121,10 @@ export function cellOfBuilding(b) {
 }
 
 const DIRS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
+/** Compass direction of the epicentre (az: +x east, +z south, as in the cut-away view). */
+export const compass = (az) => DIRS[(Math.round(((Math.atan2(Math.cos(az), -Math.sin(az)) / (Math.PI * 2)) * 8) % 8) + 8) % 8]
+/** Bearing (deg, clockwise from north) → az; null keeps the seed's random direction. */
+export const quakeAzimuth = (ev, randomAz) => (ev.bearing == null ? randomAz : Math.atan2(-Math.cos((ev.bearing * Math.PI) / 180), Math.sin((ev.bearing * Math.PI) / 180)))
 
 export class QuakeSim {
   constructor(city, level, { warning = false, gasShutoff = false, startHour = 8, rng }) {
@@ -118,9 +136,12 @@ export class QuakeSim {
     this.time = 0
     this.mainTime = 25
     this.mainDone = false
-    const az = rng.float(0, Math.PI * 2)
-    this.main = { M: level.M, dist: level.dist, depth: level.depth, az, R: Math.hypot(level.dist, level.depth), main: true }
-    this.ruptureLen = Math.min(1200, Math.pow(10, -2.44 + 0.59 * level.M))
+    // the random draw always happens so the scenario's map seed fixes the epicentre direction
+    const az = quakeAzimuth(level, rng.float(0, Math.PI * 2))
+    this.main = withGeometry({ mech: 'strike', strike: 90, rupture: 'bilateral', ...level, az, main: true })
+    this.gmpe = gmpeFor(this.main)
+    this.variability = level.variability !== false
+    this.aftershocksOn = level.aftershocks !== false
     this.shocks = []
     this.events = []
     this.pending = [] // visual shock events for the renderer
@@ -174,17 +195,19 @@ export class QuakeSim {
     this.time = t1
     if (!this.mainDone && t1 >= this.mainTime) {
       this.mainDone = true
-      const dir = DIRS[Math.round((this.main.az / (Math.PI * 2)) * 8) % 8]
-      const r = this.applyShock(this.main)
+      const m = this.main
+      const r = this.applyShock(m)
+      const mech = (MECHANISMS[m.mech] ?? MECHANISMS.strike).name.toLowerCase()
       this.log(
-        `M${this.main.M.toFixed(1)} earthquake — epicentre ${this.main.dist} km ${dir}, depth ${this.main.depth} km. Shaking ≈ ${r.pga.toFixed(2)} g in the city for ~${Math.round(shakingDuration(this.main.M))} s.`,
+        `M${m.M.toFixed(1)} ${mech} earthquake${m.title ? ` (${m.title})` : ''} — epicentre ${m.dist.toFixed(0)} km ${compass(m.az)}, ${m.depth} km deep. A ${m.src.L.toFixed(0)} km × ${m.src.W.toFixed(0)} km rupture slipped ~${m.src.slip.toFixed(1)} m, passing ${r.rjb.toFixed(0)} km from the city. Ground shaking ≈ ${r.pga.toFixed(2)} g for ~${Math.round(shakingDuration(m.M))} s.`,
         'bad',
       )
-      if (r.pga > 0.5) {
+      if (r.pga > 0.4) {
         this.waterOk = 0.5
         this.log('Water mains ruptured — fire-fighting pressure reduced by half.', 'warn')
       }
       this.reportShock(r)
+      this.reportGround(r.ground)
     }
     if (this.mainDone) {
       this.sampleAftershocks(t0 - this.mainTime, t1 - this.mainTime)
@@ -204,7 +227,7 @@ export class QuakeSim {
   }
 
   sampleAftershocks(a, b) {
-    if (b <= 0) return
+    if (b <= 0 || !this.aftershocksOn) return
     const Mm = this.main.M
     const Mmin = Math.max(4, Mm - 3)
     if (Mmin > Mm - 0.5) return
@@ -221,15 +244,36 @@ export class QuakeSim {
     for (let q = 0; q < n; q++) {
       const u = this.rng.next()
       const M = Mmin - Math.log10(1 - u * (1 - Math.pow(10, -bGR * (Mmax - Mmin)))) / bGR
-      const along = (this.rng.next() - 0.5) * this.ruptureLen
-      const dist = Math.max(4, Math.abs(this.main.dist + along * 0.6))
-      const shock = { M, dist, depth: 10, R: Math.hypot(dist, 10), main: false }
+      const shock = this.aftershockSource(M)
       const r = this.applyShock(shock)
       if (M >= 5 || r.collapses) {
-        this.log(`M${M.toFixed(1)} aftershock (${dist.toFixed(0)} km away, ≈${r.pga.toFixed(2)} g).`, M >= 6 ? 'bad' : 'warn')
+        this.log(`M${M.toFixed(1)} aftershock (${shock.dist.toFixed(0)} km ${compass(shock.az)}, ${shock.depth.toFixed(0)} km deep, ≈${r.pga.toFixed(2)} g).`, M >= 6 ? 'bad' : 'warn')
         this.reportShock(r)
+        this.reportGround(r.ground)
       }
     }
+  }
+
+  /**
+   * Aftershocks cluster on and around the main rupture (most within one
+   * rupture width of it), on faults of the same type and orientation.
+   */
+  aftershockSource(M) {
+    const { rng } = this
+    const m = this.main
+    const G = m.geo
+    const a = G.u0 + (G.u1 - G.u0) * rng.next() + rng.normal() * 0.1 * m.src.L
+    const b = G.v0 + (G.v1 - G.v0) * rng.next() + rng.normal() * (0.15 * m.src.W + 3)
+    const ex = G.ex + a * G.u[0] + b * G.v[0]
+    const ey = G.ey + a * G.u[1] + b * G.v[1]
+    const regime = (MECHANISMS[m.mech] ?? MECHANISMS.strike).regime
+    const depth = clamp(m.depth + rng.normal() * 5, 2, regime === 'crustal' ? 22 : regime === 'interface' ? 55 : 300)
+    const ev = { M, depth, mech: m.mech, dip: m.dip, dist: Math.hypot(ex, ey), az: Math.atan2(ey, ex), main: false }
+    const src = sourceParams(ev)
+    const proj = src.W * Math.cos((src.dip * Math.PI) / 180)
+    ev.src = src
+    ev.geo = { ex, ey, u: G.u, v: G.v, u0: -src.L / 2, u1: src.L / 2, v0: -proj / 2, v1: proj / 2, ztor: src.ztor, zbot: src.zbot }
+    return ev
   }
 
   applyShock(shock) {
@@ -242,16 +286,31 @@ export class QuakeSim {
     let any = 0
     const notable = []
     const vis = { M: shock.M, main: shock.main, pga: 0, collapses: [], damaged: [] }
-    // the ground fails first: liquefaction, lateral spreading, landslides
-    const rock = pgaRock(shock.M, shock.R)
-    const g = this.ground.shock(shock.M, (k) => rock * soilAmp(city.soil[k], rock))
+    // ground-motion variability: one between-event term for the whole shock,
+    // plus site-to-site scatter (switched off for a deterministic median run)
+    const eventTerm = this.variability ? Math.exp(rng.normal() * this.gmpe.tau) : 1
+    const within = this.variability ? 0.25 : 0
+    // the ground fails first: liquefaction, lateral spreading, landslides —
+    // driven by the actual surface PGA (rock PGA × the BA08 Vs30 site term)
+    const half = (GRID * CELL) / 2
+    let pgaGround = 0
+    let nGround = 0
+    const g = this.ground.shock(shock.M, (k) => {
+      const i = k % GRID
+      const j = (k - i) / GRID
+      const r = rockPgaAt(shock, (i + 0.5) * CELL - half, (j + 0.5) * CELL - half) * eventTerm
+      const a = r * siteFactor(SOIL_VS30[city.soil[k]], r)
+      pgaGround += a
+      nGround++
+      return a
+    })
     const buried = this.slideTargets(g.slides)
     for (const b of city.buildings) {
       if (b.removed) continue
       const s = this.st.get(b.id)
       if (!s || s.collapsed) continue
       const soil = city.soil[cellOfBuilding(b)]
-      const p = demand(b, soil, shock.M, shock.R) * Math.exp(rng.normal() * 0.25)
+      const p = demand(b, soil, shock.M, rockPgaAt(shock, b.cx, b.cz) * eventTerm) * Math.exp(rng.normal() * within)
       pgaSum += p / (b.floors >= 10 ? 1.3 : 1)
       n++
       const sh = shapeOf(b)
@@ -311,11 +370,12 @@ export class QuakeSim {
       }
     }
     if (notable.length > 6) notable.length = 6
-    vis.pga = n ? pgaSum / n : 0
-    this.shocks.push({ ...shock, t: this.time, pga: vis.pga })
+    vis.pga = n ? pgaSum / n : 0 // structural demand: drives the visual shaking
+    const pga = nGround ? pgaGround / nGround : 0 // mean surface PGA across the district
+    const rjb = siteDistances(shock.geo, 0, 0).rjb
+    this.shocks.push({ M: shock.M, depth: shock.depth, dist: shock.dist, az: shock.az, main: shock.main, t: this.time, pga, demand: vis.pga, rjb })
     this.pending.push(vis)
-    this.reportGround(g)
-    return { pga: vis.pga, collapses, weakFell, heavy, any, notable }
+    return { pga, rjb, collapses, weakFell, heavy, any, notable, ground: g }
   }
 
   /**

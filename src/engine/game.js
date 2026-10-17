@@ -11,6 +11,7 @@ import {
   BUILDING_TYPES,
   CONSTRUCTION,
   QUAKE_LEVELS,
+  HISTORICAL_QUAKES,
   FLOOD_LEVELS,
   COSTS,
   UPGRADES,
@@ -24,7 +25,28 @@ import { Rng, clamp } from './math.js'
 import { World } from './world.js'
 import { FloodSim } from './floodSim.js'
 import { FloodImpact } from './floodImpact.js'
-import { QuakeSim, demand, mediansFor, damageProbs, collapseProb, cellOfBuilding, soilName, pgaRock, shapeOf, dsFromD } from './quakeSim.js'
+import { QuakeSim, demand, mediansFor, damageProbs, collapseProb, cellOfBuilding, soilName, rockPgaAt, withGeometry, quakeAzimuth, shapeOf, dsFromD } from './quakeSim.js'
+
+/**
+ * The earthquake a set of menu settings describes. settings.quake:
+ *   { mode: 'tier' } uses QUAKE_LEVELS[settings.level];
+ *   { mode: 'historical', id } a HISTORICAL_QUAKES reenactment;
+ *   { mode: 'custom', params: {M, depth, dist, mech, strike, rupture, dip?} }.
+ * Common options: bearing (deg, null = random from the seed), variability, aftershocks.
+ */
+export const CUSTOM_QUAKE = { M: 7.0, depth: 15, dist: 20, mech: 'strike', strike: 30, rupture: 'bilateral' }
+
+export function quakeEventFrom(settings) {
+  const q = settings.quake ?? { mode: 'tier' }
+  let ev
+  if (q.mode === 'historical') {
+    const h = HISTORICAL_QUAKES.find((x) => x.id === q.id) ?? HISTORICAL_QUAKES[0]
+    ev = { ...h, title: `${h.year} ${h.name}`, name: `${h.year} ${h.name}`, example: `Reenacted at ${h.city}, ${h.place}.` }
+  } else if (q.mode === 'custom') {
+    ev = { name: 'Custom earthquake', desc: 'Your own scenario.', example: '', ...CUSTOM_QUAKE, ...q.params }
+  } else ev = { ...QUAKE_LEVELS[clamp(settings.level ?? 3, 0, QUAKE_LEVELS.length - 1)] }
+  return { mech: 'strike', strike: 90, rupture: 'bilateral', ...ev, mode: q.mode ?? 'tier', bearing: q.bearing ?? null, variability: q.variability !== false, aftershocks: q.aftershocks !== false }
+}
 
 export const TOOLS = [
   { key: 'inspect', name: 'Inspect', group: 'General', icon: '🔍', desc: 'Click a building to see its details and risk.' },
@@ -175,9 +197,20 @@ export class Game {
   updateFault() {
     const s = this.settings
     if (s?.disaster !== 'quake') return this.world.subsurface.setQuake(null)
-    const L = QUAKE_LEVELS[s.level]
-    const az = new Rng((s.seed ^ 0x5bd1e995) >>> 0).float(0, Math.PI * 2)
-    this.world.subsurface.setQuake({ az, dist: L.dist, depth: L.depth, M: L.M })
+    const L = this.quakeEvent()
+    this.world.subsurface.setQuake({ az: L.az, dist: L.dist, depth: L.depth, M: L.M })
+  }
+
+  /** This scenario's earthquake with its epicentre direction and fault geometry (same draw the QuakeSim makes). */
+  quakeEvent() {
+    const s = this.settings
+    const key = JSON.stringify([s.quake, s.level, s.seed])
+    if (this.quakeEvCache?.key !== key) {
+      const ev = quakeEventFrom(s)
+      const az = quakeAzimuth(ev, new Rng((s.seed ^ 0x5bd1e995) >>> 0).float(0, Math.PI * 2))
+      this.quakeEvCache = { key, ev: withGeometry({ ...ev, az }) }
+    }
+    return this.quakeEvCache.ev
   }
 
   /** Vehicles & people: detailed Quaternius models or the built-in procedural ones. */
@@ -205,7 +238,7 @@ export class Game {
   }
 
   get level() {
-    return this.settings.disaster === 'quake' ? QUAKE_LEVELS[this.settings.level] : FLOOD_LEVELS[this.settings.level]
+    return this.settings.disaster === 'quake' ? this.quakeEvent() : FLOOD_LEVELS[this.settings.level]
   }
 
   notify(text, kind = 'info') {
@@ -625,10 +658,9 @@ export class Game {
   }
 
   quakeRisk(b) {
-    const L = QUAKE_LEVELS[this.settings.level]
+    const L = this.quakeEvent()
     const soil = this.city.soil[cellOfBuilding(b)]
-    const R = Math.hypot(L.dist, L.depth)
-    const p = demand(b, soil, L.M, R)
+    const p = demand(b, soil, L.M, rockPgaAt(L, b.cx, b.cz))
     const med = mediansFor(b, L.M, 0)
     const probs = damageProbs(p, med)
     const sh = shapeOf(b)
@@ -1122,7 +1154,7 @@ export class Game {
         expDeaths += pres * (r.pCollapse * 0.13 + (r.pComplete - r.pCollapse) * 0.004 + r.pExtensive * 0.0004)
       }
       out.pga = city.buildings.length ? pgaSum / city.buildings.length : 0
-      out.rockPga = pgaRock(this.level.M, Math.hypot(this.level.dist, this.level.depth))
+      out.rockPga = rockPgaAt(this.quakeEvent(), 0, 0)
       out.expCollapse = expCollapse
       out.expDeaths = expDeaths
     } else {
