@@ -228,6 +228,35 @@ export class QuakeSim {
     this.addDeaths(b, s, dead, collapsed ? 'collapse' : 'damage')
   }
 
+  /**
+   * Heavy debris, a falling block or a toppling tower struck building b.
+   * energy in joules; resistance scales with the building's mass and strength.
+   */
+  applyImpact(b, energy) {
+    const s = b && this.st.get(b.id)
+    if (!s || s.collapsed) return null
+    const C = CONSTRUCTION[b.construction]
+    const x = energy / (b.area * 450 * C.medians[3])
+    let ds = s.ds
+    if (x > 0.04) ds = Math.max(ds, 2)
+    if (x > 0.15) ds = Math.max(ds, 3)
+    if (x > 0.45) ds = 4
+    if (ds <= s.ds) return null
+    const old = s.ds
+    s.ds = ds
+    const collapsed = ds === 4 && this.rng.chance(clamp(0.25 + x * 0.3, 0, 0.9))
+    if (collapsed) s.collapsed = true
+    this.casualties(b, s, old, ds, collapsed)
+    if (ds >= 3) this.maybeIgnite(b, s, ds)
+    this.pending.push({ impact: true, M: 0, pga: 0, main: false, collapses: collapsed ? [b.id] : [], damaged: collapsed ? [] : [b.id] })
+    this.impacts = (this.impacts || 0) + 1
+    if ((collapsed || ds >= 3) && this.impacts <= 15) {
+      const name = BUILDING_TYPES[b.type].name.toLowerCase()
+      this.log(`Falling debris ${collapsed ? 'brought down' : 'smashed into'} ${/^[aeiou]/.test(name) ? 'an' : 'a'} ${name} (${b.floors} floors).`, collapsed ? 'bad' : 'warn')
+    }
+    return { ds, collapsed }
+  }
+
   addDeaths(b, s, n, cause) {
     if (n <= 0) return
     s.dead += n

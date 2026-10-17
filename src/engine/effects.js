@@ -120,10 +120,14 @@ export class Debris {
     this.items = []
     this.cursor = 0
     scene.add(this.mesh)
-    this.groundAt = () => 0
+    this.surfaceAt = () => ({ y: 0, bid: -1 })
   }
 
-  spawn(x, y, z, vx, vy, vz, size, color) {
+  /**
+   * opts: { dims: [sx,sy,sz] exact size, fragile: shatters on hard impact,
+   *         src: id of the building it came from (ignored for roof contact) }
+   */
+  spawn(x, y, z, vx, vy, vz, size, color, opts = {}) {
     let it
     let i
     if (this.items.length < this.max) {
@@ -134,6 +138,7 @@ export class Debris {
       it = this.items[i]
       this.cursor = (this.cursor + 1) % this.max
     }
+    const d = opts.dims
     Object.assign(it, {
       x,
       y,
@@ -141,32 +146,40 @@ export class Debris {
       vx,
       vy,
       vz,
-      sx: size * (0.6 + Math.random() * 0.8),
-      sy: size * (0.3 + Math.random() * 0.5),
-      sz: size * (0.6 + Math.random() * 0.8),
-      rx: Math.random() * 6,
-      ry: Math.random() * 6,
-      rz: Math.random() * 6,
-      wx: (Math.random() - 0.5) * 8,
-      wy: (Math.random() - 0.5) * 8,
-      wz: (Math.random() - 0.5) * 8,
+      sx: d ? d[0] : size * (0.6 + Math.random() * 0.8),
+      sy: d ? d[1] : size * (0.3 + Math.random() * 0.5),
+      sz: d ? d[2] : size * (0.6 + Math.random() * 0.8),
+      rx: d ? 0 : Math.random() * 6,
+      ry: d ? 0 : Math.random() * 6,
+      rz: d ? 0 : Math.random() * 6,
+      wx: d ? (Math.random() - 0.5) * 0.6 : (Math.random() - 0.5) * 8,
+      wy: d ? 0 : (Math.random() - 0.5) * 8,
+      wz: d ? (Math.random() - 0.5) * 0.6 : (Math.random() - 0.5) * 8,
       sleep: false,
       dirty: true,
+      fragile: !!opts.fragile,
+      src: opts.src ?? -1,
+      color,
+      age: 0,
+      dead: false,
     })
     _c.set(color)
-    _c.offsetHSL(0, 0, (Math.random() - 0.5) * 0.15)
+    if (!d) _c.offsetHSL(0, 0, (Math.random() - 0.5) * 0.15)
     this.mesh.setColorAt(i, _c)
     if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true
     this.mesh.count = this.items.length
+    return it
   }
 
   update(dt) {
     let changed = false
     const steps = Math.min(4, Math.ceil(dt / (1 / 120)))
     const h = dt / steps
+    const shatter = []
     for (let i = 0; i < this.items.length; i++) {
       const it = this.items[i]
-      if (it.sleep && !it.dirty) continue
+      if (it.dead || (it.sleep && !it.dirty)) continue
+      it.age += dt
       for (let s = 0; s < steps && !it.sleep; s++) {
         it.vy -= 9.81 * h
         it.x += it.vx * h
@@ -175,8 +188,17 @@ export class Debris {
         it.rx += it.wx * h
         it.ry += it.wy * h
         it.rz += it.wz * h
-        const g = this.groundAt(it.x, it.z) + it.sy * 0.5
+        // lands on the ground, or on the roof of a standing building
+        const surf = this.surfaceAt(it.x, it.z, it.age < 0.6 ? it.src : -1)
+        const g = surf.y + it.sy * 0.5
         if (it.y < g) {
+          const impact = -it.vy
+          if (impact > 4) this.onLand?.(it, impact, surf.bid)
+          if (it.fragile && impact > 3) {
+            shatter.push(it)
+            it.dead = true
+            break
+          }
           it.y = g
           if (it.vy < 0) it.vy = -it.vy * 0.25
           it.vx *= 0.55
@@ -190,15 +212,24 @@ export class Debris {
           }
         }
       }
-      _p.set(it.x, it.y, it.z)
-      _q.setFromEuler(_e.set(it.rx, it.ry, it.rz))
-      _s.set(it.sx, it.sy, it.sz)
-      _m.compose(_p, _q, _s)
+      if (it.dead) _m.makeScale(0, 0, 0)
+      else {
+        _p.set(it.x, it.y, it.z)
+        _q.setFromEuler(_e.set(it.rx, it.ry, it.rz))
+        _s.set(it.sx, it.sy, it.sz)
+        _m.compose(_p, _q, _s)
+      }
       this.mesh.setMatrixAt(i, _m)
       it.dirty = false
       changed = true
     }
     if (changed) this.mesh.instanceMatrix.needsUpdate = true
+    for (const it of shatter) this.onShatter?.(it)
+  }
+
+  /** Wake resting pieces (e.g. the roof they sat on just collapsed). */
+  wakeAll() {
+    for (const it of this.items) if (it.sleep && !it.dead) it.sleep = false
   }
 
   clear() {

@@ -81,6 +81,8 @@ export class Game {
     this.selected = null
     this.hover = null
     this.last = performance.now()
+    this.world.onImpact = (bid, e) => this.buildingHit(bid, e)
+    this.world.onStreetHit = (hit) => this.streetHit(hit)
     this.bindInput()
     this.loadDemo()
     this.running = true
@@ -114,9 +116,10 @@ export class Game {
   loadDemo() {
     const city = generateCity('metropolis', Math.floor(Math.random() * 1e9))
     this.city = city
-    this.world.buildCity(city)
+    this.world.buildCity(city, 17.5)
     this.preview = new FloodSim(city)
-    this.world.updateWater(this.preview.h, this.preview.zg)
+    this.preview.computeFlow()
+    this.world.updateWater(this.preview)
     this.world.focus(0, 0, 900)
     this.world.controls.autoRotate = true
     this.world.controls.autoRotateSpeed = 0.35
@@ -147,10 +150,11 @@ export class Game {
     this.results = null
     this.flood = this.quake = this.impact = null
     this.world.controls.autoRotate = false
-    this.world.buildCity(city)
+    this.world.buildCity(city, this.settings.startHour)
     this.world.burning = []
     this.preview = new FloodSim(city)
-    this.world.updateWater(this.preview.h, this.preview.zg)
+    this.preview.computeFlow()
+    this.world.updateWater(this.preview)
     this.world.setEnvironment({ hour: this.settings.startHour })
     this.applyColorMode()
   }
@@ -533,7 +537,8 @@ export class Game {
 
   refreshPreview() {
     this.preview = new FloodSim(this.city)
-    this.world.updateWater(this.preview.h, this.preview.zg)
+    this.preview.computeFlow()
+    this.world.updateWater(this.preview)
   }
 
   // --------------------------------------------------------------- colors
@@ -614,6 +619,11 @@ export class Game {
       this.population = this.quake.population
       this.pushLog(0, `A normal day in ${city.name}. ${stats.present.toLocaleString()} people are in the district…`, 'info')
     }
+    // people on the streets and in cars are part of the population too
+    this.world.life.buildFields()
+    this.world.life.stats = { pedDead: 0, carDead: 0, carsCrushed: 0, swept: 0 }
+    this.population += this.world.life.outdoorCount()
+    this.streetLog = 0
     this.applyColorMode()
     this.emit()
   }
@@ -658,7 +668,54 @@ export class Game {
       if (this.quake?.mainDone) haze = clamp(this.quake.shocks[0].pga * 0.8, 0, 0.45) * Math.exp(-(this.simTime - this.quake.mainTime) / 7200)
       w.setEnvironment({ hour, rain, haze })
     }
+    w.setLifeContext(this.lifeContext())
     w.update(dt)
+  }
+
+  /** What the city's cars and pedestrians need to know about the disaster. */
+  lifeContext() {
+    const sim = this.flood || this.preview
+    const city = this.city
+    const ctx = { quake: false, quakeT: 0, flood: false, warned: false, rain: 0 }
+    if (sim && city) {
+      ctx.depthAt = (k) => {
+        const h = sim.h[k]
+        if (!city.bridge[k]) return h
+        const j = Math.floor(k / GRID)
+        const deck = this.world.deckAt(((k % GRID) + 0.5) * 10 - 500, (j + 0.5) * 10 - 500) ?? city.bankZ[j] + 0.7
+        return Math.max(0, sim.zg[k] + h - deck)
+      }
+      ctx.flowAt = (i, j) => sim.flowAt(i, j)
+    }
+    if (this.phase !== 'sim' && this.phase !== 'results') return ctx
+    if (this.quake?.mainDone) {
+      ctx.quake = true
+      ctx.quakeT = this.quake.time - this.quake.mainTime
+    }
+    if (this.flood) {
+      ctx.flood = true
+      ctx.warned = this.impact.warned
+      ctx.rain = this.flood.rain
+    }
+    return ctx
+  }
+
+  /** Falling debris hit something in the street. */
+  streetHit(hit) {
+    if (this.phase !== 'sim') return
+    this.streetLog = (this.streetLog || 0) + 1
+    if (this.streetLog > 12) return
+    const parts = []
+    if (hit.crushed) parts.push(`crushed ${hit.crushed} car${hit.crushed > 1 ? 's' : ''}`)
+    if (hit.killed) parts.push(`killed ${hit.killed} ${hit.killed > 1 ? 'people' : 'person'} in the street`)
+    this.pushLog(this.simTime, `Falling debris ${parts.join(' and ')}.`, 'bad')
+  }
+
+  /** Debris or a falling tower struck a building. */
+  buildingHit(bid, energy) {
+    if (this.phase !== 'sim' || !this.quake) return
+    const b = this.city.byId.get(bid)
+    if (b) this.quake.applyImpact(b, energy)
   }
 
   stepFlood(want) {
@@ -675,7 +732,10 @@ export class Game {
       tick = true
     }
     this.waterFrame = (this.waterFrame || 0) + 1
-    if (this.waterFrame % 2 === 0) this.world.updateWater(f.h, f.zg)
+    if (this.waterFrame % 2 === 0) {
+      f.computeFlow()
+      this.world.updateWater(f)
+    }
     if (tick) this.syncFlood()
   }
 
@@ -734,6 +794,18 @@ export class Game {
     for (const e of q.events.splice(0)) this.pushLog(e.t, e.text, e.level)
     const w = this.world
     for (const v of q.pending.splice(0)) {
+      if (v.impact) {
+        for (const id of v.collapses) {
+          const b = this.city.byId.get(id)
+          if (b) w.collapse(b, 0.2 + Math.random() * 0.8)
+        }
+        for (const id of v.damaged) {
+          const b = this.city.byId.get(id)
+          if (b) w.setDamage(b, q.st.get(id).ds)
+        }
+        w.refreshColors()
+        continue
+      }
       if (v.M < 4.2 && !v.collapses.length) continue
       const dur = clamp(v.main ? 2 + (v.M - 4) * 2.4 : 1 + (v.M - 4) * 1.2, 1, 18)
       w.addShake(v.pga, dur, v.M)
@@ -801,9 +873,14 @@ export class Game {
 
   // -------------------------------------------------------------- results
   currentTotals() {
-    if (this.impact) return this.impact.totals()
-    if (this.quake) return this.quake.totals()
-    return null
+    const T = this.impact ? this.impact.totals() : this.quake ? this.quake.totals() : null
+    if (T) {
+      const L = this.world.life.stats
+      T.outdoorDead = L.pedDead + L.carDead
+      T.carsCrushed = L.carsCrushed
+      T.dead += T.outdoorDead
+    }
+    return T
   }
 
   computeResults() {
@@ -830,6 +907,7 @@ export class Game {
         { label: 'Trapped, not rescued in time', value: c.trapped },
         { label: 'Untreated injuries', value: c.injuries },
         { label: 'Fire', value: c.fire },
+        { label: 'Hit by debris outdoors', value: T.outdoorDead },
       )
       const cls = Object.entries(q.deathsByClass).sort((a, b) => b[1] - a[1])
       if (cls.length && cls[0][1] >= 1)
@@ -846,7 +924,7 @@ export class Game {
     } else {
       const im = this.impact
       const c = im.deathsByCause
-      causes.push({ label: 'Drowned indoors', value: c.drowning }, { label: 'Buildings swept away', value: c.collapse }, { label: 'Caught while evacuating', value: c.evacuation })
+      causes.push({ label: 'Drowned indoors', value: c.drowning }, { label: 'Buildings swept away', value: c.collapse }, { label: 'Caught while evacuating', value: c.evacuation }, { label: 'Swept away outdoors', value: T.outdoorDead })
       if (c.drowning >= 1) lessons.push('Most drownings happened in low-rise homes in low-lying areas. Flood walls, elevating homes and earlier evacuation all reduce this.')
       if (c.evacuation >= 1) lessons.push(`${Math.round(c.evacuation)} people died wading through floodwater. ${this.upgrades.floodWarning ? 'Shelters closer to people help.' : 'An early-warning system gets people out before the streets flood.'}`)
       if (this.flood.stageMax > 0) lessons.push(`The river rose ${this.flood.stageMax.toFixed(1)} m above its banks. Continuous flood walls along the river, dredging and upstream storage help — but walls can fail if overtopped.`)

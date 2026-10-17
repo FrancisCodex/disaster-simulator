@@ -6,8 +6,8 @@
 import { GRID, CELL, G, CELL_ROAD, CELL_RIVER, CELL_PARK, CELL_POND, PUMP_RATE } from './config.js'
 import { clamp, smoothstep } from './math.js'
 
-const CATCHMENT_M2 = 80e6 // upstream catchment draining through the city's river
-const BASE_FLOW = 20 // m³/s
+const CATCHMENT_M2 = 220e6 // upstream catchment draining through the city's river
+const BASE_FLOW = 110 // m³/s — a sizeable lowland river
 const RIVER_SLOPE = 0.001
 
 export class FloodSim {
@@ -57,7 +57,7 @@ export class FloodSim {
     // start with a river at base flow
     for (const k of this.river) {
       const j = Math.floor(k / N)
-      this.h[k] = Math.max(0, city.bankZ[j] - 3.6 - this.zg[k])
+      this.h[k] = Math.max(0, city.bankZ[j] - 4.6 - this.zg[k])
     }
     this.raining = false
     for (let s = 0; s < 1500; s++) this.step(Math.min(this.stableDt(), 3))
@@ -299,6 +299,34 @@ export class FloodSim {
 
   depthAt(k) {
     return this.h[k]
+  }
+
+  /** Depth-averaged velocity per cell (m/s), for rendering and agents. */
+  computeFlow() {
+    const { N, qx, qy, h } = this
+    if (!this.vx) {
+      this.vx = new Float32Array(N * N)
+      this.vz = new Float32Array(N * N)
+    }
+    for (let j = 0; j < N; j++)
+      for (let i = 0; i < N; i++) {
+        const k = j * N + i
+        if (h[k] < 0.02) {
+          this.vx[k] = this.vz[k] = 0
+          continue
+        }
+        const fx = ((i > 0 ? qx[j * (N - 1) + i - 1] : 0) + (i < N - 1 ? qx[j * (N - 1) + i] : 0)) * 0.5
+        const fz = ((j > 0 ? qy[k - N] : 0) + (j < N - 1 ? qy[k] : 0)) * 0.5
+        const d = Math.max(h[k], 0.1)
+        this.vx[k] = clamp(fx / d, -6, 6)
+        this.vz[k] = clamp(fz / d, -6, 6)
+      }
+  }
+
+  flowAt(i, j) {
+    if (!this.vx) return [0, 0]
+    const k = j * this.N + i
+    return [this.vx[k], this.vz[k]]
   }
 
   velocityAt(i, j) {

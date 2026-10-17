@@ -51,6 +51,23 @@ The numbers are simplified from real engineering methods. They're meant to build
 - **Defences:** flood walls (which can breach when overtopped), pump stations (which fail if their own site floods), retention ponds, river dredging, and elevated buildings.
 - **People:** flood warnings trigger evacuation to shelters. Wading through moving water is dangerous. People in tall buildings move upstairs, low-rise homes are deadliest, fire crews perform boat rescues, and buildings fail under high depth × velocity.
 
+### Structural physics
+
+- Buildings sway as damped oscillators with a period of about 0.1 s per storey and bend in their first mode, so skyscrapers whip slowly in the long-period waves of great earthquakes.
+- Collapses take three forms:
+  - **Progressive:** ductile modern frames sway, then come down vertically. Storeys crush at the base while the top stays intact as it descends.
+  - **Partial:** upper floors shear off and fall as one block that shatters on impact.
+  - **Topple:** only for a weak base, meaning liquefied soil or a brittle older frame. The building rotates intact like a falling column until its face strikes the ground or a neighbour, then breaks apart and passes its energy to whatever it hit.
+- Debris is simulated as rigid bodies. Pieces land on roofs as well as the ground, and their impact energy damages the buildings they hit, which can bring down neighbours. Shaking also sheds glass and cladding from tall facades onto the street.
+
+### City life
+
+- Roads are real geometry with high-resolution markings, zebra crossings, stop lines, raised kerbs and sidewalks. Bridges span bank to bank on piers, and roads that reach the river without a bridge end at a "ROAD CLOSED" barricade.
+- Sedans, hatchbacks, SUVs, vans, buses and box trucks drive in lanes with car-following, and stop at red and amber signals and for anyone in the road. Pedestrians walk the sidewalks and cross only at crosswalks on a green. Street activity follows the time of day.
+- **Earthquake:** drivers stop, people run from buildings to open ground, and debris crushes cars (some catch fire) and strikes pedestrians. Rubble blocks streets.
+- **Flood:** cars stall, then float away with the current; people shelter in sturdy buildings or head for high ground, and anyone caught in deep, fast water is swept away.
+- Outdoor casualties count toward the results.
+
 ## Running locally
 
 Requires Node.js 18+.
