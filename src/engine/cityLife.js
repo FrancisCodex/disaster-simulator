@@ -224,7 +224,7 @@ export class CityLife {
     pg.setAttribute('aWalk', this.pedWalk)
     this.pedMesh = new THREE.InstancedMesh(pg, personMaterial(), np)
     this.pedMesh.count = this.peds.length
-    this.pedMesh.castShadow = true
+    this.pedMesh.castShadow = false // shadows of 1.7 m figures are invisible from city height
     this.peds.forEach((p, i) => this.pedMesh.setColorAt(i, _c.set(p.color)))
     this.group.add(this.pedMesh)
 

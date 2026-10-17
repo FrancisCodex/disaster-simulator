@@ -84,6 +84,11 @@ export class Game {
     this.world.onImpact = (bid, e) => this.buildingHit(bid, e)
     this.world.onStreetHit = (hit) => this.streetHit(hit)
     this.bindInput()
+    try {
+      this.world.showWorld = localStorage.getItem('metrorisk.showWorld') !== '0'
+    } catch {
+      /* storage unavailable: keep the default */
+    }
     this.loadDemo()
     this.running = true
     const loop = () => {
@@ -120,6 +125,7 @@ export class Game {
     this.preview = new FloodSim(city)
     this.preview.computeFlow()
     this.world.updateWater(this.preview)
+    this.world.subsurface.setQuake(null)
     this.world.focus(0, 0, 900)
     this.world.controls.autoRotate = true
     this.world.controls.autoRotateSpeed = 0.35
@@ -156,7 +162,27 @@ export class Game {
     this.preview.computeFlow()
     this.world.updateWater(this.preview)
     this.world.setEnvironment({ hour: this.settings.startHour })
+    this.updateFault()
     this.applyColorMode()
+  }
+
+  /** Point the cut-away view's fault at this scenario's epicentre (same draw the QuakeSim will make). */
+  updateFault() {
+    const s = this.settings
+    if (s?.disaster !== 'quake') return this.world.subsurface.setQuake(null)
+    const L = QUAKE_LEVELS[s.level]
+    const az = new Rng((s.seed ^ 0x5bd1e995) >>> 0).float(0, Math.PI * 2)
+    this.world.subsurface.setQuake({ az, dist: L.dist, depth: L.depth, M: L.M })
+  }
+
+  setShowWorld(v) {
+    this.world.setShowWorld(v)
+    try {
+      localStorage.setItem('metrorisk.showWorld', v ? '1' : '0')
+    } catch {
+      /* not persisted */
+    }
+    this.emit()
   }
 
   get level() {
@@ -808,10 +834,10 @@ export class Game {
       }
       if (v.M < 4.2 && !v.collapses.length) continue
       const dur = clamp(v.main ? 2 + (v.M - 4) * 2.4 : 1 + (v.M - 4) * 1.2, 1, 18)
-      w.addShake(v.pga, dur, v.M)
+      const lag = w.addShake(v.pga, dur, v.M, v.main)
       for (const id of v.collapses) {
         const b = this.city.byId.get(id)
-        if (b) w.collapse(b, Math.random() * dur * 0.75)
+        if (b) w.collapse(b, lag + Math.random() * dur * 0.75)
       }
       for (const id of v.damaged) {
         const b = this.city.byId.get(id)
@@ -1033,6 +1059,7 @@ export class Game {
       phase: this.phase,
       version: this.version,
       notice: this.notice && performance.now() - this.notice.t < 4500 ? this.notice : null,
+      showWorld: this.world.showWorld,
       tool: this.tool,
       overlay: this.overlay,
     }

@@ -21,7 +21,7 @@ function paint(g, rgb, part = 0) {
 /** Side-profile extrusion (x forward, y up), centred across its width. */
 function profile(points, width, bevel = 0.05) {
   const s = new THREE.Shape(points.map(([x, y]) => new THREE.Vector2(x, y)))
-  const g = new THREE.ExtrudeGeometry(s, { depth: width - bevel * 2, bevelEnabled: true, bevelThickness: bevel, bevelSize: bevel, bevelSegments: 2, curveSegments: 4 })
+  const g = new THREE.ExtrudeGeometry(s, { depth: width - bevel * 2, bevelEnabled: true, bevelThickness: bevel, bevelSize: bevel, bevelSegments: 1, curveSegments: 3 })
   g.translate(0, 0, -(width - bevel * 2) / 2)
   return g
 }
@@ -38,8 +38,8 @@ function wheels(xs, r, w, track) {
   const parts = []
   for (const x of xs)
     for (const side of [-1, 1]) {
-      const tyre = new THREE.CylinderGeometry(r, r, w, 14).rotateX(Math.PI / 2).translate(x, r, (side * track) / 2)
-      const rim = new THREE.CylinderGeometry(r * 0.55, r * 0.55, w + 0.02, 10).rotateX(Math.PI / 2).translate(x, r, (side * track) / 2)
+      const tyre = new THREE.CylinderGeometry(r, r, w, 10, 1, false).rotateX(Math.PI / 2).translate(x, r, (side * track) / 2)
+      const rim = new THREE.CylinderGeometry(r * 0.55, r * 0.55, w + 0.02, 6).rotateX(Math.PI / 2).translate(x, r, (side * track) / 2)
       parts.push(paint(tyre, TYRE), paint(rim, RIM))
     }
   return parts
@@ -114,7 +114,7 @@ export function personGeometry() {
   const parts = []
   const leg = (side, part) => {
     const x = side * 0.1
-    parts.push(paint(new THREE.CylinderGeometry(0.075, 0.065, 0.84, 6).translate(x, 0.5, 0), [1, 1, 1], part))
+    parts.push(paint(new THREE.CylinderGeometry(0.075, 0.065, 0.84, 5).translate(x, 0.5, 0), [1, 1, 1], part))
     parts.push(paint(new THREE.BoxGeometry(0.12, 0.08, 0.26).translate(x, 0.04, 0.04), [0.1, 0.09, 0.08], part))
   }
   leg(-1, 3)
@@ -122,12 +122,12 @@ export function personGeometry() {
   parts.push(paint(new THREE.CylinderGeometry(0.15, 0.13, 0.15, 8).translate(0, 0.95, 0), [1, 1, 1], 8)) // hips (pants)
   parts.push(paint(new THREE.CylinderGeometry(0.19, 0.15, 0.58, 8).translate(0, 1.29, 0), [1, 1, 1], 0))
   parts.push(paint(new THREE.CylinderGeometry(0.06, 0.07, 0.08, 6).translate(0, 1.61, 0), [1, 1, 1], 1)) // neck
-  parts.push(paint(new THREE.SphereGeometry(0.115, 10, 8).scale(1, 1.15, 1.05).translate(0, 1.74, 0.01), [1, 1, 1], 1))
-  parts.push(paint(new THREE.SphereGeometry(0.12, 10, 6, 0, Math.PI * 2, 0, Math.PI * 0.55).translate(0, 1.77, -0.01), [1, 1, 1], 2))
+  parts.push(paint(new THREE.SphereGeometry(0.115, 7, 5).scale(1, 1.15, 1.05).translate(0, 1.74, 0.01), [1, 1, 1], 1))
+  parts.push(paint(new THREE.SphereGeometry(0.12, 7, 3, 0, Math.PI * 2, 0, Math.PI * 0.55).translate(0, 1.77, -0.01), [1, 1, 1], 2))
   for (const side of [-1, 1]) {
     const part = side < 0 ? 5 : 6
-    parts.push(paint(new THREE.CylinderGeometry(0.055, 0.045, 0.58, 6).translate(side * 0.24, 1.25, 0), [1, 1, 1], part))
-    parts.push(paint(new THREE.SphereGeometry(0.05, 6, 4).translate(side * 0.24, 0.94, 0), [1, 1, 1], part + 10)) // hands (skin)
+    parts.push(paint(new THREE.CylinderGeometry(0.055, 0.045, 0.58, 4).translate(side * 0.24, 1.25, 0), [1, 1, 1], part))
+    parts.push(paint(new THREE.SphereGeometry(0.05, 4, 2).translate(side * 0.24, 0.94, 0), [1, 1, 1], part + 10)) // hands (skin)
   }
   const g = mergeGeometries(parts)
   g.computeVertexNormals()

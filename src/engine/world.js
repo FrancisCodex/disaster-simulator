@@ -9,6 +9,7 @@ import { Particles, Debris, Rain } from './effects.js'
 import { makeBuildingMaterial, makeSwayDepthMaterial, makeWaterMaterial, SkyEnvironment } from './materials.js'
 import { CityLife } from './cityLife.js'
 import { buildRoadMeshes } from './roads.js'
+import { Subsurface } from './subsurface.js'
 
 const HALF = (GRID * CELL) / 2
 const PX = 16 // terrain texture pixels per cell
@@ -127,6 +128,9 @@ export class World {
     this.life = new CityLife(scene, this)
     this.lifeCtx = {}
     this.impactAcc = new Map()
+    this.subsurface = new Subsurface(this)
+    this.showWorld = true
+    this.blockShake = new THREE.Vector3()
 
     this.highlight = new THREE.LineSegments(
       new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0)),
@@ -189,12 +193,18 @@ export class World {
     this.noise = makeNoise2D(city.seed + 99)
     this.buildTerrain()
     this.buildRoads()
-    this.buildOuter()
+    this.subsurface.build(city)
+    this.root.add(this.subsurface.group)
+    this.outerMesh = null
+    this.forestMesh = null
+    // the surrounding landscape is only generated when it is switched on
+    if (this.showWorld) this.buildOuter()
     this.buildWater()
     this.buildTrees()
     this.rebuildBuildings()
     this.rebuildStatic()
     this.life.build(city, hour)
+    this.applyWorldVisibility()
     this.paintLamps()
   }
 
@@ -323,6 +333,27 @@ export class World {
     g.computeBoundingSphere()
     g.computeBoundingBox()
     if (this.outerMesh) this.updateOuterHeights()
+    if (this.subsurface.city) {
+      this.subsurface.build(this.city)
+      this.subsurface.setQuake(this.subsurface.quake)
+    }
+  }
+
+  /** Show the generated landscape around the district, or just the district on a cut-away block. */
+  setShowWorld(v) {
+    this.showWorld = v
+    if (v && !this.outerMesh && this.city) this.buildOuter()
+    this.applyWorldVisibility()
+  }
+
+  applyWorldVisibility() {
+    const v = this.showWorld
+    if (this.outerMesh) this.outerMesh.visible = v
+    if (this.forestMesh) this.forestMesh.visible = v
+    for (const m of this.outerRivers || []) m.visible = v
+    this.subsurface.group.visible = !v
+    // without surroundings you may orbit low enough to look at the cross-section
+    this.controls.maxPolarAngle = v ? 1.42 : 1.68
   }
 
   // ----------------------------------------------------- surrounding landscape
@@ -456,6 +487,7 @@ export class World {
     mesh.count = n
     mesh.castShadow = false
     mesh.receiveShadow = true
+    this.forestMesh = mesh
     this.root.add(mesh)
   }
 
@@ -1143,13 +1175,16 @@ export class World {
 
   // -------------------------------------------------------------- shaking
   /** Queue ground shaking. pga in g, realDur in seconds of real time. */
-  addShake(pga, realDur, M) {
+  addShake(pga, realDur, M, main = false) {
+    // in cut-away view the shaking starts when the S-waves reach the city
+    const lag = this.subsurface.group.visible ? this.subsurface.trigger(M, main) : 0
     const freqs = []
     const lowF = clamp(1.4 - (M - 5) * 0.25, 0.25, 1.4)
     for (let k = 0; k < 5; k++) freqs.push({ f: lowF * (1 + k * 0.8 + Math.random() * 0.5), px: Math.random() * 6.28, pz: Math.random() * 6.28, w: 1 })
     // great earthquakes radiate strong long-period waves that make tall towers resonate
     if (M >= 7.3) freqs.push({ f: 0.14 + Math.random() * 0.12, px: Math.random() * 6.28, pz: Math.random() * 6.28, w: 1.5 + (M - 7.3) })
-    this.shakes.push({ t0: this.realTime, dur: realDur, pga, freqs })
+    this.shakes.push({ t0: this.realTime + lag, dur: realDur, pga, freqs })
+    return lag
   }
 
   groundAccel(t) {
@@ -1490,6 +1525,17 @@ export class World {
     const t = this.realTime
     this.shakes = this.shakes.filter((s) => t - s.t0 < s.dur + 0.1)
     const g = this.groundAccel(t)
+
+    // cut-away view: the whole block moves with the ground
+    this.subsurface.update(dt)
+    const movers = [this.root, this.life.group, this.debris.mesh]
+    if (this.subsurface.group.visible && g.env > 0.002) {
+      this.blockShake.set(clamp(g.ax * 0.05, -3, 3), 0, clamp(g.az * 0.05, -3, 3))
+      for (const o of movers) o.position.copy(this.blockShake)
+    } else if (this.blockShake.lengthSq()) {
+      this.blockShake.set(0, 0, 0)
+      for (const o of movers) o.position.set(0, 0, 0)
+    }
 
     // camera shake
     this.camera.position.sub(this.camShake)
