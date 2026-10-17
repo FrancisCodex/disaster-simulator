@@ -184,6 +184,7 @@ export class World {
   buildCity(city, hour = 12) {
     this.city = city
     this.clearGround()
+    this.burning = [] // fires of the previous city must not follow us onto the new one
     for (const c of [...this.root.children]) {
       this.root.remove(c)
       c.traverse?.((o) => {

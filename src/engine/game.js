@@ -684,6 +684,8 @@ export class Game {
     this.speedIdx = settings.disaster === 'quake' ? 0 : 1
     this.simTime = 0
     this.acc = 0
+    this.showDamage = []
+    this.groundShowAt = 0
     this.log = []
     this.world.setHighlight(null)
     this.rng = new Rng((settings.seed ^ 0x5bd1e995) >>> 0)
@@ -877,21 +879,83 @@ export class Game {
       const s = q.st.get(b.id)
       w.collapse(b, delay, 'quake', s?.toppled ? { lean: s.lean, leanAng: s.leanAng } : undefined)
     }
+    // The sim resolves a shock instantly, but its shaking reaches the city a
+    // little later on screen (in cut-away view only once the S-waves arrive).
+    // Damage, tilt, fire and ground failure show when each building is hit.
+    const hitAt = (b, t) => {
+      const a = w.animFor(b)
+      a.hitAt = Math.max(a.hitAt ?? 0, t)
+    }
+    const shown = (a) => !a.hitAt || w.realTime >= a.hitAt
+    for (const v of q.pending.splice(0)) {
+      if (v.impact || v.quiet) {
+        for (const id of v.collapses) {
+          const b = this.city.byId.get(id)
+          if (!b) continue
+          const d = 0.2 + Math.random() * 0.8
+          hitAt(b, w.realTime + d)
+          fall(b, d)
+        }
+        for (const id of v.damaged) {
+          const b = this.city.byId.get(id)
+          if (b) this.showDamage.push({ b, at: w.realTime + 0.3 })
+        }
+        continue
+      }
+      if (v.M < 4.2 && !v.collapses.length) {
+        // too weak to animate, but any damage it did still shows
+        for (const id of v.damaged) {
+          const b = this.city.byId.get(id)
+          if (b) this.showDamage.push({ b, at: w.realTime })
+        }
+        continue
+      }
+      const dur = clamp(v.main ? 2 + (v.M - 4) * 2.4 : 1 + (v.M - 4) * 1.2, 1, 18)
+      const lag = w.addShake(v.pga, dur, v.M, v.main)
+      const t0 = w.realTime + lag
+      this.groundShowAt = Math.max(this.groundShowAt ?? 0, t0 + dur * 0.4)
+      for (const id of v.collapses) {
+        const b = this.city.byId.get(id)
+        if (!b) continue
+        const d = lag + Math.random() * dur * 0.75
+        hitAt(b, w.realTime + d)
+        fall(b, d)
+      }
+      for (const id of v.damaged) {
+        const b = this.city.byId.get(id)
+        if (!b) continue
+        const at = t0 + Math.random() * dur * 0.6
+        hitAt(b, at)
+        this.showDamage.push({ b, at })
+      }
+    }
+    // damage states whose shaking has now arrived
+    if (this.showDamage.length) {
+      let changed = false
+      this.showDamage = this.showDamage.filter((d) => {
+        if (w.realTime < d.at) return true
+        w.setDamage(d.b, q.st.get(d.b.id)?.ds ?? 0)
+        changed = true
+        return false
+      })
+      if (changed) w.refreshColors()
+    }
     // foundations settling and tilting on failed ground
     for (const id of q.moved) {
       const b = this.city.byId.get(id)
       const s = q.st.get(id)
       if (!b || !s) continue
       const a = w.animFor(b)
+      if (!shown(a)) continue // keep it until the shaking gets there
       a.settle = s.settle
       a.leanTx = s.lean * Math.sin(s.leanAng)
       a.leanTz = -s.lean * Math.cos(s.leanAng)
       a.active = true
       w.updateBuilding(b)
+      q.moved.delete(id)
     }
-    q.moved.clear()
     const G = q.ground
-    if (G.dirtyZ || G.dirtyFx || G.fxQueue.length) {
+    if ((G.dirtyZ || G.dirtyFx || G.fxQueue.length) && w.realTime >= (this.groundShowAt ?? 0)) {
       // repainting the terrain is costly: at most every half second of real time
       const now = performance.now()
       if (!this.groundT || now - this.groundT > 500) {
@@ -905,32 +969,6 @@ export class Game {
         }
       }
     }
-    for (const v of q.pending.splice(0)) {
-      if (v.impact || v.quiet) {
-        for (const id of v.collapses) {
-          const b = this.city.byId.get(id)
-          if (b) fall(b, 0.2 + Math.random() * 0.8)
-        }
-        for (const id of v.damaged) {
-          const b = this.city.byId.get(id)
-          if (b) w.setDamage(b, q.st.get(id).ds)
-        }
-        w.refreshColors()
-        continue
-      }
-      if (v.M < 4.2 && !v.collapses.length) continue
-      const dur = clamp(v.main ? 2 + (v.M - 4) * 2.4 : 1 + (v.M - 4) * 1.2, 1, 18)
-      const lag = w.addShake(v.pga, dur, v.M, v.main)
-      for (const id of v.collapses) {
-        const b = this.city.byId.get(id)
-        if (b) fall(b, lag + Math.random() * dur * 0.75)
-      }
-      for (const id of v.damaged) {
-        const b = this.city.byId.get(id)
-        if (b) w.setDamage(b, q.st.get(id).ds)
-      }
-      w.refreshColors()
-    }
     this.colorTimer = (this.colorTimer || 0) + 1
     if (this.colorTimer % 20 === 0) {
       const burning = []
@@ -938,15 +976,18 @@ export class Game {
         const s = q.st.get(b.id)
         if (!s) continue
         const a = w.animFor(b)
-        a.burning = s.burning ? Math.min(1, s.burning / 2) : 0
-        a.burnt = s.burnt
-        if (s.burning) burning.push(b)
+        // a fire breaks out only once the shaking has reached the building
+        const lit = !!s.burning && w.realTime >= (a.hitAt ?? 0) + 1.5
+        a.burning = lit ? Math.min(1, s.burning / 2) : 0
+        a.burnt = s.burnt && shown(a)
+        if (lit) burning.push(b)
       }
       w.burning = burning
       if (this.overlay) this.applyColorMode()
       else w.refreshColors()
     }
   }
+
 
   endDisaster() {
     if (this.phase !== 'sim') return
