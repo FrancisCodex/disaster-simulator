@@ -94,6 +94,12 @@ export default function Results({ s, game }) {
             Retry with my preparations
           </button>
         </div>
+        <p className="mt-4 text-center text-[11px] leading-relaxed text-slate-500">
+          Simulated outcome from simplified models — real events can turn out very differently. Not yet validated for real-world safety or planning decisions. · Made by{' '}
+          <a href="https://github.com/FrancisCodex" target="_blank" rel="noopener noreferrer" className="text-sky-400 hover:text-sky-300">
+            FrancisCodex
+          </a>
+        </p>
       </div>
     </div>
   )

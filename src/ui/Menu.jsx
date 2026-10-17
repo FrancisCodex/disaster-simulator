@@ -146,7 +146,18 @@ export default function Menu({ onStart }) {
         >
           Generate city →
         </button>
-        <p className="mt-3 text-center text-[11px] text-slate-500">Open-source · runs entirely in your browser</p>
+        <p className="mt-3 rounded-md border border-amber-500/25 bg-amber-500/5 px-3 py-2 text-[11px] leading-relaxed text-amber-100/80">
+          <span className="font-semibold text-amber-200">This is a simulation.</span> It uses simplified models from published engineering and earthquake research, but real
+          disasters depend on many things it can't capture. Results are illustrations, not predictions. It has not yet been validated for engineering design or official safety and
+          planning decisions — use it to learn and to explore scenarios.
+        </p>
+        <p className="mt-3 text-center text-[11px] text-slate-500">
+          Made by{' '}
+          <a href="https://github.com/FrancisCodex" target="_blank" rel="noopener noreferrer" className="font-semibold text-sky-300 hover:text-sky-200">
+            FrancisCodex
+          </a>{' '}
+          · Open-source · runs entirely in your browser
+        </p>
       </div>
     </div>
   )
