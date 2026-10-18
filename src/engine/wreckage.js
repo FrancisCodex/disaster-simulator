@@ -16,13 +16,23 @@
 import * as THREE from 'three'
 import { GRID, CELL } from './config.js'
 import { fracture, splitBlock } from './fracture.js'
+import { POSE } from './wreckCore.js'
 
 // Budget: each moving piece costs the worker ~10–20 µs per step. New collapses
 // break up more coarsely as the count rises; at LIVE_CAP they stay scripted.
 const LIVE_SOFT = 300
 const LIVE_CAP = 650
 const MIN_PIECES = 8 // a collapse with less room than this stays scripted
-const MAX_DT = 2 / 60 // physics time per frame at most: when the worker falls behind, the wreckage slows down
+const MAX_DT = 0.2 // physics time handed over at once (the worker catches up on it over a few messages)
+// A big collapse hands the worker its pieces a batch at a time, so no single
+// step stalls; until a piece is in the worker's world it falls on its own here.
+const SPAWN_BATCH = 90
+// between worker updates, a moving piece carries on along its last velocity for up to this long (s)
+// the render clock trails the worker's by this much (s), so there are reports on both sides of it
+const BUFFER = 0.03
+// reports kept per moving piece
+const HISTORY = 8
+const G = 9.81
 const DUST = new THREE.Color(0x6a645a)
 
 const _m = new THREE.Matrix4()
@@ -33,6 +43,9 @@ const _w = new THREE.Vector3()
 const _q = new THREE.Quaternion()
 const _r = new THREE.Quaternion()
 const _s = new THREE.Vector3()
+const _bp = new THREE.Vector3()
+const _bq = new THREE.Quaternion()
+const _bv = new THREE.Vector3()
 const ONE = new THREE.Vector3(1, 1, 1)
 const Y = new THREE.Vector3(0, 1, 0)
 
@@ -76,6 +89,17 @@ export class Wreckage {
     this.staticItems = null
     this.groundDirty = false
     this.groundT = 0
+    // Smooth motion whatever the worker's pace: pieces it has not taken in yet
+    // fall ballistically here (queued: not yet sent; flying: predicted until the
+    // worker reports them), and moving pieces are carried along between reports.
+    this.queue = [] // { payload, st: { p, q, v, w }, t0, pcs, pending }
+    this.flying = new Set()
+    this.interp = new Set() // pieces drawn between the worker's reports
+    this.simT = 0 // the worker's clock, as of its last report
+    this.renderT = 0 // the clock the wreckage is drawn at
+    this.rate = 1 // the worker's pace against real time
+    this.gap = 1 / 60 // simulated time between its reports
+    this.lastReal = 0
     this.stats = { live: 0, frozen: 0, workerMs: 0, applyMs: 0 }
   }
 
@@ -115,11 +139,28 @@ export class Wreckage {
     if (m.gen !== this.gen) return
     const t0 = performance.now()
     const P = m.poses
-    for (let o = 0; o < P.length; o += 8) {
+    // how fast the worker's clock runs against the real one (below 1 when it is overloaded)
+    const now = performance.now() / 1000
+    if (this.lastReal) {
+      const dReal = now - this.lastReal
+      if (dReal > 0) this.rate += (Math.min(1.5, Math.max(0, (m.simT - this.simT) / dReal)) - this.rate) * 0.2
+    }
+    this.lastReal = now
+    // how far apart (in simulated time) its reports come: the render clock stays that far behind
+    if (m.simT > this.simT) this.gap += (m.simT - this.simT - this.gap) * 0.1
+    this.simT = m.simT
+    for (let o = 0; o < P.length; o += POSE) {
       const pc = this.pieces.get(P[o])
       if (!pc) continue
-      _m.compose(_p.set(P[o + 1], P[o + 2], P[o + 3]), _q.set(P[o + 4], P[o + 5], P[o + 6], P[o + 7]), ONE)
-      this.w.bld.fragSet(pc.row, _m.multiply(_o.makeTranslation(0, -pc.yc, 0)).elements)
+      // a short history of its reported poses, to draw it in between them at render time
+      const h = (pc.hist ??= [])
+      const snap = h.length >= HISTORY ? h.shift() : { t: 0, p: new THREE.Vector3(), q: new THREE.Quaternion() }
+      snap.t = m.simT
+      snap.p.set(P[o + 1], P[o + 2], P[o + 3])
+      snap.q.set(P[o + 4], P[o + 5], P[o + 6], P[o + 7])
+      h.push(snap)
+      pc.rest = P[o + 8] * P[o + 8] + P[o + 9] * P[o + 9] + P[o + 10] * P[o + 10] <= 0.01
+      this.interp.add(pc)
     }
     for (const e of m.events) {
       if (e[0] === 'hitB') this.onHitBuilding?.(e[1], e[2], e[3], e[4], e[5], e[6], e[7])
@@ -129,10 +170,11 @@ export class Wreckage {
         this.onSettle?.(e[1], e[2], e[3], e[4])
       } else if (e[0] === 'break') this.onBreak?.(e[1], e[2], e[3])
       else if (e[0] === 'gone') this.release(e[1])
-      else if (e[0] === 'shatter') this.shatterPiece(e)
+      else if (e[0] === 'shatter') this.shatterPiece(e, m.simT)
     }
-    this.live = m.live
-    this.stats.live = m.live
+    // moving in the worker, plus those still waiting to be handed over
+    this.live = m.live + this.queue.reduce((s, e) => s + e.pending, 0)
+    this.stats.live = this.live
     this.stats.workerMs = this.stats.workerMs * 0.9 + m.ms * 0.1
     this.stats.applyMs = this.stats.applyMs * 0.9 + (performance.now() - t0) * 0.1
   }
@@ -141,8 +183,108 @@ export class Wreckage {
     if (this.ready) this.cmds.push(cmd)
   }
 
+  /** Draw piece pc with its centre at p, turned by q. */
+  draw(pc, p, q) {
+    _m.compose(p, q, ONE)
+    this.w.bld.fragSet(pc.row, _m.multiply(_o.makeTranslation(0, -pc.yc, 0)).elements)
+  }
+
+  /**
+   * A body for the worker, with its state at render time t0. Until the worker
+   * has taken it in (it is handed over a batch at a time) its pieces fall on
+   * their own: gravity and the spin they were given.
+   */
+  enqueue(payload, t0 = this.renderT) {
+    const pcs = []
+    for (const sp of payload.pieces) {
+      const pc = this.pieces.get(sp.id)
+      if (!pc) continue
+      pc.lp = new THREE.Vector3().fromArray(sp.lp)
+      pc.lq = new THREE.Quaternion().fromArray(sp.lq)
+      pc.hist = []
+      pcs.push(pc)
+    }
+    const st = { p: new THREE.Vector3().fromArray(payload.p), q: new THREE.Quaternion().fromArray(payload.q), v: new THREE.Vector3().fromArray(payload.v), w: new THREE.Vector3().fromArray(payload.w) }
+    const entry = { payload, st, t0, pcs, pending: pcs.length }
+    for (const pc of pcs) pc.entry = entry
+    this.queue.push(entry)
+    this.flying.add(entry)
+  }
+
+  /** Where a body falling on its own is d seconds after t0: into _bp, _bq (and its velocity into _bv). */
+  ballistic(e, d) {
+    const { p, q, v, w } = e.st
+    _bp.copy(p).addScaledVector(v, d)
+    _bp.y -= 0.5 * G * d * d
+    _bv.copy(v)
+    _bv.y -= G * d
+    _bq.copy(q)
+    const wl = w.length()
+    if (wl > 1e-4) _bq.premultiply(_r.setFromAxisAngle(_u.copy(w).divideScalar(wl), wl * d))
+    // it stops on the ground (the worker would have it bounce and settle)
+    const g = this.w.groundAt(_bp.x, _bp.z) + 0.3
+    if (_bp.y < g) {
+      _bp.y = g
+      _bv.set(0, 0, 0)
+    }
+  }
+
+  /**
+   * Redraw the moving wreckage at render time: pieces the worker reports are
+   * drawn between its last two reports, pieces it has not taken in yet where
+   * their fall has brought them. Either way they move every frame.
+   */
+  redraw() {
+    const T = this.renderT
+    for (const e of this.flying) {
+      this.ballistic(e, Math.max(-0.3, T - e.t0))
+      for (const pc of e.pcs) {
+        if (pc.entry !== e) continue
+        if (!this.pieces.has(pc.id)) {
+          pc.entry = null
+          e.pending--
+          continue
+        }
+        // the worker's reports take over once render time has reached the first of them
+        if (pc.hist?.length && T >= pc.hist[0].t) {
+          pc.entry = null
+          e.pending--
+          continue
+        }
+        this.draw(pc, _w.copy(pc.lp).applyQuaternion(_bq).add(_bp), _q.copy(_bq).multiply(pc.lq))
+      }
+      if (e.pending <= 0) this.flying.delete(e)
+    }
+    for (const pc of this.interp) {
+      if (pc.entry) continue
+      const h = pc.hist
+      if (!h?.length || !this.pieces.has(pc.id)) {
+        this.interp.delete(pc)
+        continue
+      }
+      // the reports either side of render time (older ones are no longer needed)
+      while (h.length > 2 && h[1].t <= T) h.shift()
+      const a = h[0]
+      const b = h[1]
+      if (!b || T >= b.t) {
+        const last = b ?? a
+        this.draw(pc, last.p, last.q)
+        // at rest in the pile: nothing more to draw until it moves again
+        if (pc.rest && T >= last.t) this.interp.delete(pc)
+        continue
+      }
+      const f = T <= a.t ? 0 : (T - a.t) / Math.max(1e-6, b.t - a.t)
+      this.draw(pc, _w.copy(a.p).lerp(b.p, f), _q.copy(a.q).slerp(b.q, f))
+    }
+  }
+
   /** (Re)creates the physics world for the current city (the wreckage rows were reallocated). */
   build() {
+    this.queue = []
+    this.flying.clear()
+    this.interp.clear()
+    this.simT = this.renderT = this.lastReal = 0
+    this.rate = 1
     this.pieces.clear()
     this.heaps.clear()
     this.wrecks = []
@@ -373,10 +515,17 @@ export class Wreckage {
         v.add(new THREE.Vector3().crossVectors(om, _u.set(pos.x - topple.px, pos.y - topple.py, pos.z - topple.pz)))
       }
       if (p.kind === 'wall') {
-        // facade panels peel away and tip outward as the floors behind them give way
-        const n = _u.set(p.nx, 0, p.nz).applyQuaternion(bq)
-        const tip = (0.2 + Math.random() * 0.6) * (0.5 + k)
-        om.add(new THREE.Vector3().crossVectors(Y, n).multiplyScalar(tip))
+        // Facade panels peel away and tip outward as the floors behind them give
+        // way. They start already leaning out (hinged at their foot): a panel
+        // that came down square onto the one below would stack into a free-
+        // standing wall, which loose panels cannot be.
+        const n = _u.set(p.nx, 0, p.nz).applyQuaternion(bq).clone()
+        const axis = new THREE.Vector3().crossVectors(Y, n)
+        const lean = (0.1 + Math.random() * 0.18) * (0.6 + k)
+        q.premultiply(new THREE.Quaternion().setFromAxisAngle(axis, lean))
+        pos.addScaledVector(n, (Math.sin(lean) * p.h) / 2)
+        pos.y -= ((1 - Math.cos(lean)) * p.h) / 2
+        om.add(axis.multiplyScalar((0.5 + Math.random() * 0.8) * (0.6 + k)))
         v.addScaledVector(n, 0.3 + Math.random() * 1.2 * (0.4 + k))
       } else if (mode === 'crush') {
         om.x += (Math.random() - 0.5) * 0.5
@@ -387,11 +536,11 @@ export class Wreckage {
         om.x += (Math.random() - 0.5) * 0.4
         om.z += (Math.random() - 0.5) * 0.4
       }
-      this.send('spawn', { bid: b.id, p: pos.toArray(), q: q.toArray(), v: v.toArray(), w: om.toArray(), ccd: Math.min(p.w, p.h, p.d) < 0.8, pieces: [{ id, shape, mass, size, gen: 0, lp: [0, 0, 0], lq: [0, 0, 0, 1] }] })
+      this.enqueue({ bid: b.id, p: pos.toArray(), q: q.toArray(), v: v.toArray(), w: om.toArray(), ccd: Math.min(p.w, p.h, p.d) < 0.8, pieces: [{ id, shape, mass, size, gen: 0, lp: [0, 0, 0], lq: [0, 0, 0, 1] }] })
       _m.compose(pos, q, ONE)
       w.bld.fragSet(prow, _m.multiply(_o.makeTranslation(0, -yc, 0)).elements, p.rough ? 4 : 0)
     }
-    if (cbody) this.send('spawn', cbody)
+    if (cbody) this.enqueue(cbody)
     this.live += compound ? 1 : pieces.length
     return pieces.length
   }
@@ -401,7 +550,7 @@ export class Wreckage {
    * Concrete does not stay in neat slabs and panels: it cracks into blocks,
    * each carrying on with the velocity the piece had just before the impact.
    */
-  shatterPiece(e) {
+  shatterPiece(e, t0 = this.renderT) {
     const pc = this.pieces.get(e[1])
     if (!pc) return
     const bld = this.w.bld
@@ -441,7 +590,7 @@ export class Wreckage {
       this.pieces.set(id, { id, row, yc, wreck, p: { ...p, kind, y: by, w: k.w, h: k.h, d: k.d, mass, attached: [] }, gen: pc.gen + 1 })
       wreck.ids.add(id)
       const ksize = Math.max(k.w, k.h, k.d)
-      this.send('spawn', { bid: wreck.bid, p: pos.toArray(), q: q.toArray(), v: v.toArray(), w, ccd: Math.min(k.w, k.h, k.d) < 0.8, pieces: [{ id, shape: { kind: 'box', h: [k.w / 2, k.h / 2, k.d / 2] }, mass, size: ksize, gen: pc.gen + 1, lp: [0, 0, 0], lq: [0, 0, 0, 1] }] })
+      this.enqueue({ bid: wreck.bid, p: pos.toArray(), q: q.toArray(), v: v.toArray(), w, ccd: Math.min(k.w, k.h, k.d) < 0.8, pieces: [{ id, shape: { kind: 'box', h: [k.w / 2, k.h / 2, k.d / 2] }, mass, size: ksize, gen: pc.gen + 1, lp: [0, 0, 0], lq: [0, 0, 0, 1] }] }, t0)
       _m.compose(pos, q, ONE)
       bld.fragSet(row, _m.multiply(_o.makeTranslation(0, -yc, 0)).elements, rough ? 4 : 0)
       made++
@@ -540,6 +689,7 @@ export class Wreckage {
     if (!pc) return
     this.pieces.delete(id)
     pc.wreck.ids.delete(id)
+    this.interp.delete(pc)
     this.w.bld.fragRelease(pc.row)
   }
 
@@ -552,7 +702,28 @@ export class Wreckage {
       this.sendGround()
     }
     this.acc = Math.min(this.acc + dt, MAX_DT)
-    if (this.inflight || (!this.cmds.length && !this.live)) return
+    // The render clock runs at the worker's pace, a little behind its clock: when
+    // the physics is overloaded the wreckage plays in smooth slow motion instead
+    // of stopping and starting.
+    this.renderT += dt * this.rate
+    this.renderT += (this.simT - Math.max(BUFFER, this.gap * 1.5) - this.renderT) * Math.min(1, dt * 4)
+    this.renderT = Math.min(this.renderT, this.simT)
+    this.redraw()
+    if (this.inflight || (!this.cmds.length && !this.live && !this.queue.length)) return
+    // hand over the next batch of new bodies, from where they have fallen to by now
+    let n = 0
+    while (this.queue.length && n < SPAWN_BATCH) {
+      const e = this.queue.shift()
+      const pieces = e.payload.pieces.filter((s) => this.pieces.has(s.id))
+      if (!pieces.length) {
+        this.flying.delete(e)
+        continue
+      }
+      // the worker starts it at its own clock, so hand it over as it will be then
+      this.ballistic(e, this.simT - e.t0)
+      this.cmds.push(['spawn', { ...e.payload, pieces, p: _bp.toArray(), q: _bq.toArray(), v: _bv.toArray(), w: e.st.w.toArray() }])
+      n += pieces.length
+    }
     this.inflight = true
     const cmds = this.cmds
     this.cmds = []

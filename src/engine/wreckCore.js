@@ -2,6 +2,8 @@
 // Kept apart from the worker so it can also be driven directly (benchmarks).
 
 export const STEP = 1 / 60
+// floats per piece in a pose list: id, position, rotation, velocity
+export const POSE = 11
 const FREEZE_AFTER = 0.4 // s at rest before a piece joins the pile
 const SLOW_AGE = 6 // s: a piece still creeping after this joins the pile...
 const MAX_AGE = 20 // ...and one still moving at all after this (never one in free fall)
@@ -39,6 +41,7 @@ export class Core {
     this.ground = null
     this.minY = -1e4
     this.acc = 0
+    this.simT = 0 // simulated seconds since the world was made (stamps every pose report)
     this.room = 0 // pieces the main thread can still take (for shattering)
     this.events = []
     this.moved = new Set() // pieces whose pose must be sent
@@ -197,12 +200,15 @@ export class Core {
     const r = pc.rec
     r.pieces = r.pieces.filter((q) => q !== pc)
     if (r.rb && !r.dead) {
+      const t = pc.col.translation()
       this.pw.removeCollider(pc.col, true)
       if (!r.pieces.length) {
         this.pw.removeRigidBody(r.rb)
         r.rb = null
         r.dead = true
       }
+      // a moving piece can be holding up pile pieces too
+      this.wakeIn(t.x, t.y, t.z, pc.size * 0.75 + 0.3, pc.size * 0.6 + 1)
     } else {
       // a pile piece: what lay on it falls
       const t = pc.col.translation()
@@ -212,6 +218,7 @@ export class Core {
   }
 
   step() {
+    this.simT += STEP
     const live = this.live
     // (each body's velocity before this step is the one read after the last)
     this.pw.step(this.eq)
@@ -307,9 +314,13 @@ export class Core {
           }
           out = true
         } else if (r.still > FREEZE_AFTER || (r.age > SLOW_AGE && v2 < 1) || (r.age > MAX_AGE && v2 < 9) || (live.length > LIVE_HARD && r.age > 3 && v2 < 2)) {
-          // only ever at rest or creeping: nothing is frozen in mid-air
-          this.freeze(r)
-          out = true
+          // only ever at rest or creeping, and never while leaning on something
+          // that is still moving (it would be left hanging when that moves on)
+          if (r.age < MAX_AGE && this.onMoving(r)) r.still = 0
+          else {
+            this.freeze(r)
+            out = true
+          }
         }
       }
       if (out) {
@@ -317,6 +328,17 @@ export class Core {
         live.pop()
       }
     }
+  }
+
+  /** Is rec r in contact with a piece that is still moving? */
+  onMoving(r) {
+    let moving = false
+    for (const pc of r.pieces)
+      this.pw.contactPairsWith(pc.col, (c) => {
+        const o = this.owner.get(c.handle)
+        if (o?.rec && o.rec !== r && !o.rec.frozen && !o.rec.dead && o.rec.rb && !o.rec.rb.isSleeping()) moving = true
+      })
+    return moving
   }
 
   touch(r, other, touched) {
@@ -420,12 +442,15 @@ export class Core {
     this.wakeIn(ct.x, ct.y, ct.z, pc.size * 0.75 + 0.3, pc.size * 0.6 + 1)
   }
 
+  /** [id, position, rotation, velocity] of every piece that moved (velocity 0: at rest in the pile). */
   poses() {
-    const out = new Float32Array(this.moved.size * 8)
+    const out = new Float32Array(this.moved.size * POSE)
     let o = 0
     for (const pc of this.moved) {
       const t = pc.col.translation()
       const q = pc.col.rotation()
+      const rb = pc.rec?.rb
+      const v = rb && !pc.rec.frozen ? rb.linvel() : null
       out[o++] = pc.id
       out[o++] = t.x
       out[o++] = t.y
@@ -434,6 +459,9 @@ export class Core {
       out[o++] = q.y
       out[o++] = q.z
       out[o++] = q.w
+      out[o++] = v ? v.x : 0
+      out[o++] = v ? v.y : 0
+      out[o++] = v ? v.z : 0
     }
     this.moved.clear()
     return out

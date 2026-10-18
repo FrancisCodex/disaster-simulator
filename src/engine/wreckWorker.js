@@ -15,7 +15,8 @@
 //   ['remove', ids]                          forget pieces (recycled rows)
 // Boxes: half extents (3), centre (3), rotation quaternion (4).
 // worker → main: { type: 'state', gen, poses, events, live, ms }
-//   poses: Float32Array of [id, px, py, pz, qx, qy, qz, qw]
+//   simT: the simulated time these poses are for
+//   poses: Float32Array of [id, px, py, pz, qx, qy, qz, qw, vx, vy, vz]
 //   events: ['hitB', bid, joules, x, y, z, impulse x, impulse z]
 //           ['hitG', x, y, z, r, joules] ['settle', x, y, z, size]
 //           ['break', x, y, z] ['gone', id]
@@ -40,14 +41,20 @@ self.onmessage = (e) => {
     if (core && core.live.length) {
       core.acc += m.dt
       let n = 0
-      while (core.acc >= STEP && n < 2) {
+      // after a slow step (a big building just broke up) catch up over the next few
+      // messages rather than drop the time: dropped time shows as debris hanging still
+      while (core.acc >= STEP && n < 4) {
         core.step()
         core.acc -= STEP
         n++
       }
-      // falling behind: run slower rather than spiral
-      if (core.acc > STEP) core.acc = 0
-    } else if (core) core.acc = 0
+      // only a backlog of more than a fifth of a second is let go
+      core.acc = Math.min(core.acc, 0.2)
+    } else if (core) {
+      // nothing moving: time still passes (pieces handed over next start from here)
+      core.acc = 0
+      core.simT += m.dt
+    }
   } catch (err) {
     // the engine panicked: report it; the main thread starts over with a fresh world
     failed = String(err?.message || err)
@@ -55,7 +62,7 @@ self.onmessage = (e) => {
   }
   const poses = core ? core.poses() : new Float32Array(0)
   const events = core ? core.events.splice(0) : []
-  self.postMessage({ type: 'state', gen: core?.gen ?? -1, poses, events, live: core?.live.length ?? 0, ms: performance.now() - t0, failed }, [poses.buffer])
+  self.postMessage({ type: 'state', gen: core?.gen ?? -1, simT: core?.simT ?? 0, poses, events, live: core?.live.length ?? 0, ms: performance.now() - t0, failed }, [poses.buffer])
 }
 
 RAPIER.init().then(() => {

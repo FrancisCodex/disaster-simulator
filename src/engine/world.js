@@ -1741,8 +1741,10 @@ export class World {
         // rigid rotation about the base edge, like a falling column: gravity, acting
         // through the leaning centre of mass, takes it over slowly at first
         a.topple = {
-          theta: Math.max(0.015, c.theta0 || 0),
-          omega: 0.03,
+          // the weak storey gives way on one side and the building goes over from
+          // there (it does not stand balanced on an edge first)
+          theta: Math.max(0.05, c.theta0 || 0),
+          omega: 0.15,
           ax: c.dirZ,
           az: -c.dirX,
           px: b.cx + (c.dirX * b.fw) / 2,
