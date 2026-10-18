@@ -19,13 +19,15 @@ import {
   LEVEE_HEIGHT,
   POND_DEPTH,
   DAMAGE_STATES,
+  VARIANT_NAMES,
 } from './config.js'
 import { generateCity, addBuilding, idx, occupancyAt, cityStats } from './cityGen.js'
 import { Rng, clamp } from './math.js'
 import { World } from './world.js'
 import { FloodSim } from './floodSim.js'
 import { FloodImpact } from './floodImpact.js'
-import { QuakeSim, demand, mediansFor, damageProbs, collapseProb, cellOfBuilding, soilName, rockPgaAt, withGeometry, quakeAzimuth, shapeOf, dsFromD, compass } from './quakeSim.js'
+import { QuakeSim, demand, mediansFor, damageProbs, collapseProb, cellOfBuilding, soilName, rockPgaAt, withGeometry, quakeAzimuth, shapeOf, dsFromD, compass, groundPeriod } from './quakeSim.js'
+import { siteDistances } from './quakePhysics.js'
 
 /**
  * The earthquake a set of menu settings describes. settings.quake:
@@ -45,7 +47,9 @@ export function quakeEventFrom(settings) {
   } else if (q.mode === 'custom') {
     ev = { name: 'Custom earthquake', desc: 'Your own scenario.', example: '', ...CUSTOM_QUAKE, ...q.params }
   } else ev = { ...QUAKE_LEVELS[clamp(settings.level ?? 3, 0, QUAKE_LEVELS.length - 1)] }
-  return { mech: 'strike', strike: 90, rupture: 'bilateral', ...ev, mode: q.mode ?? 'tier', bearing: q.bearing ?? null, variability: q.variability !== false, aftershocks: q.aftershocks !== false }
+  // freq: the ground's shaking frequency (Hz; null: what the earthquake and the soil produce);
+  // soil: 'map' keeps the generated ground, or 'rock' / 'stiff' / 'sand' everywhere
+  return { mech: 'strike', strike: 90, rupture: 'bilateral', ...ev, mode: q.mode ?? 'tier', bearing: q.bearing ?? null, variability: q.variability !== false, aftershocks: q.aftershocks !== false, freq: q.freq ?? null, soil: q.soil ?? 'map' }
 }
 
 export const TOOLS = [
@@ -498,6 +502,10 @@ export class Game {
             city.z[k] -= POND_DEPTH
           }
         }
+      if (tool === 'park') {
+        city.parks.push({ ...fp })
+        this.world.buildProps()
+      }
       if (tool === 'pond') {
         city.ponds.push(fp)
         this.world.updateTerrainHeights()
@@ -659,7 +667,7 @@ export class Game {
   quakeRisk(b) {
     const L = this.quakeEvent()
     const soil = this.city.soil[cellOfBuilding(b)]
-    const p = demand(b, soil, L.M, rockPgaAt(L, b.cx, b.cz))
+    const p = demand(b, soil, L.M, rockPgaAt(L, b.cx, b.cz), groundPeriod(L.M, siteDistances(L.geo, 0, 0).rjb, soil, L.freq))
     const med = mediansFor(b, L.M, 0)
     const probs = damageProbs(p, med)
     const sh = shapeOf(b)
@@ -697,6 +705,13 @@ export class Game {
       this.population = this.impact.population
       this.pushLog(0, `${this.level.name} begins over ${city.name}. Forecast peak ${this.level.peak} mm/h.`, 'warn')
     } else {
+      // the scenario may put the whole district on one kind of ground (the prepared city is restored on retry)
+      const SOILS = { rock: 0, stiff: 1, sand: 2 }
+      if (SOILS[this.level.soil] !== undefined) {
+        city.soil.fill(SOILS[this.level.soil])
+        this.world.subsurface.build(city)
+        this.world.subsurface.setQuake(this.world.subsurface.quake)
+      }
       this.quake = new QuakeSim(city, this.level, { warning: this.upgrades.quakeWarning, gasShutoff: this.upgrades.gasShutoff, startHour: settings.startHour, rng: this.rng })
       this.population = this.quake.population
       this.pushLog(0, `A normal day in ${city.name}. ${stats.present.toLocaleString()} people are in the district…`, 'info')
@@ -878,7 +893,8 @@ export class Game {
     const w = this.world
     const fall = (b, delay) => {
       const s = q.st.get(b.id)
-      w.collapse(b, delay, 'quake', s?.toppled ? { lean: s.lean, leanAng: s.leanAng } : undefined)
+      // a building already leaning on failed ground goes over that way; the world decides how the rest come down
+      w.collapse(b, delay, 'quake', s?.toppled ? { lean: s.lean, leanAng: s.leanAng } : { tilt: s?.lean ?? 0, tiltAng: s?.leanAng ?? 0 })
     }
     // The sim resolves a shock instantly, but its shaking reaches the city a
     // little later on screen (in cut-away view only once the S-waves arrive).
@@ -914,7 +930,7 @@ export class Game {
         continue
       }
       const dur = clamp(v.main ? 2 + (v.M - 4) * 2.4 : 1 + (v.M - 4) * 1.2, 1, 18)
-      const lag = w.addShake(v.pga, dur, v.M, v.main, v.field)
+      const lag = w.addShake(v.pga, dur, v.M, v.main, v.field, v.tm)
       const t0 = w.realTime + lag
       this.groundShowAt = Math.max(this.groundShowAt ?? 0, t0 + dur * 0.4)
       for (const sp of bridges) this.showDamage.push({ bridge: sp, at: t0 + dur * (0.3 + Math.random() * 0.5) })
@@ -1177,7 +1193,7 @@ export class Game {
     const C = CONSTRUCTION[b.construction]
     const info = {
       id,
-      type: BUILDING_TYPES[b.type].name,
+      type: VARIANT_NAMES[b.variant] ?? BUILDING_TYPES[b.type].name,
       typeKey: b.type,
       floors: b.floors,
       height: b.height,

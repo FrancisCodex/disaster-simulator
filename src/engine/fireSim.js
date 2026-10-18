@@ -20,7 +20,7 @@ import { idx, cellToWorld } from './cityGen.js'
 import { clamp } from './math.js'
 
 // design fire load density, MJ per m² of floor (EN 1991-1-2 Annex E, 80% fractile-ish)
-const FIRE_LOAD = { house: 780, apartment: 780, office: 420, tower: 600, industrial: 1180, hospital: 230, fire: 300, school: 285, shelter: 300 }
+const FIRE_LOAD = { house: 780, apartment: 780, office: 420, tower: 600, industrial: 1180, hospital: 230, fire: 300, school: 285, shelter: 300, civic: 420, museum: 300, library: 1500, worship: 250, stadium: 150, landmark: 60 }
 // heat-release rate per m² of floor while fully developed (MW/m²)
 const RHR = { industrial: 0.5 }
 // combustible structure adds to the fuel (MJ/m²)

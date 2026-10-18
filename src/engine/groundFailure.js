@@ -19,7 +19,8 @@ const MAX_BOILS = 1600
 const MAX_CRACKS = 2400
 
 export class GroundFailure {
-  constructor(city, rng) {
+  /** opts.wet: the sand is saturated close to the surface everywhere, not only near the river. */
+  constructor(city, rng, { wet = false } = {}) {
     this.city = city
     this.rng = rng
     this.ru = new Float32Array(N) // excess pore-pressure ratio (1 = liquefied)
@@ -51,7 +52,7 @@ export class GroundFailure {
         const k = idx(i, j)
         this.bankDist[k] = Math.max(0, Math.abs(i + 0.5 - riverCenter[j]) - 3.2)
         // loose saturated sand: young alluvium with a shallow water table
-        if (soil[k] === 2 && cellType[k] !== CELL_RIVER && z[k] - bankZ[j] < 3) {
+        if (soil[k] === 2 && cellType[k] !== CELL_RIVER && z[k] - bankZ[j] < (wet ? 12 : 3)) {
           const c = 0.1 + Math.pow(rng.next(), 1.5) * 0.3
           this.crr[k] = c
           this.crr0[k] = c

@@ -163,6 +163,12 @@ export class Debris {
       age: 0,
       dead: false,
       rimY: undefined,
+      // the surface below, as last looked up, and where / when (see update)
+      surf: null,
+      sx0: 0,
+      sz0: 0,
+      st0: 0,
+      own: -1,
       burn: opts.burn ?? 0, // seconds it keeps burning
     })
     _c.set(color)
@@ -199,8 +205,19 @@ export class Debris {
           }
           continue
         }
-        // lands on the ground, or on the roof of a standing building
-        const surf = this.surfaceAt(it.x, it.z, it.age < 0.6 ? it.src : -1)
+        // lands on the ground, or on the roof of a standing building. The surface under a
+        // piece is looked up again only once it has moved on or a moment has passed
+        // (roofs change as buildings come down): thousands of falling chips would
+        // otherwise spend most of the frame asking what is below them.
+        const own = it.age < 0.6 ? it.src : -1
+        if (!it.surf || Math.abs(it.x - it.sx0) > 0.8 || Math.abs(it.z - it.sz0) > 0.8 || it.age - it.st0 > 0.5 || own !== it.own) {
+          it.surf = this.surfaceAt(it.x, it.z, own)
+          it.sx0 = it.x
+          it.sz0 = it.z
+          it.st0 = it.age
+          it.own = own
+        }
+        const surf = it.surf
         const g = surf.y + it.sy * 0.5
         if (it.y < g) {
           const impact = -it.vy
@@ -238,9 +255,22 @@ export class Debris {
     for (const it of shatter) this.onShatter?.(it)
   }
 
-  /** Wake resting pieces (e.g. the roof they sat on just collapsed). */
+  /** Wake resting pieces within r of (x, z) (e.g. the roof they sat on just collapsed). */
+  wakeNear(x, z, r) {
+    for (const it of this.items)
+      if (it.sleep && !it.dead && Math.abs(it.x - x) < r && Math.abs(it.z - z) < r) {
+        it.sleep = false
+        it.surf = null
+      }
+  }
+
+  /** Wake every resting piece. */
   wakeAll() {
-    for (const it of this.items) if (it.sleep && !it.dead) it.sleep = false
+    for (const it of this.items)
+      if (it.sleep && !it.dead) {
+        it.sleep = false
+        it.surf = null
+      }
   }
 
   clear() {

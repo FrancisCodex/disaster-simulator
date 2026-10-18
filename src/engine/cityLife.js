@@ -607,12 +607,44 @@ export class CityLife {
     }
   }
 
+  /**
+   * People out in the open and cars, bucketed by grid cell for hitArea. Built
+   * at most once per update: a great quake drops debris in dozens of places
+   * every frame.
+   */
+  hitIndex() {
+    if (this.hitGrid && this.hitGridT === this.time && this.hitGridOf === this.peds) return this.hitGrid
+    const peds = new Map()
+    const cars = new Map()
+    const put = (m, k, o) => {
+      const a = m.get(k)
+      if (a) a.push(o)
+      else m.set(k, [o])
+    }
+    for (const p of this.peds) if (p.mode !== 'dead' && p.mode !== 'indoors' && p.mode !== 'reserve') put(peds, this.cellOf(p.x, p.z), p)
+    for (const c of this.cars) if (c.state !== 'crushed' && c.state !== 'burnt') put(cars, this.cellOf(c.x, c.z), c)
+    this.hitGrid = { peds, cars }
+    this.hitGridT = this.time
+    this.hitGridOf = this.peds
+    return this.hitGrid
+  }
+
+  /** Everything bucketed in `m` within the cells that a circle of radius r at (x, z) touches. */
+  *near(m, x, z, r) {
+    const i0 = clamp(Math.floor((x - r + HALF) / CELL), 0, GRID - 1)
+    const i1 = clamp(Math.floor((x + r + HALF) / CELL), 0, GRID - 1)
+    const j0 = clamp(Math.floor((z - r + HALF) / CELL), 0, GRID - 1)
+    const j1 = clamp(Math.floor((z + r + HALF) / CELL), 0, GRID - 1)
+    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) yield* m.get(idx(i, j)) || []
+  }
+
   /** Something heavy landed at (x,z): crush cars, strike pedestrians. */
   hitArea(x, z, r, energy) {
     let killed = 0
     let crushed = 0
-    if (energy < 4000) return { killed, crushed }
-    for (const p of this.peds) {
+    if (energy < 4000 || !this.peds) return { killed, crushed }
+    const H = this.hitIndex()
+    for (const p of this.near(H.peds, x, z, r + 0.5)) {
       if (p.mode === 'dead' || p.mode === 'indoors' || p.mode === 'reserve') continue
       if (Math.hypot(p.x - x, p.z - z) < r + 0.5) {
         p.mode = 'dead'
@@ -622,7 +654,7 @@ export class CityLife {
       }
     }
     if (energy > 30000) {
-      for (const c of this.cars) {
+      for (const c of this.near(H.cars, x, z, r + 6)) {
         if (c.state === 'crushed' || c.state === 'burnt') continue
         if (Math.hypot(c.x - x, c.z - z) < r + c.len * 0.45) {
           c.state = 'crushed'
