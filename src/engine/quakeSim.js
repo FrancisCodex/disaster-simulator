@@ -155,9 +155,12 @@ export const residual = (D, sh) => Math.max(0.3, 1 - 0.6 * D * (sh ? clamp(0.4 +
  * floors above. The drift concentrates in that one storey, so it reaches heavy
  * damage and collapse sooner (Northridge 1994, Kahramanmaraş 2023). Bracing the
  * ground floor (the Los Angeles / San Francisco retrofit ordinances) removes it.
- * b.softStorey is tagged by the game from the building's shape.
+ * b.openFront is tagged by the game from the building's shape.
  */
 export const SOFT_STOREY = { medians: [1, 0.92, 0.8, 0.75], collapse: 1.4 }
+/** Constructions whose open ground floors act as a soft storey. */
+export const SOFT_STOREY_CLASSES = ['wood_old', 'urm', 'rc_low', 'rc_mod']
+export const softStoreyOf = (b) => !!b.openFront && !b.softFixed && b.floors >= 2 && SOFT_STOREY_CLASSES.includes(b.construction)
 
 export function mediansFor(b, M, D = 0) {
   const C = CONSTRUCTION[b.construction]
@@ -165,7 +168,8 @@ export function mediansFor(b, M, D = 0) {
   if (b.construction === 'isolated' && M > 8.5) iso = clamp(1 - (M - 8.5) * 0.45, 0.3, 1) // isolator displacement limits
   const sh = shapeOf(b)
   const k = residual(D, sh) * iso * sh.cap
-  return C.medians.map((m, i) => m * k * (b.softStorey ? SOFT_STOREY.medians[i] : 1))
+  const soft = softStoreyOf(b)
+  return C.medians.map((m, i) => m * k * (soft ? SOFT_STOREY.medians[i] : 1))
 }
 
 /** Probability of reaching each damage state ≥1..4 */
@@ -177,7 +181,7 @@ export function collapseProb(b, p, med, D = 0) {
   const C = CONSTRUCTION[b.construction]
   const over = Math.max(1, p / med[3])
   const worn = 1 + 1.5 * Math.max(0, D - 0.6)
-  return Math.min(0.95, C.collapse * Math.pow(over, 1.5) * shapeOf(b).coll * worn * (b.softStorey ? SOFT_STOREY.collapse : 1))
+  return Math.min(0.95, C.collapse * Math.pow(over, 1.5) * shapeOf(b).coll * worn * (softStoreyOf(b) ? SOFT_STOREY.collapse : 1))
 }
 
 /**

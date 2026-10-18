@@ -624,6 +624,33 @@ export const UPGRADES = {
     cost: (city) => Math.round(city.buildings.length * 0.004 * 10) / 10,
     disaster: 'quake',
   },
+  // Programs apply a building measure to every building that qualifies. The
+  // cost is the sum of the individual jobs times the city's share (owners
+  // and bulk contracts cover the rest); the game works it out.
+  softStoreyProgram: {
+    name: 'Soft-storey retrofit ordinance',
+    desc: 'Every older building with an open shopfront ground floor gets it braced, as Los Angeles (2015) and San Francisco (2013) required. Owners share the cost: the city pays 60%.',
+    program: { tool: 'softstorey', share: 0.6 },
+    disaster: 'quake',
+  },
+  facadeProgram: {
+    name: 'Parapet & facade securing order',
+    desc: 'Masonry parapets and tall facades city-wide are tied back, as New Zealand ordered after Christchurch 2011 with a 50% subsidy.',
+    program: { tool: 'anchor', share: 0.5 },
+    disaster: 'quake',
+  },
+  urmProgram: {
+    name: 'Unreinforced masonry retrofit program',
+    desc: "Strengthens every unreinforced masonry building to a reinforced frame, as California's 1986 URM law required. The city pays 70%.",
+    program: { tool: 'retrofit', share: 0.7, construction: 'urm' },
+    disaster: 'quake',
+  },
+  criticalProgram: {
+    name: 'Hospitals, schools & fire stations',
+    desc: 'Brings every hospital, school, fire station and shelter up to high seismic code, so they stay open after the quake (California SB 1953, Istanbul ISMEP). Full cost.',
+    program: { tool: 'retrofit', share: 1, types: ['hospital', 'school', 'fire', 'shelter'], full: true },
+    disaster: 'quake',
+  },
 }
 
 export const SPEEDS = [

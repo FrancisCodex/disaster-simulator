@@ -1,10 +1,19 @@
-import { TOOLS } from '../engine/game.js'
+import { TOOLS, BUILDING_TOOLS } from '../engine/game.js'
 import { UPGRADES, CONSTRUCTION } from '../engine/config.js'
 import { Row, BuildingPanel, ModelToggle } from './common.jsx'
 import { fmtInt, fmtMoney } from '../engine/math.js'
 import { QuakePhysics } from './QuakeScenario.jsx'
 
 const GROUPS = ['General', 'Build', 'Flood', 'Quake']
+
+function Swatch({ color, label }) {
+  return (
+    <span className="flex items-center gap-1">
+      <span className="inline-block h-2.5 w-2.5 rounded-sm ring-1 ring-white/20" style={{ background: color }} />
+      {label}
+    </span>
+  )
+}
 
 export default function PrepareHUD({ s, game }) {
   const remaining = s.budget - s.spent
@@ -116,21 +125,23 @@ export default function PrepareHUD({ s, game }) {
           {Object.entries(UPGRADES)
             .sort((a, b) => (a[1].disaster === disaster ? -1 : 1) - (b[1].disaster === disaster ? -1 : 1))
             .map(([k, U]) => {
-              const { cost, owned, lvl } = game.upgradeCost(k)
+              const { cost, owned, lvl, count } = game.upgradeCost(k)
               const relevant = U.disaster === disaster
+              const nothing = U.program && !owned && count === 0
               return (
                 <div key={k} className={`mb-2 rounded-md border p-2 ${relevant ? 'border-slate-600' : 'border-slate-800 opacity-60'}`}>
                   <div className="flex items-start justify-between gap-2">
                     <div className="text-[13px] font-semibold text-white">
                       {U.name}
                       {U.max ? <span className="ml-1 text-xs text-slate-400">({lvl}/{U.max})</span> : null}
+                      {U.program && !owned ? <span className="ml-1 text-xs font-normal text-slate-400">· {fmtInt(count)} building{count === 1 ? '' : 's'}</span> : null}
                     </div>
                     <button
-                      disabled={owned || cost > remaining}
+                      disabled={owned || nothing || cost > remaining}
                       onClick={() => game.buyUpgrade(k)}
                       className="shrink-0 rounded bg-emerald-600 px-2 py-0.5 text-xs font-semibold text-white enabled:hover:bg-emerald-500 disabled:bg-slate-700 disabled:text-slate-400"
                     >
-                      {owned ? 'Owned' : fmtMoney(cost)}
+                      {owned ? (U.program ? 'Done' : 'Owned') : nothing ? 'None needed' : fmtMoney(cost)}
                     </button>
                   </div>
                   <p className="mt-0.5 text-[11px] leading-snug text-slate-400">{U.desc}</p>
@@ -152,6 +163,13 @@ export default function PrepareHUD({ s, game }) {
             <span className="ml-2 text-slate-400">{tool?.desc}</span>
             {s.hover && s.hover.cost > 0 && (
               <span className={`ml-2 font-mono ${s.hover.reason ? 'text-red-400' : 'text-emerald-300'}`}>{s.hover.reason ?? fmtMoney(s.hover.cost)}</span>
+            )}
+            {BUILDING_TOOLS.includes(s.tool) && (
+              <div className="mt-1 flex gap-3 text-[11px] text-slate-400">
+                <Swatch color="#22c55e" label="can be applied" />
+                <Swatch color="#38bdf8" label="already done" />
+                <Swatch color="#3b4252" label="not applicable" />
+              </div>
             )}
           </div>
           <div className="h-8 w-px bg-slate-700" />

@@ -26,7 +26,7 @@ import { Rng, clamp } from './math.js'
 import { World, sheddingFacade } from './world.js'
 import { FloodSim } from './floodSim.js'
 import { FloodImpact } from './floodImpact.js'
-import { QuakeSim, demand, mediansFor, damageProbs, collapseProb, cellOfBuilding, soilName, rockPgaAt, withGeometry, quakeAzimuth, shapeOf, dsFromD, compass, groundPeriod, buildingPeriod, resonance } from './quakeSim.js'
+import { QuakeSim, demand, mediansFor, damageProbs, collapseProb, cellOfBuilding, soilName, rockPgaAt, withGeometry, quakeAzimuth, shapeOf, dsFromD, compass, groundPeriod, buildingPeriod, resonance, softStoreyOf } from './quakeSim.js'
 import { siteDistances } from './quakePhysics.js'
 
 /**
@@ -71,7 +71,36 @@ export const TOOLS = [
   { key: 'anchor', name: 'Anchor facade', group: 'Quake', icon: '🧷', desc: 'Tie back brick facades and parapets, film the glass. Stops most of the falling masonry and glass that kills people in the street (Christchurch 2011).' },
 ]
 
-const BUILDING_TOOLS = ['retrofit', 'isolate', 'elevate', 'softstorey', 'anchor']
+export const BUILDING_TOOLS = ['retrofit', 'isolate', 'elevate', 'softstorey', 'anchor']
+const QUAKE_TOOLS = ['retrofit', 'isolate', 'softstorey', 'anchor']
+// what each spending key counts towards in the after-action comparison
+const SPEND_GROUP = {
+  retrofit: 'structural',
+  isolate: 'structural',
+  urmProgram: 'structural',
+  criticalProgram: 'structural',
+  softstorey: 'brace',
+  softStoreyProgram: 'brace',
+  anchor: 'anchor',
+  facadeProgram: 'anchor',
+  demolish: 'demolish',
+  house: 'demolish',
+  apartment: 'demolish',
+  quakeWarning: 'warning',
+  gasShutoff: 'gas',
+}
+// fraction of a building's value lost in each damage state (slight … complete), after HAZUS
+const LOSS_RATIO = [0.02, 0.1, 0.5, 1]
+
+/** Does building b already have the measure this tool applies? */
+function hasMeasure(tool, b) {
+  if (tool === 'retrofit') return !!b.origConstruction && b.construction !== 'isolated'
+  if (tool === 'isolate') return b.construction === 'isolated'
+  if (tool === 'softstorey') return !!b.softFixed && !!b.openFront
+  if (tool === 'anchor') return !!b.facadeAnchored
+  if (tool === 'elevate') return b.elevated > 0
+  return false
+}
 
 const NEW_BUILD = {
   house: { floors: 2, construction: 'wood_mod' },
@@ -175,6 +204,9 @@ export class Game {
     this.upgrades = { floodWarning: false, drainage: 0, dredge: false, quakeWarning: false, gasShutoff: false }
     this.relocated = 0
     this.actions = {}
+    this.spentBy = {}
+    // the city as generated, before any preparation: what the results compare against
+    this.baselineCity = structuredClone(city)
     this.world.focus((city.center.i - GRID / 2) * 10, (city.center.j - GRID / 2) * 10, city.type === 'rural' ? 520 : 760)
     this.notify(`Welcome to ${city.name}. Prepare the city — then start the disaster.`)
     this.emit()
@@ -188,9 +220,10 @@ export class Game {
     this.overlay = false
     this.log = []
     this.results = null
-    this.flood = this.quake = this.impact = null
+    this.flood = this.quake = this.impact = this.shadow = null
     this.world.controls.autoRotate = false
     this.world.buildCity(city, this.settings.startHour)
+    for (const b of city.buildings) b.openFront = this.world.openFront(b)
     this.world.burning = []
     this.preview = new FloodSim(city)
     this.preview.computeFlow()
@@ -256,6 +289,7 @@ export class Game {
   setTool(t) {
     this.tool = t
     this.world.setHighlight(null)
+    this.applyColorMode()
     this.emit()
   }
 
@@ -281,6 +315,7 @@ export class Game {
     }
     this.spent += cost
     this.actions[what] = (this.actions[what] || 0) + 1
+    this.spentBy[what] = (this.spentBy[what] || 0) + cost
     return true
   }
 
@@ -408,8 +443,8 @@ export class Game {
     }
     if (tool === 'softstorey') {
       if (b.softFixed) return 'Ground floor already braced'
-      if (!this.world.openFront(b)) return 'No open shopfront ground floor to brace'
-      if (!this.world.softStorey(b)) return 'Built to a modern code: the ground floor is already designed for it'
+      if (!b.openFront) return 'No open shopfront ground floor to brace'
+      if (!softStoreyOf(b)) return 'Built to a modern code: the ground floor is already designed for it'
       return null
     }
     if (tool === 'anchor') {
@@ -485,17 +520,8 @@ export class Game {
       if (why) return this.notify(why, 'bad')
       const cost = this.toolCost(tool, b)
       if (!this.pay(cost, tool)) return
-      if (tool === 'retrofit') {
-        b.construction = CONSTRUCTION[b.construction].next
-        b.softFixed = true // a full retrofit braces the ground floor too
-      }
-      if (tool === 'isolate') b.construction = 'isolated'
-      if (tool === 'softstorey') b.softFixed = true
-      if (tool === 'anchor') b.facadeAnchored = true
-      if (tool === 'elevate') {
-        b.elevated = 2
-        this.world.rebuildStatic()
-      }
+      this.applyMeasure(tool, b)
+      if (tool === 'elevate') this.world.rebuildStatic()
       this.world.rebuildBuildings()
       this.applyColorMode()
       this.selected = b.id
@@ -548,6 +574,7 @@ export class Game {
       const rng = new Rng(Math.floor(Math.random() * 1e9))
       for (let j = fp.y; j < fp.y + fp.d; j++) for (let i = fp.x; i < fp.x + fp.w; i++) if (city.cellType[idx(i, j)] === CELL_PARK) city.cellType[idx(i, j)] = CELL_GRASS
       const nb = addBuilding(city, rng, { type: tool, ...fp, floors, construction: NEW_BUILD[tool].construction })
+      nb.built = true
       if (nb.residents) this.relocated = Math.max(0, this.relocated - nb.residents)
       this.world.paintTerrain()
       this.world.buildTrees()
@@ -625,6 +652,7 @@ export class Game {
     const U = UPGRADES[key]
     const lvl = typeof this.upgrades[key] === 'number' ? this.upgrades[key] : this.upgrades[key] ? 1 : 0
     if (U.max ? lvl >= U.max : lvl >= 1) return
+    if (U.program) return this.runProgram(key)
     const cost = U.cost(this.city, lvl)
     if (!this.pay(cost, key)) return
     if (U.max) this.upgrades[key] = lvl + 1
@@ -638,10 +666,71 @@ export class Game {
     this.notify(`${U.name} purchased (${cost.toFixed(1)} $M).`, 'good')
   }
 
+  /** Carry out a city-wide program: the same measure on every building that qualifies. */
+  runProgram(key) {
+    const U = UPGRADES[key]
+    const { targets, cost } = this.programPlan(key)
+    if (!targets.length) return this.notify('No buildings need this.')
+    if (!this.pay(cost, key)) return
+    for (const b of targets) {
+      this.applyMeasure(U.program.tool, b)
+      if (U.program.full) while (CONSTRUCTION[b.construction].next) this.applyMeasure(U.program.tool, b)
+    }
+    this.upgrades[key] = true
+    this.world.rebuildBuildings()
+    this.applyColorMode()
+    this.notify(`${U.name}: ${targets.length} buildings — ${cost.toFixed(1)} $M.`, 'good')
+  }
+
   upgradeCost(key) {
     const U = UPGRADES[key]
     const lvl = typeof this.upgrades[key] === 'number' ? this.upgrades[key] : this.upgrades[key] ? 1 : 0
+    if (U.program) {
+      const { cost, targets } = this.programPlan(key)
+      return { cost, owned: lvl >= 1, lvl, count: targets.length }
+    }
     return { cost: U.cost(this.city, lvl), owned: U.max ? lvl >= U.max : lvl >= 1, lvl }
+  }
+
+  /** The buildings a city-wide program would work on, and the city's share of the bill. */
+  programPlan(key) {
+    const P = UPGRADES[key].program
+    const targets = this.city.buildings.filter((b) => (!P.construction || b.construction === P.construction) && (!P.types || P.types.includes(b.type)) && this.checkTool(P.tool, b) === null)
+    let cost = 0
+    for (const b of targets) {
+      let steps = 1
+      if (P.full) for (let c = CONSTRUCTION[b.construction].next; CONSTRUCTION[c]?.next; c = CONSTRUCTION[c].next) steps++
+      cost += this.toolCost(P.tool, b) * steps
+    }
+    return { targets, cost: cost * P.share }
+  }
+
+  /** Apply one building measure (a tool, or a city-wide program doing the same job). */
+  applyMeasure(tool, b) {
+    if (tool === 'retrofit') {
+      b.origConstruction ??= b.construction
+      b.construction = CONSTRUCTION[b.construction].next
+      b.softFixed ||= 'retrofit' // a full retrofit braces the ground floor too
+    }
+    if (tool === 'isolate') {
+      b.origConstruction ??= b.construction
+      b.construction = 'isolated'
+    }
+    if (tool === 'softstorey') b.softFixed = 'brace'
+    if (tool === 'anchor') b.facadeAnchored = true
+    if (tool === 'elevate') b.elevated = 2
+  }
+
+  /** Measures a building has had, for the inspect panel. */
+  measuresOf(b) {
+    const out = []
+    if (b.built) out.push('Newly built to modern code')
+    if (b.origConstruction && b.construction !== 'isolated') out.push(`Retrofitted from ${CONSTRUCTION[b.origConstruction].short}`)
+    if (b.construction === 'isolated') out.push(b.origConstruction ? `Base-isolated (was ${CONSTRUCTION[b.origConstruction].short})` : 'Base-isolated')
+    if (b.softFixed && b.openFront) out.push(b.softFixed === 'brace' ? 'Soft storey braced' : 'Ground floor braced by retrofit')
+    if (b.facadeAnchored) out.push('Facade & parapets anchored')
+    if (b.elevated) out.push(`Raised ${b.elevated} m`)
+    return out
   }
 
   refreshPreview() {
@@ -653,6 +742,12 @@ export class Game {
   // --------------------------------------------------------------- colors
   applyColorMode() {
     const { settings } = this
+    // a building tool in hand: show where it can go (green), where it is done (blue), where it can't (grey)
+    if (this.phase === 'prepare' && BUILDING_TOOLS.includes(this.tool)) {
+      const tool = this.tool
+      this.world.setColorFn((b) => (this.checkTool(tool, b) === null ? '#22c55e' : hasMeasure(tool, b) ? '#38bdf8' : '#3b4252'))
+      return
+    }
     if (!this.overlay || !settings) {
       this.world.setColorFn(null)
       return
@@ -692,12 +787,11 @@ export class Game {
     const L = this.quakeEvent()
     const soil = this.city.soil[cellOfBuilding(b)]
     const Tm = groundPeriod(L.M, siteDistances(L.geo, 0, 0).rjb, soil, L.freq)
-    b.softStorey = this.world.softStorey(b)
     const p = demand(b, soil, L.M, rockPgaAt(L, b.cx, b.cz), Tm)
     const med = mediansFor(b, L.M, 0)
     const probs = damageProbs(p, med)
     const sh = shapeOf(b)
-    return { pga: p, soil, pComplete: probs[3], pExtensive: probs[2], pCollapse: probs[3] * collapseProb(b, p, med), slender: sh.slender, shapeCap: sh.cap, T: buildingPeriod(b), Tm, res: resonance(b, Tm) }
+    return { pga: p, soil, probs, pComplete: probs[3], pExtensive: probs[2], pCollapse: probs[3] * collapseProb(b, p, med), slender: sh.slender, shapeCap: sh.cap, T: buildingPeriod(b), Tm, res: resonance(b, Tm) }
   }
 
   // ----------------------------------------------------------- simulation
@@ -710,6 +804,7 @@ export class Game {
       upgrades: { ...this.upgrades },
       relocated: this.relocated,
       actions: { ...this.actions },
+      spentBy: { ...this.spentBy },
     }
     this.phase = 'sim'
     this.tool = 'inspect'
@@ -738,8 +833,14 @@ export class Game {
         this.world.subsurface.build(city)
         this.world.subsurface.setQuake(this.world.subsurface.quake)
       }
-      for (const b of city.buildings) b.softStorey = this.world.softStorey(b)
       this.quake = new QuakeSim(city, this.level, { warning: this.upgrades.quakeWarning, gasShutoff: this.upgrades.gasShutoff, startHour: settings.startHour, rng: this.rng })
+      // the same earthquake, run unseen on the city as it was generated: the "without preparations" in the results
+      this.shadow = null
+      if (this.baselineCity) {
+        const base = structuredClone(this.baselineCity)
+        if (SOILS[this.level.soil] !== undefined) base.soil.fill(SOILS[this.level.soil])
+        this.shadow = new QuakeSim(base, this.level, { startHour: settings.startHour, rng: new Rng((settings.seed ^ 0x5bd1e995) >>> 0) })
+      }
       this.population = this.quake.population
       this.pushLog(0, `A normal day in ${city.name}. ${stats.present.toLocaleString()} people are in the district…`, 'info')
     }
@@ -908,12 +1009,24 @@ export class Game {
     }
   }
 
+  /** Keep the unprepared shadow city's earthquake in step with the real one. */
+  stepShadow(t) {
+    const sh = this.shadow
+    if (!sh) return
+    while (sh.time < t) sh.update(60)
+    // nobody draws it: drop what the renderer would have read
+    sh.events.length = 0
+    sh.pending.length = 0
+    sh.moved.clear()
+  }
+
   stepQuake(want) {
     const q = this.quake
     this.acc += want
     while (this.acc >= 60) {
       this.acc -= 60
       q.update(60)
+      this.stepShadow(q.time)
     }
     this.simTime = q.time + this.acc
     for (const e of q.events.splice(0)) this.pushLog(e.t, e.text, e.level)
@@ -1098,6 +1211,7 @@ export class Game {
       this.upgrades = { ...s.upgrades }
       this.relocated = s.relocated
       this.actions = { ...s.actions }
+      this.spentBy = { ...s.spentBy }
     } else {
       this.newGame(this.settings)
       return
@@ -1109,7 +1223,7 @@ export class Game {
 
   backToMenu() {
     this.phase = 'menu'
-    this.flood = this.quake = this.impact = null
+    this.flood = this.quake = this.impact = this.shadow = null
     this.results = null
     this.loadDemo()
     this.emit()
@@ -1157,7 +1271,7 @@ export class Game {
       const cls = Object.entries(q.deathsByClass).sort((a, b) => b[1] - a[1])
       if (cls.length && cls[0][1] >= 1)
         lessons.push(`${Math.round((cls[0][1] / Math.max(1, T.dead)) * 100)}% of deaths were in ${CONSTRUCTION[cls[0][0]].name.toLowerCase()} buildings. Retrofitting or replacing them gives the biggest reduction.`)
-      const softDown = city.buildings.filter((b) => b.softStorey && q.st.get(b.id)?.collapsed).length
+      const softDown = city.buildings.filter((b) => softStoreyOf(b) && q.st.get(b.id)?.collapsed).length
       if (softDown) lessons.push(`${softDown} building${softDown > 1 ? 's' : ''} with an open shopfront ground floor (a soft storey) collapsed. Bracing just that floor costs a fraction of a full retrofit.`)
       const outdoor = T.outdoorDead - (this.world.life.stats.bridgeDead || 0)
       if (outdoor >= 1 && city.buildings.some((b) => sheddingFacade(b) && !b.facadeAnchored))
@@ -1215,7 +1329,102 @@ export class Game {
       hours: this.simTime / 3600,
       causes: causes.map((c) => ({ ...c, value: Math.round(c.value) })),
       lessons,
+      prep: this.quake && this.shadow ? this.prepEffect(T, this.quake.deathsByCause) : null,
     }
+  }
+
+  /**
+   * Expected outcome for one building in this scenario, averaged over many
+   * quakes like it: deaths inside, collapse and destruction odds, and the
+   * repair bill. Used for the preparation estimate and the with/without
+   * comparison in the results.
+   */
+  expectedQuake(b) {
+    const r = this.quakeRisk(b)
+    const pres = occupancyAt(b, this.settings.startHour)
+    const P = r.probs
+    let ratio = 0
+    for (let i = 0; i < 4; i++) ratio += (P[i] - (P[i + 1] ?? 0)) * LOSS_RATIO[i]
+    return {
+      pga: r.pga,
+      deaths: pres * (r.pCollapse * 0.13 + (r.pComplete - r.pCollapse) * 0.004 + r.pExtensive * 0.0004),
+      collapse: r.pCollapse,
+      complete: r.pComplete,
+      loss: b.value * ratio,
+    }
+  }
+
+  /**
+   * What the preparations bought: for each kind of measure, the deaths,
+   * destroyed buildings and losses it is estimated to have prevented, against
+   * the city as generated. Building measures are scored with the damage model
+   * (taking each one away again); facade anchoring from the street deaths that
+   * unanchored facades caused in this run; early warning and gas valves from
+   * the factors they apply in the simulation.
+   */
+  prepEffect(T, c) {
+    this.stepShadow(this.quake.time)
+    const S = this.shadow.totals()
+    const prepared = this.prepSnapshot.city.buildings
+    const ids = new Set(prepared.map((b) => b.id))
+    const rows = {}
+    const row = (k, label) => (rows[k] ??= { key: k, label, count: 0, lives: 0, destroyed: 0, loss: 0, spent: 0 })
+    const credit = (k, label, without, withIt) => {
+      const r = row(k, label)
+      r.count++
+      r.lives += without.deaths - withIt.deaths
+      r.destroyed += without.complete - withIt.complete
+      r.loss += without.loss - withIt.loss
+    }
+    let structuralDeaths = 0
+    for (const b of prepared) {
+      const now = this.expectedQuake(b)
+      structuralDeaths += now.deaths
+      if (b.origConstruction) credit('structural', 'Retrofits & base isolation', this.expectedQuake({ ...b, construction: b.origConstruction, softFixed: b.softFixed === 'retrofit' ? false : b.softFixed }), now)
+      if (b.softFixed === 'brace') credit('brace', 'Soft storeys braced', this.expectedQuake({ ...b, softFixed: false }), now)
+    }
+    // demolished, with the residents moved to new, code-compliant housing
+    for (const b of this.baselineCity.buildings) if (!ids.has(b.id)) credit('demolish', 'Demolished & rehoused', this.expectedQuake(b), { deaths: 0, complete: 0, loss: 0 })
+    // facades: street deaths per unanchored facade in this run, times the anchored ones, less what still fell
+    const kills = this.world.facadeKills
+    const shed = prepared.filter((b) => sheddingFacade(b))
+    const anchored = shed.filter((b) => b.facadeAnchored)
+    if (anchored.length) {
+      const sum = (list) => list.reduce((s, b) => s + (kills.get(b.id) || 0), 0)
+      const open = shed.length - anchored.length
+      const perOpen = open ? sum(shed.filter((b) => !b.facadeAnchored)) / open : sum(anchored) / 0.15 / anchored.length
+      const r = row('anchor', 'Facades & parapets anchored')
+      r.count = anchored.length
+      r.lives = Math.max(0, perOpen * anchored.length - sum(anchored))
+    }
+    if (this.upgrades.quakeWarning) {
+      const r = row('warning', 'Earthquake early warning')
+      r.count = 1
+      r.lives = structuralDeaths * (1 / 0.8 - 1)
+    }
+    if (this.upgrades.gasShutoff) {
+      const r = row('gas', 'Gas shut-off valves')
+      r.count = 1
+      r.lives = c.fire * (1 / 0.4 - 1)
+    }
+    for (const [k, v] of Object.entries(this.prepSnapshot.spentBy || {})) if (rows[SPEND_GROUP[k]]) rows[SPEND_GROUP[k]].spent += v
+    const list = Object.values(rows).filter((r) => r.count > 0)
+    // The totals come from the shadow run: the same quake on the city as generated
+    // (it has no people in the street, so this run's outdoor deaths are added to
+    // it, plus what the anchored facades are estimated to have stopped). The
+    // per-measure estimates only split the difference between the measures.
+    const facadeLives = rows.anchor?.lives ?? 0
+    const without = { dead: S.dead + T.outdoorDead + facadeLives, destroyed: S.destroyed, loss: S.loss }
+    const saved = { lives: without.dead - T.dead, destroyed: without.destroyed - T.destroyed, loss: without.loss - T.loss }
+    const split = (field, total) => {
+      const sum = list.reduce((s, r) => s + Math.max(0, r[field]), 0)
+      for (const r of list) r[field] = sum > 0 && total > 0 ? (Math.max(0, r[field]) / sum) * total : 0
+    }
+    split('lives', saved.lives)
+    split('destroyed', saved.destroyed)
+    split('loss', saved.loss)
+    const spent = this.prepSnapshot.spent
+    return { rows: list.sort((a, b) => b.lives - a.lives), without, saved, spent, bcr: spent > 0 ? Math.max(0, saved.loss) / spent : 0 }
   }
 
   // ------------------------------------------------------------- snapshot
@@ -1230,7 +1439,7 @@ export class Game {
       floors: b.floors,
       height: b.height,
       construction: C.name,
-      era: C.era,
+      era: CONSTRUCTION[b.origConstruction ?? b.construction].era,
       area: b.area,
       residents: b.residents,
       present: occupancyAt(b, this.settings?.startHour ?? 12),
@@ -1240,13 +1449,20 @@ export class Game {
       elevated: b.elevated,
       beds: b.beds,
       capacity: b.capacity,
-      openFront: this.world.openFront(b),
-      softStorey: this.world.softStorey(b),
+      openFront: !!b.openFront,
+      softStorey: softStoreyOf(b),
       softFixed: !!b.softFixed,
       sheds: sheddingFacade(b),
       facadeAnchored: !!b.facadeAnchored,
+      measures: this.measuresOf(b),
     }
     if (this.settings?.disaster === 'quake') info.quake = this.quakeRisk(b)
+    if (this.phase === 'prepare' && this.settings?.disaster === 'quake')
+      info.options = QUAKE_TOOLS.map((k) => {
+        const T = TOOLS.find((t) => t.key === k)
+        const why = this.checkTool(k, b)
+        return { key: k, name: T.name, icon: T.icon, status: why === null ? 'ok' : hasMeasure(k, b) ? 'done' : 'na', note: why ?? this.toolCost(k, b) }
+      })
     if (this.quake) {
       const s = this.quake.st.get(id)
       if (s) {
@@ -1290,11 +1506,10 @@ export class Game {
       let expDeaths = 0
       let pgaSum = 0
       for (const b of city.buildings) {
-        const r = this.quakeRisk(b)
-        pgaSum += r.pga
-        expCollapse += r.pCollapse
-        const pres = occupancyAt(b, settings.startHour)
-        expDeaths += pres * (r.pCollapse * 0.13 + (r.pComplete - r.pCollapse) * 0.004 + r.pExtensive * 0.0004)
+        const e = this.expectedQuake(b)
+        pgaSum += e.pga
+        expCollapse += e.collapse
+        expDeaths += e.deaths
       }
       out.pga = city.buildings.length ? pgaSum / city.buildings.length : 0
       out.rockPga = rockPgaAt(this.quakeEvent(), 0, 0)

@@ -18,8 +18,6 @@ import { Wreckage } from './wreckage.js'
 import { buildingPeriod } from './quakeSim.js'
 import { M_SHOP } from './archetypes.js'
 
-/** Constructions whose open ground floors act as a soft storey. */
-export const SOFT_STOREY_CLASSES = ['wood_old', 'urm', 'rc_low', 'rc_mod']
 /** Does b throw facade pieces in strong shaking: tall cladding, or masonry parapets. */
 export const sheddingFacade = (b) => b.floors >= 7 || b.construction === 'urm'
 
@@ -143,6 +141,7 @@ export class World {
     this.life = new CityLife(scene, this)
     this.lifeCtx = {}
     this.impactAcc = new Map()
+    this.facadeKills = new Map() // building id → people in the street killed by its facade
     this.subsurface = new Subsurface(this)
     // CC0 Quaternius vehicles and people stream in; built-in models are used until then
     loadModels().then((m) => {
@@ -213,6 +212,7 @@ export class World {
     this.envMaterials.clear()
     this.anim.clear()
     this.impactAcc.clear()
+    this.facadeKills.clear()
     this.shakes = []
     this.fire.clear()
     this.smoke.clear()
@@ -1678,14 +1678,6 @@ export class World {
     a.active = true
   }
 
-  /**
-   * Soft storey: an open ground floor of shopfronts under a building that is
-   * not built to a modern code (and not yet braced).
-   */
-  softStorey(b) {
-    return !b.softFixed && SOFT_STOREY_CLASSES.includes(b.construction) && b.floors >= 2 && this.openFront(b)
-  }
-
   /** Does b stand on an open ground floor of shopfronts (a soft, weak side) ? */
   openFront(b) {
     const row = this.bIndex.get(b.id)
@@ -2002,7 +1994,7 @@ export class World {
   strikeAt(x, z, r, e) {
     const hit = this.life.hitArea(x, z, r, e)
     if (hit.killed || hit.crushed) this.onStreetHit?.(hit)
-    if (e < 2e4) return
+    if (e < 2e4) return hit
     const reach = r + Math.min(3, e / 5e5)
     for (const t of this.near(this.treeIdx, x, z, reach + 2)) {
       if (t.fallen) continue
@@ -2024,6 +2016,7 @@ export class World {
       p.mesh.setMatrixAt(p.q, this.propMatrix(p.it))
       p.mesh.instanceMatrix.needsUpdate = true
     }
+    return hit
   }
 
   /** Items bucketed by cell (see indexByCell) within the cells around (x, z). */
@@ -2102,7 +2095,9 @@ export class World {
         this.onImpact?.(bid, acc)
       } else this.impactAcc.set(bid, acc)
     }
-    this.strikeAt(it.x, it.z, Math.max(it.sx, it.sz) * 0.5, E)
+    const hit = this.strikeAt(it.x, it.z, Math.max(it.sx, it.sz) * 0.5, E)
+    // people in the street killed by facade and parapet pieces, by the building they fell from
+    if (it.facade && hit.killed) this.facadeKills.set(it.src, (this.facadeKills.get(it.src) || 0) + hit.killed)
     if (E > 2e6) for (let q = 0; q < 6; q++) this.dust.emit(it.x + (Math.random() - 0.5) * it.sx, it.y, it.z + (Math.random() - 0.5) * it.sz, (Math.random() - 0.5) * 6, 1.5, (Math.random() - 0.5) * 6, 10, 7, 6, [0.62, 0.57, 0.5, 0.55], [0.7, 0.66, 0.6, 0])
   }
 
@@ -2148,7 +2143,7 @@ export class World {
       const out = 1 + Math.random() * 3
       const glass = BUILDING_TYPES[b.type].windows >= 2 && Math.random() < 0.6
       const size = glass ? 0.4 + Math.random() * 0.5 : 0.5 + Math.random() * 1.1
-      this.debris.spawn(x + a.ux * a.vis, y, z + a.uz * a.vis, nx * out + a.vx, 0, nz * out + a.vz, size, glass ? 0x9fc0d4 : b.color, { src: b.id })
+      this.debris.spawn(x + a.ux * a.vis, y, z + a.uz * a.vis, nx * out + a.vx, 0, nz * out + a.vz, size, glass ? 0x9fc0d4 : b.color, { src: b.id, facade: true })
     }
   }
 

@@ -125,7 +125,8 @@ export class Debris {
 
   /**
    * opts: { dims: [sx,sy,sz] exact size, fragile: shatters on hard impact,
-   *         src: id of the building it came from (ignored for roof contact) }
+   *         src: id of the building it came from (ignored for roof contact),
+   *         facade: a piece of cladding, glass or parapet shaken off it }
    */
   spawn(x, y, z, vx, vy, vz, size, color, opts = {}) {
     let it
@@ -158,6 +159,7 @@ export class Debris {
       sleep: false,
       dirty: true,
       fragile: !!opts.fragile,
+      facade: !!opts.facade,
       src: opts.src ?? -1,
       color,
       age: 0,

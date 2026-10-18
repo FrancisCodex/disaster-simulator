@@ -80,6 +80,40 @@ function ResonanceGauge({ T, Tm, res }) {
   )
 }
 
+const OPTION_TONE = { ok: 'text-emerald-300', done: 'text-sky-300', na: 'text-slate-500' }
+
+/** What has been done to this building, and which quake measures it can still take. */
+function Preparations({ measures, options }) {
+  return (
+    <div className="mt-2 rounded-md bg-slate-800/60 p-2">
+      <div className="mb-1 text-[11px] text-slate-400 uppercase">Preparations</div>
+      {measures.length ? (
+        <div className="mb-1 flex flex-wrap gap-1">
+          {measures.map((m) => (
+            <span key={m} className="rounded bg-sky-500/15 px-1.5 py-0.5 text-[11px] text-sky-200 ring-1 ring-sky-400/30">
+              ✓ {m}
+            </span>
+          ))}
+        </div>
+      ) : (
+        <div className="mb-1 text-[12px] text-slate-500">None yet.</div>
+      )}
+      {options?.map((o) => (
+        <div key={o.key} className="py-0.5 text-[12px]">
+          <div className="flex justify-between gap-3">
+            <span className={o.status === 'na' ? 'text-slate-500' : 'text-slate-300'}>
+              <span className="mr-1">{o.icon}</span>
+              {o.name}
+            </span>
+            <span className={OPTION_TONE[o.status]}>{o.status === 'ok' ? fmtMoney(o.note) : o.status === 'done' ? '✓ done' : '✕ not applicable'}</span>
+          </div>
+          {o.status === 'na' && <div className="pl-5 text-[11px] leading-snug text-slate-500">{o.note}</div>}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 export function BuildingPanel({ info, title = 'Building', onClose }) {
   if (!info) return null
   const q = info.quake
@@ -108,6 +142,7 @@ export function BuildingPanel({ info, title = 'Building', onClose }) {
       <Row k="Value" v={fmtMoney(info.value)} />
       <Row k="Ground" v={info.soil} />
       <Row k="Floor above riverbank" v={`${info.aboveBank.toFixed(1)} m${info.elevated ? ' (elevated)' : ''}`} accent={info.aboveBank < 1.5 ? 'text-orange-300' : undefined} />
+      {(info.measures?.length > 0 || info.options) && <Preparations measures={info.measures ?? []} options={info.options} />}
       {q && !s && (
         <div className="mt-2 rounded-md bg-slate-800/60 p-2">
           <div className="mb-1 text-[11px] text-slate-400 uppercase">Scenario risk estimate</div>
