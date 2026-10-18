@@ -6,7 +6,10 @@ import { GRID, CELL, CELL_ROAD, CELL_RIVER, CELL_BANK, CELL_PARK, CELL_POND, CEL
 import { idx, cellToWorld } from './cityGen.js'
 import { makeNoise2D, clamp, lerp, smoothstep } from './math.js'
 import { Particles, Debris, Rain } from './effects.js'
-import { makeBuildingMaterial, makeSwayDepthMaterial, makeWaterMaterial, SkyEnvironment } from './materials.js'
+import { makeWaterMaterial, SkyEnvironment } from './materials.js'
+import { BuildingParts } from './buildingMesh.js'
+import { buildProps, finishRect } from './props.js'
+import { GROUND_PLAZA, GROUND_FIELD, GROUND_COURT } from './sites.js'
 import { CityLife } from './cityLife.js'
 import { buildRoadMeshes } from './roads.js'
 import { Subsurface } from './subsurface.js'
@@ -23,19 +26,6 @@ const _c = new THREE.Color()
 const _v = new THREE.Vector3()
 const _a = new THREE.Vector3()
 const _e = new THREE.Euler()
-
-function gableGeometry() {
-  // ridge along X, footprint 1×1, height 1
-  const p = [
-    -0.5, 0, 0.5, 0.5, 0, 0.5, 0.5, 1, 0, -0.5, 0, 0.5, 0.5, 1, 0, -0.5, 1, 0,
-    0.5, 0, -0.5, -0.5, 0, -0.5, -0.5, 1, 0, 0.5, 0, -0.5, -0.5, 1, 0, 0.5, 1, 0,
-    0.5, 0, 0.5, 0.5, 0, -0.5, 0.5, 1, 0, -0.5, 0, -0.5, -0.5, 0, 0.5, -0.5, 1, 0,
-  ]
-  const g = new THREE.BufferGeometry()
-  g.setAttribute('position', new THREE.Float32BufferAttribute(p, 3))
-  g.computeVertexNormals()
-  return g
-}
 
 function iconTexture(letter, bg) {
   const c = document.createElement('canvas')
@@ -156,6 +146,7 @@ export class World {
     this.highlight.visible = false
     scene.add(this.highlight)
 
+    this.bld = new BuildingParts({ uNight: this.uNight, envMap: this.sky.texture, cell: CELL })
     this.icons = { hospital: iconTexture('H', '#dc2626'), fire: iconTexture('F', '#ea580c'), shelter: iconTexture('S', '#16a34a'), school: iconTexture('E', '#ca8a04') }
     this.raycaster = new THREE.Raycaster()
     this.anim = new Map()
@@ -220,6 +211,7 @@ export class World {
     if (this.showWorld) this.buildOuter()
     this.buildWater()
     this.buildTrees()
+    this.buildProps()
     this.rebuildBuildings()
     this.rebuildStatic()
     this.life.build(city, hour)
@@ -270,7 +262,11 @@ export class World {
     if (!b || Math.abs(x - b.cx) > b.fw / 2 + 0.3 || Math.abs(z - b.cz) > b.fd / 2 + 0.3) return { y: ground, bid: -1 }
     const a = this.anim.get(bid)
     if (a?.topple) return { y: ground, bid: -1 }
-    return { y: Math.max(ground, b.base + b.elevated + b.height * (a?.hScale ?? 1)), bid }
+    // the roof of whichever part is under the point: a podium, a tower, or open ground in a courtyard
+    const row = this.bIndex?.get(bid)
+    const top = row === undefined ? b.height * (a?.hScale ?? 1) : this.bld.roofAt(row, x - b.cx, z - b.cz)
+    if (top < 0) return { y: ground, bid: -1 }
+    return { y: Math.max(ground, b.base + b.elevated - (a?.settle || 0) + top), bid }
   }
 
   isRubble(b) {
@@ -366,6 +362,7 @@ export class World {
       this.updateTerrainHeights()
       this.refreshRoadHeights()
       this.buildTrees()
+      this.buildProps()
     }
     if (g.dirtyFx) {
       g.dirtyFx = false
@@ -711,6 +708,7 @@ export class World {
         ctx.fillRect(px, py, 1, 1)
       }
     }
+    this.paintGrounds(ctx)
     // lots
     for (const b of city.buildings) {
       if (b.removed) continue
@@ -718,18 +716,35 @@ export class World {
       const y = b.y * PX
       const w = b.w * PX
       const d = b.d * PX
+      // the street side of the lot: a driveway or a row of parking bays
+      const f = b.facing ?? 0
+      const strip = (depth, along) => {
+        if (f === 0) return [x + along, y + d - depth]
+        if (f === 2) return [x + along, y]
+        if (f === 1) return [x + w - depth, y + along]
+        return [x, y + along]
+      }
       if (b.type === 'house') {
         ctx.fillStyle = 'rgba(80,120,60,0.5)'
         ctx.fillRect(x + 1, y + 1, w - 2, d - 2)
         ctx.fillStyle = '#8a8780'
-        ctx.fillRect(x + w / 2 - 2, y + d - 6, 4, 6)
+        const [sx, sy] = strip(6, (f % 2 ? d : w) / 2 - 2)
+        ctx.fillRect(sx, sy, f % 2 ? 6 : 4, f % 2 ? 4 : 6)
+      } else if (BUILDING_TYPES[b.type].landmark || b.variant) {
+        // civic and campus buildings stand on stone paving
+        ctx.fillStyle = '#c4bdae'
+        ctx.fillRect(x + 1, y + 1, w - 2, d - 2)
       } else {
         ctx.fillStyle = b.type === 'industrial' ? '#7c7a72' : '#9a978e'
         ctx.fillRect(x, y, w, d)
         if (b.type !== 'industrial' && b.floors < 10) {
           // parking bays
           ctx.fillStyle = 'rgba(255,255,255,0.35)'
-          for (let s = x + 3; s < x + w - 3; s += 3) ctx.fillRect(s, y + d - 5, 0.6, 4)
+          const len = f % 2 ? d : w
+          for (let s = 3; s < len - 3; s += 3) {
+            const [sx, sy] = strip(5, s)
+            ctx.fillRect(sx + (f % 2 ? 0.5 : 0), sy + (f % 2 ? 0 : 0.5), f % 2 ? 4 : 0.6, f % 2 ? 0.6 : 4)
+          }
         }
       }
     }
@@ -783,6 +798,133 @@ export class World {
       }
     if (this.groundFx) this.paintGroundFx(ctx)
     this.terrainTex.needsUpdate = true
+  }
+
+  /** Squares, lawns, playing fields, courts and park paths. */
+  paintGrounds(ctx) {
+    const { city } = this
+    if (!city.ground) return
+    for (let k = 0; k < GRID * GRID; k++) {
+      const g = city.ground[k]
+      if (!g || city.buildingAt[k] >= 0) continue
+      const x = (k % GRID) * PX
+      const y = Math.floor(k / GRID) * PX
+      if (g === GROUND_PLAZA) {
+        ctx.fillStyle = '#cbc4b4'
+        ctx.fillRect(x, y, PX, PX)
+        ctx.fillStyle = 'rgba(70,60,50,0.12)'
+        for (let s = 0; s < PX; s += 4) {
+          ctx.fillRect(x + s, y, 0.5, PX)
+          ctx.fillRect(x, y + s, PX, 0.5)
+        }
+      } else {
+        // mown grass in stripes
+        const base = g === GROUND_COURT ? null : g === GROUND_FIELD ? [112, 48, 35] : [98, 46, 38]
+        if (base) {
+          for (let s = 0; s < PX; s += 4) {
+            ctx.fillStyle = `hsl(${base[0]}, ${base[1]}%, ${base[2] + ((y + s) / 4) % 2 * 3}%)`
+            ctx.fillRect(x, y + s, PX, 4)
+          }
+        }
+      }
+    }
+    const R = (r, inset = 0) => [r.x * PX + inset, r.y * PX + inset, r.w * PX - 2 * inset, r.d * PX - 2 * inset]
+    for (const s of city.sites || []) {
+      const field = finishRect(city, s, GROUND_FIELD)
+      if (field) {
+        // running track around a pitch
+        const [x, y, w, h] = R(field, 2)
+        ctx.lineWidth = 7
+        ctx.strokeStyle = '#b5583f'
+        ctx.beginPath()
+        ctx.roundRect(x + 3.5, y + 3.5, w - 7, h - 7, Math.min(w, h) / 2 - 3.5)
+        ctx.stroke()
+        ctx.lineWidth = 0.4
+        ctx.strokeStyle = 'rgba(255,255,255,0.8)'
+        for (const o of [1, 3.5, 6]) {
+          ctx.beginPath()
+          ctx.roundRect(x + o, y + o, w - 2 * o, h - 2 * o, Math.max(1, Math.min(w, h) / 2 - o))
+          ctx.stroke()
+        }
+        const ix = x + 12
+        const iy = y + 12
+        const iw = w - 24
+        const ih = h - 24
+        if (iw > 8 && ih > 8) {
+          ctx.lineWidth = 0.6
+          ctx.strokeRect(ix, iy, iw, ih)
+          ctx.beginPath()
+          if (iw >= ih) ctx.moveTo(ix + iw / 2, iy), ctx.lineTo(ix + iw / 2, iy + ih)
+          else ctx.moveTo(ix, iy + ih / 2), ctx.lineTo(ix + iw, iy + ih / 2)
+          ctx.stroke()
+          ctx.beginPath()
+          ctx.arc(ix + iw / 2, iy + ih / 2, Math.min(iw, ih) * 0.15, 0, Math.PI * 2)
+          ctx.stroke()
+        }
+      }
+      const court = finishRect(city, s, GROUND_COURT)
+      if (court) {
+        const [x, y, w, h] = R(court)
+        if (s.kind === 'primary') {
+          // a sandy playground with soft rubber under the climbing frames
+          ctx.fillStyle = '#d6c193'
+          ctx.fillRect(x, y, w, h)
+          for (const [fx, fy, c] of [[0.2, 0.3, '#3f7f9a'], [0.6, 0.55, '#b8584a'], [0.35, 0.7, '#4f8f4a']]) {
+            ctx.fillStyle = c
+            ctx.beginPath()
+            ctx.arc(x + w * fx, y + h * fy, Math.min(w, h) * 0.14, 0, Math.PI * 2)
+            ctx.fill()
+          }
+        } else {
+          ctx.fillStyle = '#4f7f6a'
+          ctx.fillRect(x, y, w, h)
+          ctx.fillStyle = '#3f6f8f'
+          ctx.fillRect(x + 3, y + 3, w - 6, h - 6)
+          ctx.strokeStyle = 'rgba(255,255,255,0.85)'
+          ctx.lineWidth = 0.5
+          ctx.strokeRect(x + 4, y + 4, w - 8, h - 8)
+          ctx.beginPath()
+          if (w >= h) ctx.moveTo(x + w / 2, y + 4), ctx.lineTo(x + w / 2, y + h - 4)
+          else ctx.moveTo(x + 4, y + h / 2), ctx.lineTo(x + w - 4, y + h / 2)
+          ctx.stroke()
+        }
+      }
+      const plaza = finishRect(city, s, GROUND_PLAZA)
+      if (plaza && s.kind !== 'university') {
+        // a compass rose of darker stone in the middle of the square
+        const [x, y, w, h] = R(plaza)
+        ctx.strokeStyle = 'rgba(110,95,80,0.45)'
+        ctx.lineWidth = 2
+        ctx.beginPath()
+        ctx.arc(x + w / 2, y + h / 2, Math.min(w, h) * 0.3, 0, Math.PI * 2)
+        ctx.stroke()
+      }
+    }
+    // gravel paths winding through the parks
+    ctx.lineCap = 'round'
+    for (const p of city.parks || []) {
+      const [x, y, w, h] = R(p)
+      const cx = x + w / 2
+      const cy = y + h / 2
+      ctx.strokeStyle = '#d4c8a6'
+      ctx.lineWidth = p.big ? 4 : 3
+      ctx.beginPath()
+      for (const [fx, fy] of [[0, 0], [1, 0], [1, 1], [0, 1]]) {
+        ctx.moveTo(x + w * fx, y + h * fy)
+        ctx.quadraticCurveTo(x + w * (0.5 + (fy - 0.5) * 0.6), y + h * (0.5 - (fx - 0.5) * 0.6), cx, cy)
+      }
+      ctx.stroke()
+      if (p.big || p.w * p.d >= 12) {
+        ctx.beginPath()
+        ctx.arc(cx, cy, Math.min(w, h) * 0.32, 0, Math.PI * 2)
+        ctx.stroke()
+        ctx.fillStyle = '#d4c8a6'
+        ctx.beginPath()
+        ctx.arc(cx, cy, Math.min(w, h) * 0.12, 0, Math.PI * 2)
+        ctx.fill()
+      }
+    }
+    ctx.lineCap = 'butt'
   }
 
   // ------------------------------------------------------------------ water
@@ -905,6 +1047,17 @@ export class World {
     }
   }
 
+  /** Benches, fountains, gazebos, goals and lamps in parks, squares and school grounds. */
+  buildProps() {
+    if (this.propGroup) {
+      this.root.remove(this.propGroup)
+      this.propGroup.traverse((o) => o.geometry?.dispose())
+      this.propGroup.children[0]?.material.dispose()
+    }
+    this.propGroup = buildProps(this.city, (x, z) => this.groundAt(x, z))
+    this.root.add(this.propGroup)
+  }
+
   buildTrees() {
     const { city } = this
     const trees = city.trees.filter((t) => city.buildingAt[idx(t.i, t.j)] < 0 && city.cellType[idx(t.i, t.j)] !== CELL_ROAD && city.cellType[idx(t.i, t.j)] !== CELL_POND && city.levee[idx(t.i, t.j)] === 0)
@@ -958,61 +1111,19 @@ export class World {
   // ------------------------------------------------------------- buildings
   rebuildBuildings() {
     const { city } = this
-    for (const m of [this.bMesh, this.roofMesh, this.unitMesh]) {
-      if (!m) continue
-      this.root.remove(m)
-      m.geometry.dispose()
-      m.material.dispose()
-      this.envMaterials.delete(m.material)
-    }
+    for (const m of this.bld.materials) this.envMaterials.delete(m)
     for (const s of this.iconSprites || []) this.root.remove(s)
     const list = city.buildings.filter((b) => !b.removed)
     this.bList = list
     this.bIndex = new Map(list.map((b, i) => [b.id, i]))
-    const n = Math.max(1, list.length)
-    // vertical segments let tall buildings bend while they sway
-    const geo = new THREE.BoxGeometry(1, 1, 1, 1, 10, 1).translate(0, 0.5, 0)
-    const info = new Float32Array(n * 4)
-    list.forEach((b, i) => {
-      const T = BUILDING_TYPES[b.type]
-      info.set([b.floorH, T.windows, Math.floor(b.seed * 997), 1], i * 4)
-    })
-    this.bInfo = new THREE.InstancedBufferAttribute(info, 4)
-    this.bSway = new THREE.InstancedBufferAttribute(new Float32Array(n * 3), 3)
-    this.bSway.setUsage(THREE.DynamicDrawUsage)
-    geo.setAttribute('aInfo', this.bInfo)
-    geo.setAttribute('aSway', this.bSway)
-    const mat = this.trackEnv(makeBuildingMaterial({ uNight: this.uNight, envMap: this.sky.texture }))
-    const mesh = new THREE.InstancedMesh(geo, mat, n)
-    mesh.customDepthMaterial = makeSwayDepthMaterial()
-    mesh.castShadow = true
-    mesh.receiveShadow = true
-    mesh.count = list.length
-    this.bMesh = mesh
-    this.root.add(mesh)
-
-    const houses = list.filter((b) => b.type === 'house')
-    this.roofList = houses
-    this.roofIndex = new Map(houses.map((b, i) => [b.id, i]))
-    this.roofMesh = new THREE.InstancedMesh(gableGeometry(), new THREE.MeshStandardMaterial({ roughness: 0.85 }), Math.max(1, houses.length))
-    this.roofMesh.count = houses.length
-    this.roofMesh.castShadow = true
-    this.roofMesh.receiveShadow = true
-    houses.forEach((b, i) => this.roofMesh.setColorAt(i, _c.set(b.roofColor)))
-    this.root.add(this.roofMesh)
-
-    const units = list.filter((b) => b.floors >= 4)
-    this.unitList = units
-    this.unitIndex = new Map(units.map((b, i) => [b.id, i]))
-    this.unitMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0), new THREE.MeshStandardMaterial({ color: 0x8c9196, roughness: 0.7 }), Math.max(1, units.length))
-    this.unitMesh.count = units.length
-    this.unitMesh.castShadow = true
-    this.root.add(this.unitMesh)
+    this.bld.build(list)
+    for (const m of this.bld.materials) this.trackEnv(m)
+    if (this.bld.group.parent !== this.root) this.root.add(this.bld.group)
 
     this.iconSprites = []
     for (const b of list) {
       const tex = this.icons[b.type]
-      if (!tex) continue
+      if (!tex || b.noIcon) continue
       const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: true, transparent: true }))
       s.scale.set(16, 16, 1)
       s.position.set(b.cx, b.base + b.elevated + b.height + 14, b.cz)
@@ -1024,23 +1135,28 @@ export class World {
     this.refreshColors()
   }
 
-  /** Instance matrix for a building, including tilt and topple rotation. */
+  /** Unit-box matrix for a building's footprint volume, including tilt and topple rotation. */
   composeBuilding(b, out) {
     const a = this.anim.get(b.id)
-    let fw = b.fw
-    let fd = b.fd
-    let H = b.height
+    this.composeFrame(b, out)
+    const H = b.height * (a?.hScale ?? 1)
+    out.multiply(_t.makeScale(b.fw, H, b.fd))
+    return { H }
+  }
+
+  /** Building frame: local metres (origin at the base of the footprint centre) → world. */
+  composeFrame(b, out) {
+    const a = this.anim.get(b.id)
+    let s = 1
     let tx = 0
     let tz = 0
     if (a) {
-      H *= a.hScale
-      fw *= a.spread
-      fd *= a.spread
+      s = a.spread
       // permanent lean from a failing foundation, plus any damage tilt
       tx = a.tiltX + (a.topple ? 0 : a.leanTx || 0)
       tz = a.tiltZ + (a.topple ? 0 : a.leanTz || 0)
     }
-    out.set(fw, 0, 0, 0, 0, H, 0, 0, 0, 0, fd, 0, 0, 0, 0, 1)
+    out.makeScale(s, 1, s)
     if (tx || tz) out.premultiply(_r.makeRotationFromEuler(_e.set(tx, 0, tz)))
     out.elements[12] = b.cx
     out.elements[13] = b.base + b.elevated - (a?.settle || 0)
@@ -1052,60 +1168,35 @@ export class World {
       out.premultiply(_r.makeRotationAxis(_a.set(T.ax, 0, T.az), T.theta))
       out.premultiply(_t.makeTranslation(T.px, T.py, T.pz))
     }
-    return { H, tx, tz }
+    return out
+  }
+
+  /**
+   * How much of the building stands, in rest metres: storeys above `cut` have
+   * sheared off, and `sink` metres of storeys have been crushed at the base.
+   */
+  standing(b, a) {
+    const H = b.height
+    if (!a || a.hScale >= 0.999) return { cut: 1e4, sink: 0 }
+    if (a.rubble) return { cut: H * a.hScale, sink: 0 }
+    // a pancake starts from whatever was still standing (all of it, or the stub of a partial collapse)
+    const h0 = a.collapse?.kind === 'pancake' ? (a.collapse.h0 ?? 1) : a.hScale
+    return { cut: h0 >= 0.999 ? 1e4 : H * h0, sink: H * (h0 - a.hScale) }
   }
 
   updateBuilding(b) {
     const i = this.bIndex.get(b.id)
     if (i === undefined) return
-    const r = this.composeBuilding(b, _m)
-    this.bMesh.setMatrixAt(i, _m)
+    this.composeFrame(b, _m)
     const a = this.anim.get(b.id)
-    const sx = a && !a.rubble ? a.ux * a.vis : 0
-    const sz = a && !a.rubble ? a.uz * a.vis : 0
-    this.bSway.setXYZ(i, sx, sz, a && !a.rubble ? a.sink || 0 : 0)
-    const gone = a && (a.hScale < 0.5 || a.topple || a.partial)
-    const y0 = b.base + b.elevated - (a?.settle || 0)
-    const ri = this.roofIndex.get(b.id) ?? -1
-    if (ri >= 0) {
-      const along = b.fw >= b.fd
-      const rh = Math.min(b.fw, b.fd) * 0.32
-      if (gone) _m.makeScale(0, 0, 0)
-      else {
-        _m.makeScale((along ? b.fw : b.fd) * 1.08, rh, (along ? b.fd : b.fw) * 1.1)
-        if (!along) _m.premultiply(_r.makeRotationY(Math.PI / 2))
-        if (r.tx || r.tz) _m.premultiply(_r.makeRotationFromEuler(_e.set(r.tx, 0, r.tz)))
-        _v.set(0, r.H, 0)
-        if (r.tx || r.tz) _v.applyEuler(_e.set(r.tx, 0, r.tz))
-        _m.setPosition(b.cx + _v.x + sx, y0 + _v.y, b.cz + _v.z + sz)
-      }
-      this.roofMesh.setMatrixAt(ri, _m)
-      this.roofMesh.instanceMatrix.needsUpdate = true
-    }
-    const ui = this.unitIndex.get(b.id) ?? -1
-    if (ui >= 0) {
-      if (gone) _m.makeScale(0, 0, 0)
-      else {
-        const s = (b.seed * 0.2 + 0.25) * Math.min(b.fw, b.fd)
-        _m.makeScale(s, 2.6, s * 1.3)
-        _v.set((b.seed - 0.5) * b.fw * 0.3, r.H, 0)
-        if (r.tx || r.tz) {
-          _e.set(r.tx, 0, r.tz)
-          _m.premultiply(_r.makeRotationFromEuler(_e))
-          _v.applyEuler(_e)
-        }
-        _m.setPosition(b.cx + sx + _v.x, y0 + _v.y, b.cz + sz + _v.z)
-      }
-      this.unitMesh.setMatrixAt(ui, _m)
-      this.unitMesh.instanceMatrix.needsUpdate = true
-    }
-    this.bMesh.instanceMatrix.needsUpdate = true
-    this.bSway.needsUpdate = true
+    const live = a && !a.rubble
+    const { cut, sink } = this.standing(b, a)
+    const lights = a && (a.rubble || a.burnt || a.ds >= 3 || a.dark || a.partial) ? 0 : 1
+    this.bld.set(i, _m, live ? a.ux * a.vis : 0, live ? a.uz * a.vis : 0, b.height, cut, sink, lights + (a?.rubble ? 2 : 0))
   }
 
   updateAllBuildings() {
     for (const b of this.bList) this.updateBuilding(b)
-    this.bMesh.computeBoundingSphere()
   }
 
   setColorFn(fn) {
@@ -1115,23 +1206,43 @@ export class World {
 
   refreshColors() {
     if (!this.bList) return
-    const info = this.bInfo.array
+    // damage, fire and flood stains are lerps toward fixed colours: fold them into one tint
+    const body = [0, 0, 0, 0]
+    const detail = [0, 0, 0, 0]
     this.bList.forEach((b, i) => {
       const c = this.colorFn ? this.colorFn(b) : null
       const a = this.anim.get(b.id)
-      _c.set(c ?? b.color)
-      if (!c && a) {
-        if (a.burnt) _c.lerp(new THREE.Color(0x1d1a18), 0.85)
-        else if (a.burning) _c.lerp(new THREE.Color(0x2a2522), Math.min(0.7, a.burning))
-        else if (a.rubble) _c.lerp(new THREE.Color(0x5e574e), 0.65)
-        else if (a.ds) _c.lerp(new THREE.Color(0x6a5d50), a.ds * 0.12)
-        if (a.wet) _c.lerp(new THREE.Color(0x5a4a33), Math.min(0.55, a.wet))
+      let r = 0
+      let g = 0
+      let bl = 0
+      let keep = 1
+      const toward = (hex, k) => {
+        _c.set(hex)
+        r = r * (1 - k) + _c.r * k
+        g = g * (1 - k) + _c.g * k
+        bl = bl * (1 - k) + _c.b * k
+        keep *= 1 - k
       }
-      this.bMesh.setColorAt(i, _c)
-      info[i * 4 + 3] = a && (a.rubble || a.burnt || a.ds >= 3 || a.dark || a.partial) ? 0 : 1
+      if (c) toward(c, 1)
+      else if (a) {
+        if (a.burnt) toward(0x1d1a18, 0.85)
+        else if (a.burning) toward(0x2a2522, Math.min(0.7, a.burning))
+        else if (a.rubble) toward(0x5e574e, 0.65)
+        else if (a.ds) toward(0x6a5d50, a.ds * 0.12)
+        if (a.wet) toward(0x5a4a33, Math.min(0.55, a.wet))
+      }
+      const t = 1 - keep
+      body[0] = t > 0 ? r / t : 0
+      body[1] = t > 0 ? g / t : 0
+      body[2] = t > 0 ? bl / t : 0
+      body[3] = t
+      detail[0] = body[0]
+      detail[1] = body[1]
+      detail[2] = body[2]
+      detail[3] = c ? 0.9 : t
+      this.bld.setTint(i, body, detail)
+      this.updateBuilding(b)
     })
-    if (this.bMesh.instanceColor) this.bMesh.instanceColor.needsUpdate = true
-    this.bInfo.needsUpdate = true
   }
 
   /** Levees, pumps, bridges and elevated-building plinths. */
@@ -1343,8 +1454,14 @@ export class World {
     const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1)
     this.raycaster.setFromCamera(ndc, this.camera)
     let building = null
-    const hb = this.raycaster.intersectObject(this.bMesh, false)[0]
-    if (hb && hb.instanceId !== undefined) building = this.bList[hb.instanceId]
+    // move the ray into the block's frame (it shifts while the ground shakes)
+    const ray = this.raycaster.ray.clone()
+    ray.origin.sub(this.root.position)
+    const hb = this.bld.raycast(ray)
+    if (hb) {
+      building = this.bList[hb.row]
+      hb.point.add(this.root.position)
+    }
     const ht = this.raycaster.intersectObject(this.terrain, false)[0]
     const pt = hb?.point ?? ht?.point
     if (!pt) return null
@@ -1746,6 +1863,7 @@ export class World {
   update(dt, frozen = false) {
     if (frozen) {
       this.controls.update()
+      this.bld.flush()
       this.renderer.render(this.scene, this.camera)
       return
     }
@@ -1869,6 +1987,7 @@ export class World {
     this.debris.update(dt)
     // drops stop on roofs and streets; in cut-away view it only rains over the block
     this.rain.update(dt, this.rainIntensity || 0, this.controls.target, (x, z) => this.surfaceAt(x, z).y, this.subsurface.group.visible ? HALF - 2 : 0)
+    this.bld.flush()
     this.renderer.render(this.scene, this.camera)
   }
 
@@ -1897,6 +2016,7 @@ export class World {
   dispose() {
     this.ro.disconnect()
     this.life.dispose()
+    this.bld.dispose()
     this.renderer.dispose()
     this.renderer.domElement.remove()
   }

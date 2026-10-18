@@ -19,6 +19,7 @@ import {
   LEVEE_HEIGHT,
   POND_DEPTH,
   DAMAGE_STATES,
+  VARIANT_NAMES,
 } from './config.js'
 import { generateCity, addBuilding, idx, occupancyAt, cityStats } from './cityGen.js'
 import { Rng, clamp } from './math.js'
@@ -498,6 +499,10 @@ export class Game {
             city.z[k] -= POND_DEPTH
           }
         }
+      if (tool === 'park') {
+        city.parks.push({ ...fp })
+        this.world.buildProps()
+      }
       if (tool === 'pond') {
         city.ponds.push(fp)
         this.world.updateTerrainHeights()
@@ -1177,7 +1182,7 @@ export class Game {
     const C = CONSTRUCTION[b.construction]
     const info = {
       id,
-      type: BUILDING_TYPES[b.type].name,
+      type: VARIANT_NAMES[b.variant] ?? BUILDING_TYPES[b.type].name,
       typeKey: b.type,
       floors: b.floors,
       height: b.height,

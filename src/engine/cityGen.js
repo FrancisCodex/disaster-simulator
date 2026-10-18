@@ -12,6 +12,7 @@ import {
   RIVER_DEPTH,
 } from './config.js'
 import { Rng, makeNoise2D, smoothstep, clamp } from './math.js'
+import { placeSites } from './sites.js'
 
 const NAMES_A = ['Port', 'New', 'North', 'East', 'West', 'Lake', 'Fort', 'Mount', 'San', 'Saint', 'Glen', 'Upper', 'Lower']
 const NAMES_B = ['Halden', 'Corvin', 'Ashford', 'Marrow', 'Delmar', 'Kestrel', 'Valebrook', 'Aurora', 'Linden', 'Meridian', 'Solace', 'Cresta', 'Tarin', 'Riverton', 'Oakhurst', 'Bayview']
@@ -43,10 +44,27 @@ export function residentsOf(b) {
   return Math.round((b.area / T.m2PerPerson) * T.residentShare)
 }
 
+/** The side of a lot that faces a street: 0 +z, 1 +x, 2 -z, 3 -x. */
+export function streetSide(city, x, y, w, d, rng) {
+  const road = (i, j) => i >= 0 && j >= 0 && i < GRID && j < GRID && city.cellType[idx(i, j)] === CELL_ROAD
+  const len = [0, 0, 0, 0]
+  for (let i = x; i < x + w; i++) {
+    if (road(i, y + d)) len[0]++
+    if (road(i, y - 1)) len[2]++
+  }
+  for (let j = y; j < y + d; j++) {
+    if (road(x + w, j)) len[1]++
+    if (road(x - 1, j)) len[3]++
+  }
+  let best = rng ? rng.int(0, 3) : 0
+  for (let s = 0; s < 4; s++) if (len[s] > len[best]) best = s
+  return best
+}
+
 /** Builds a building record on lot (x,y,w,d) in cells. */
-export function makeBuilding(city, rng, { type, x, y, w, d, floors, construction }) {
+export function makeBuilding(city, rng, { type, x, y, w, d, floors, construction, facing, variant, arch, noIcon }) {
   const T = BUILDING_TYPES[type]
-  const setback = { house: 3, apartment: 2.5, office: 1.8, tower: 3, industrial: 1.5, hospital: 2.5, fire: 2, school: 2.5, shelter: 2.5 }[type] ?? 2
+  const setback = { house: 3, apartment: 2.5, office: 1.8, tower: 3, industrial: 1.5, hospital: 2.5, fire: 2, school: 2.5, shelter: 2.5, civic: 2, museum: 2, library: 2, worship: 1.5, stadium: 1, landmark: 2.5 }[type] ?? 2
   let fw = w * CELL - 2 * setback - rng.float(0, type === 'house' ? 3 : 1.5)
   let fd = d * CELL - 2 * setback - rng.float(0, type === 'house' ? 3 : 1.5)
   if (type === 'house') {
@@ -57,6 +75,10 @@ export function makeBuilding(city, rng, { type, x, y, w, d, floors, construction
     fw = Math.min(fw, 38)
     fd = Math.min(fd, 38)
   }
+  // slender monuments stand on a much smaller footprint than their plaza lot
+  if (variant === 'clock') fw = fd = 9
+  if (variant === 'needle') fw = fd = 12
+  if (variant === 'arch') fd = Math.min(fd, 11)
   fw = Math.max(fw, 5)
   fd = Math.max(fd, 5)
   let zmin = Infinity
@@ -71,7 +93,9 @@ export function makeBuilding(city, rng, { type, x, y, w, d, floors, construction
     }
   const floorH = T.floorH
   const height = floors * floorH + (type === 'house' ? 0 : 1)
-  const area = fw * fd * floors
+  // usable floor area: a stadium is a ring of stands, monuments are mostly solid or open
+  const fill = type === 'stadium' ? 0.45 : variant === 'needle' ? 0.2 : variant === 'arch' ? 0.25 : variant === 'clock' ? 0.6 : 1
+  const area = fw * fd * floors * fill
   const b = {
     id: city.nextId++,
     type,
@@ -97,7 +121,12 @@ export function makeBuilding(city, rng, { type, x, y, w, d, floors, construction
     elevated: 0,
     seed: rng.next(),
     removed: false,
+    // which side faces the street: 0 +z, 1 +x, 2 -z, 3 -x
+    facing: facing ?? streetSide(city, x, y, w, d, rng),
   }
+  if (variant) b.variant = variant
+  if (arch) b.arch = arch
+  if (noIcon) b.noIcon = true
   b.residents = residentsOf(b)
   if (type === 'hospital') b.beds = Math.round(area / 45)
   if (type === 'shelter') b.capacity = Math.round(area / 3.5)
@@ -179,6 +208,10 @@ export function generateCity(typeKey, seed) {
     trees: [],
     pumps: [],
     ponds: [],
+    // special sites (civic, campus, landmark…), parks, and the surface finish of their open ground
+    sites: [],
+    parks: [],
+    ground: new Uint8Array(N * N),
     nextId: 0,
     dredged: false,
   }
@@ -289,35 +322,52 @@ export function generateCity(typeKey, seed) {
     return zhi - zlo < 1.6 * Math.max(w, d)
   }
 
-  const minLot = { house: 1, apartment: 2, office: 2, tower: 3, industrial: 2 }
+  const blocks = []
   for (let a = 0; a < xs.length - 1; a++) {
     for (let bI = 0; bI < ys.length - 1; bI++) {
       let x0 = xs[a] + 1
       let y0 = ys[bI] + 1
       if (wideAvenue && isMain(xs[a], ox)) x0++
       if (wideAvenue && isMain(ys[bI], oy)) y0++
-      const x1 = xs[a + 1]
-      const y1 = ys[bI + 1]
-      for (const [lx, lw] of split(x0, x1 - x0)) {
-        for (const [ly, ld] of split(y0, y1 - y0)) {
-          if (!lotFree(lx, ly, lw, ld)) continue
-          const dist = Math.hypot(lx + lw / 2 - cx, ly + ld / 2 - cy)
-          const r = dist / P.radius
-          const p = r < 1 ? P.fill * (1 - 0.35 * r * r) : P.outerFill * Math.exp(-(dist - P.radius) / 12)
-          if (!rng.chance(p)) continue
-          if (rng.chance(P.parkChance) && r < 1) {
-            for (let j = ly; j < ly + ld; j++) for (let i = lx; i < lx + lw; i++) cellType[idx(i, j)] = CELL_PARK
-            continue
-          }
-          const zone = r < 0.3 ? 'core' : r < 0.7 ? 'mid' : 'outer'
-          let type = rng.weighted(P.zones[zone])
-          const lotMin = Math.min(lw, ld)
-          if (lotMin < minLot[type]) type = lotMin >= 2 && type === 'tower' ? 'office' : 'house'
-          const [fmin, fmax] = P.floors[type]
-          let floors = rng.int(fmin, fmax)
-          if (type === 'tower' || type === 'office') floors = Math.max(fmin, Math.round(floors * (1.15 - 0.5 * r)))
-          addBuilding(city, rng, { type, x: lx, y: ly, w: lw, d: ld, floors, construction: rng.weighted(P.mix[type]) })
+      blocks.push({ x0, y0, w: xs[a + 1] - x0, d: ys[bI + 1] - y0 })
+    }
+  }
+
+  // civic centre, museums, campuses, schools, landmarks and parks claim their sites first
+  const slopeOk = (x, y, w, d) => {
+    let zlo = Infinity
+    let zhi = -Infinity
+    for (let j = y; j < y + d; j++)
+      for (let i = x; i < x + w; i++) {
+        zlo = Math.min(zlo, z[idx(i, j)])
+        zhi = Math.max(zhi, z[idx(i, j)])
+      }
+    return zhi - zlo < 1.2 * Math.max(w, d)
+  }
+  placeSites({ city, rng, P, blocks, cx, cy, N, idx, slopeOk, add: (spec) => addBuilding(city, rng, spec) })
+
+  const minLot = { house: 1, apartment: 2, office: 2, tower: 3, industrial: 2 }
+  for (const B of blocks) {
+    for (const [lx, lw] of split(B.x0, B.w)) {
+      for (const [ly, ld] of split(B.y0, B.d)) {
+        if (!lotFree(lx, ly, lw, ld)) continue
+        const dist = Math.hypot(lx + lw / 2 - cx, ly + ld / 2 - cy)
+        const r = dist / P.radius
+        const p = r < 1 ? P.fill * (1 - 0.35 * r * r) : P.outerFill * Math.exp(-(dist - P.radius) / 12)
+        if (!rng.chance(p)) continue
+        if (rng.chance(P.parkChance) && r < 1) {
+          for (let j = ly; j < ly + ld; j++) for (let i = lx; i < lx + lw; i++) cellType[idx(i, j)] = CELL_PARK
+          city.parks.push({ x: lx, y: ly, w: lw, d: ld })
+          continue
         }
+        const zone = r < 0.3 ? 'core' : r < 0.7 ? 'mid' : 'outer'
+        let type = rng.weighted(P.zones[zone])
+        const lotMin = Math.min(lw, ld)
+        if (lotMin < minLot[type]) type = lotMin >= 2 && type === 'tower' ? 'office' : 'house'
+        const [fmin, fmax] = P.floors[type]
+        let floors = rng.int(fmin, fmax)
+        if (type === 'tower' || type === 'office') floors = Math.max(fmin, Math.round(floors * (1.15 - 0.5 * r)))
+        addBuilding(city, rng, { type, x: lx, y: ly, w: lw, d: ld, floors, construction: rng.weighted(P.mix[type]) })
       }
     }
   }
@@ -329,7 +379,7 @@ export function generateCity(typeKey, seed) {
       let best = null
       let bestScore = -Infinity
       for (const b of city.buildings) {
-        if (BUILDING_TYPES[b.type].facility || Math.min(b.w, b.d) < minSize) continue
+        if (BUILDING_TYPES[b.type].facility || BUILDING_TYPES[b.type].landmark || b.variant || Math.min(b.w, b.d) < minSize) continue
         const dc = Math.hypot(b.x - cx, b.y - cy) / P.radius
         if (dc > 0.9) continue
         let score = rng.next() * 0.3 - dc * 0.2
@@ -361,7 +411,6 @@ export function generateCity(typeKey, seed) {
   }
   convert(P.hospitals, 'hospital', 3, true)
   convert(P.fireStations, 'fire', 2, true)
-  convert(P.schools, 'school', 2, true)
 
   // ------------------------------------------------------------ trees
   for (let j = 1; j < N - 1; j++) {
@@ -370,7 +419,8 @@ export function generateCity(typeKey, seed) {
       const t = cellType[k]
       if (buildingAt[k] >= 0) continue
       let p = 0
-      if (t === CELL_PARK) p = 0.9
+      // parks are wooded around their paths; plazas get a few planters, playing fields none
+      if (t === CELL_PARK) p = [0.75, 0.06, 0, 0.05, 0.3][city.ground[k]]
       else if (t === CELL_GRASS) {
         const dist = Math.hypot(i - cx, j - cy)
         p = dist < P.radius ? P.treeDensity : P.treeDensity * 1.6 * (0.5 + 0.5 * nz.fbm(i * 0.08, j * 0.08, 2))
