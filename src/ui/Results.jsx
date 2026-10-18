@@ -52,6 +52,8 @@ export default function Results({ s, game }) {
           {d === 'quake' ? <Big label="Still trapped" value={fmtInt(r.trapped)} tone={r.trapped ? 'text-orange-300' : undefined} /> : <Big label="Boat rescues" value={fmtInt(r.rescued)} />}
         </div>
 
+        {r.prep && <PrepComparison r={r} p={r.prep} />}
+
         <div className="mt-5 grid gap-4 sm:grid-cols-2">
           <div>
             <h3 className="mb-2 text-xs font-semibold tracking-wider text-slate-400 uppercase">Causes of death</h3>
@@ -101,6 +103,97 @@ export default function Results({ s, game }) {
           </a>
         </p>
       </div>
+    </div>
+  )
+}
+
+const approx = (n) => (n < 0.5 ? '<1' : `~${fmtInt(Math.round(n))}`)
+
+/** Without vs with: one bar for the estimate without preparations, one for what happened. */
+function Versus({ label, without, actual, fmt }) {
+  const max = Math.max(without, actual, 1e-9)
+  return (
+    <div className="rounded-lg bg-slate-800/60 p-3">
+      <div className="text-[11px] tracking-wide text-slate-400 uppercase">{label}</div>
+      <div className="mt-1.5 space-y-1 text-[12px]">
+        <div>
+          <div className="flex justify-between">
+            <span className="text-slate-400">Unprepared</span>
+            <span className="font-mono text-red-300">{fmt(without, true)}</span>
+          </div>
+          <div className="mt-0.5 h-1.5 overflow-hidden rounded bg-slate-900">
+            <div className="h-full bg-red-500/80" style={{ width: `${(without / max) * 100}%` }} />
+          </div>
+        </div>
+        <div>
+          <div className="flex justify-between">
+            <span className="text-slate-400">Prepared (this run)</span>
+            <span className="font-mono text-emerald-300">{fmt(actual, false)}</span>
+          </div>
+          <div className="mt-0.5 h-1.5 overflow-hidden rounded bg-slate-900">
+            <div className="h-full bg-emerald-500/80" style={{ width: `${(actual / max) * 100}%` }} />
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** What the preparations bought, against the same city left as it was generated. */
+function PrepComparison({ r, p }) {
+  if (!p.rows.length)
+    return (
+      <div className="mt-5 rounded-lg border border-slate-700 p-3 text-[13px] text-slate-400">
+        No earthquake preparations were made. Try the city-wide programs or the Quake tools, then use <span className="text-slate-200">Retry with my preparations</span> to compare.
+      </div>
+    )
+  const count = (n, est) => (est ? approx(n) : fmtInt(n))
+  return (
+    <div className="mt-5">
+      <h3 className="mb-2 text-xs font-semibold tracking-wider text-slate-400 uppercase">What your preparations did</h3>
+      <div className="mb-2 flex flex-wrap items-baseline gap-x-4 gap-y-1">
+        {p.saved.lives >= 0.5 ? (
+          <span className="text-lg font-bold text-emerald-300">{approx(p.saved.lives)} lives saved</span>
+        ) : (
+          <span className="text-[13px] text-slate-300">This time the unprepared city came off no worse: chance plays a part in any single quake.</span>
+        )}
+        {p.spent > 0 && p.saved.loss > 0 && (
+          <span className="text-[13px] text-slate-300">
+            Every $1 spent avoided <span className="font-semibold text-white">${p.bcr.toFixed(1)}</span> of damage{' '}
+            <span className="text-slate-500">(real-world average for seismic retrofit: $13, NIBS 2019)</span>
+          </span>
+        )}
+      </div>
+      <div className="grid gap-2 sm:grid-cols-3">
+        <Versus label="Deaths" without={p.without.dead} actual={r.dead} fmt={count} />
+        <Versus label="Buildings destroyed" without={p.without.destroyed} actual={r.destroyed} fmt={count} />
+        <Versus label="Economic loss" without={p.without.loss} actual={r.loss} fmt={(v) => fmtMoney(v)} />
+      </div>
+      <table className="mt-3 w-full text-[12px]">
+        <thead>
+          <tr className="text-left text-[11px] text-slate-500 uppercase">
+            <th className="py-1 font-medium">Measure</th>
+            <th className="py-1 text-right font-medium">Buildings</th>
+            <th className="py-1 text-right font-medium">Spent</th>
+            <th className="py-1 text-right font-medium">Lives saved</th>
+            <th className="py-1 text-right font-medium">Damage avoided</th>
+          </tr>
+        </thead>
+        <tbody>
+          {p.rows.map((m) => (
+            <tr key={m.key} className="border-t border-slate-800 text-slate-300">
+              <td className="py-1">{m.label}</td>
+              <td className="py-1 text-right font-mono">{m.key === 'warning' || m.key === 'gas' ? 'city-wide' : fmtInt(m.count)}</td>
+              <td className="py-1 text-right font-mono">{m.spent > 0 ? fmtMoney(m.spent) : '—'}</td>
+              <td className="py-1 text-right font-mono text-emerald-300">{approx(Math.max(0, m.lives))}</td>
+              <td className="py-1 text-right font-mono">{m.loss > 0.005 ? fmtMoney(m.loss) : '—'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="mt-1.5 text-[11px] leading-snug text-slate-500">
+        "Unprepared" is the same earthquake run on the city as it was generated, alongside this one. That run has no people in the street, so it reuses this run's outdoor deaths. The split between measures is an estimate: building measures are taken away again in the damage model, facades are judged from the street deaths that unanchored facades caused, and early warning and gas valves by their effect in the simulation.
+      </p>
     </div>
   )
 }
