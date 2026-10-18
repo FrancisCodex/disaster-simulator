@@ -38,15 +38,79 @@ const SOIL_NAMES = ['Rock', 'Stiff soil', 'Soft alluvium (liquefiable)']
 export const soilName = (s) => SOIL_NAMES[s]
 
 /**
+ * Fundamental period of a building (s): the approximate period of ASCE 7
+ * (§12.8.2.1), T = Ct·hⁿ, for its structural system. Stiff masonry and
+ * wood-frame houses ring at a tenth of a second or so; a 100 m concrete tower
+ * sways back and forth every ~3 s.
+ */
+export function buildingPeriod(b) {
+  const h = Math.max(3, b.height)
+  switch (b.construction) {
+    case 'steel':
+      return 0.0724 * h ** 0.8
+    case 'isolated':
+      return Math.max(2, 0.0466 * h ** 0.9) // the isolators stretch the period out
+    case 'urm':
+    case 'wood_old':
+    case 'wood':
+      return 0.0488 * h ** 0.75
+    default:
+      return 0.0466 * h ** 0.9 // reinforced-concrete frame
+  }
+}
+
+// the shaking the fragility curves were fitted to: a moderate event at a few tens of km
+const T_REF = 0.45
+
+/**
+ * Predominant (mean) period of the ground motion (s), after Rathje et al.
+ * (1998): bigger and more distant earthquakes shake more slowly, and soft
+ * soils lengthen it further. freq (Hz) overrides it (the scenario slider).
+ */
+export function groundPeriod(M, rjb, soil, freq = null) {
+  if (freq) return 1 / freq
+  const Mm = Math.min(M, 7.25)
+  let T = 0.411 + 0.0837 * (Mm - 6) + 0.00208 * rjb + 0.12 * Math.max(0, M - 7.25)
+  T *= [0.85, 1.15, 1.6][soil] ?? 1
+  return clamp(T, 0.08, 3)
+}
+
+/**
+ * Spectral acceleration of a 5 %-damped building of period T, relative to
+ * peak ground acceleration, in shaking of predominant period Tm: buildings
+ * whose own period lies near the ground's resonate (up to ~2.5× PGA); much
+ * stiffer ones just ride the ground, much softer ones are left behind by it.
+ */
+export function spectralShape(T, Tm) {
+  const x = Math.log(T / Tm)
+  const peak = 2.5 * Math.exp(-(x * x) / (2 * 0.55 * 0.55))
+  const floor = T < Tm ? 1 : Math.pow(Tm / T, 0.9)
+  return Math.max(floor, peak)
+}
+
+/**
+ * How much harder (or easier) this shaking is on building b than the shaking
+ * its fragility curves were calibrated with: short, stiff buildings suffer in
+ * fast, jerky shaking; tall ones in slow, rolling shaking.
+ */
+export function resonance(b, Tm) {
+  const T = buildingPeriod(b)
+  return clamp(Math.pow(spectralShape(T, Tm) / spectralShape(T, T_REF), 0.8), 0.5, 1.5)
+}
+
+/**
  * Effective damaging intensity (PGA-equivalent, g) at a building, from the
  * median rock PGA there. This is a structural demand index, not the measured
  * PGA: soft soils amplify the longer-period motion that damages buildings even
- * where they de-amplify peak acceleration, and long shaking does more damage.
+ * where they de-amplify peak acceleration, long shaking does more damage, and
+ * buildings in resonance with the ground take more of it (Tm: the ground's
+ * predominant period; without it, a crude long-period term for tall ones).
  */
-export function demand(b, soil, M, rock) {
+export function demand(b, soil, M, rock, Tm = null) {
   let p = rock * soilAmp(soil, rock) * durationFactor(M)
   if (M > 9.3) p *= 1 + (M - 9.3) * 0.8 // ground failure, metres of permanent offset
-  if (b.floors >= 10) p *= 1 + 0.15 * Math.max(0, M - 7) * Math.min(1.2, 0.5 + (b.floors - 10) / 20) // long-period resonance
+  if (Tm) p *= resonance(b, Tm)
+  else if (b.floors >= 10) p *= 1 + 0.15 * Math.max(0, M - 7) * Math.min(1.2, 0.5 + (b.floors - 10) / 20) // long-period resonance
   if (soil === 2 && M >= 6 && p > 0.2) p *= 1.15 // liquefaction settlement
   return p
 }
@@ -170,7 +234,8 @@ export class QuakeSim {
         outside: 0,
       })
     }
-    this.ground = new GroundFailure(city, rng)
+    // saturated sand everywhere (the scenario's ground setting) liquefies far from the river too
+    this.ground = new GroundFailure(city, rng, { wet: level.soil === 'sand' })
     this.bridges = []
     this.moved = new Set() // buildings whose settlement or tilt changed (for the renderer)
     this.lateCollapses = 0 // stood through the main shock, fell later
@@ -401,12 +466,16 @@ export class QuakeSim {
     vis.field = field
     vis.bridges = this.bridgeShock(shock, field)
     const buried = this.slideTargets(g.slides)
+    // how fast the ground shakes, on each kind of soil
+    const rjb0 = siteDistances(shock.geo, 0, 0).rjb
+    const tm = [0, 1, 2].map((s) => groundPeriod(shock.M, rjb0, s, this.level.freq))
+    vis.tm = tm[Math.round(city.soil.reduce((a, s) => a + s, 0) / city.soil.length)]
     for (const b of city.buildings) {
       if (b.removed) continue
       const s = this.st.get(b.id)
       if (!s || s.collapsed) continue
       const soil = city.soil[cellOfBuilding(b)]
-      const p = demand(b, soil, shock.M, rockPgaAt(shock, b.cx, b.cz) * eventTerm) * Math.exp(rng.normal() * within)
+      const p = demand(b, soil, shock.M, rockPgaAt(shock, b.cx, b.cz) * eventTerm, tm[soil]) * Math.exp(rng.normal() * within)
       pgaSum += p / (b.floors >= 10 ? 1.3 : 1)
       n++
       const sh = shapeOf(b)
@@ -482,17 +551,20 @@ export class QuakeSim {
   groundEffect(b, s, sh) {
     const f = this.ground.footprint(b)
     if (f.mean < 0.003 && f.spread < 0.01 && !f.slid) return 0
-    // heavier buildings punch further into liquefied sand
-    const bearing = clamp(0.6 + 0.07 * b.floors, 0.6, 2.5)
+    // heavier buildings punch further into liquefied sand, unless they stand on piles
+    // driven down to firm ground (high-rises): those barely settle or tilt, though
+    // the ground around them sinks (Kobe 1995, Christchurch 2011)
+    const piled = b.floors >= 10 || b.construction === 'isolated'
+    const bearing = clamp(0.6 + 0.07 * b.floors, 0.6, 2.5) * (piled ? 0.15 : 1)
     const dSettle = f.mean * bearing
     // uneven settlement tilts the building; once it leans, its weight acting
     // through the offset centre of mass pushes it over further
     const diff = f.diff + dSettle * (0.05 + 0.2 * this.rng.next())
-    let dLean = (diff / sh.B) * (0.3 + 0.5 * sh.slender) * (1 + 4 * s.lean * sh.slender)
+    let dLean = (diff / sh.B) * (0.3 + 0.5 * sh.slender) * (1 + 4 * s.lean * sh.slender) * (piled ? 0.15 : 1)
     if (f.spread > 0) {
       // spreading ground moves toward the river, and the building leans with it
       if (s.lean < 0.002) s.leanAng = (this.city.riverCenter[b.y] > b.x + b.w / 2 ? 0 : Math.PI) + (this.rng.next() - 0.5) * 0.6
-      dLean += f.spread * 0.01 * sh.slender
+      dLean += f.spread * 0.01 * sh.slender * (piled ? 0.3 : 1)
     }
     s.settle += dSettle
     s.lean = Math.min(1.3, s.lean + dLean)

@@ -15,7 +15,8 @@ float hash12(vec2 p) {
 // write instead of re-composing the matrix of every part on the CPU:
 //   texel 0–2  rows of the frame matrix (building metres → world)
 //   texel 3    (sway x, sway z at the top, rest height H, cut: top clip in rest metres)
-//   texel 4    (sink: storeys crushed at the base, flags: 1 lights allowed | 2 rubble, 0, 0)
+//   texel 4    (sink: storeys crushed at the base, flags: 1 lights allowed | 2 rubble |
+//              4 rough: broken-concrete facades but details kept, sway x, z at mid-height)
 //   texel 5    facade tint (rgb, amount)
 //   texel 6    detail tint (rgb, amount)
 export const BLD_TEXELS = 7
@@ -42,19 +43,23 @@ vec4 bF = bldTexel(4);
 bool grounded = mod(iColor.a, 2.0) > 0.5;
 vec3 lp = partRotY(position * iSize.xyz) + iPos.xyz;
 float yRest = lp.y;
-float swayK = 0.0;
+vec2 swayD = vec2(0.0);
 if (!grounded) {
   // storeys crushed at the base drop everything above them; a sheared-off top is cut away
   lp.y = max(min(lp.y, bS.w) - bF.x, 0.0);
+  // the frame's deflected shape, through its displacement at mid-height (bF.zw) and at the top
+  // (bS.xy): a bowed first mode, or an S-shape when the second mode is ringing
   float sy = clamp(yRest / max(bS.z, 1.0), 0.0, 1.0);
-  swayK = sy * sy * (3.0 - 2.0 * sy);
+  float lo = clamp(sy * 2.0, 0.0, 1.0);
+  float hi = clamp(sy * 2.0 - 1.0, 0.0, 1.0);
+  swayD = bF.zw * (lo * lo * (3.0 - 2.0 * lo)) + (bS.xy - bF.zw) * hi;
   #ifdef PART_DETAIL
     if (mod(floor(bF.y / 2.0 + 0.01), 2.0) > 0.5) lp *= 0.0; // reduced to rubble: details are gone
   #endif
 }
 vec3 transformed = vec3(dot(bR0, vec4(lp, 1.0)), dot(bR1, vec4(lp, 1.0)), dot(bR2, vec4(lp, 1.0)));
-// first-mode bending: the base is fixed, the top moves the most
-transformed.xz += bS.xy * swayK;`
+// the base is fixed to the ground; the storeys above sway
+transformed.xz += swayD;`
 
 const PART_NORMAL = /* glsl */ `
 vec3 objectNormal;
@@ -152,7 +157,7 @@ export function makeBodyMaterial({ uNight, uBld, envMap }) {
           vec3 N = vec3(sign(vONormal.x) * step(0.5, abs(vONormal.x)), sign(vONormal.y) * step(0.5, abs(vONormal.y)), sign(vONormal.z) * step(0.5, abs(vONormal.z)));
           float style = floor(vInfo.y + 0.5);
           bool shop = mod(vInfo.w, 2.0) > 0.5;
-          bool rubble = mod(floor(vBFlags / 2.0 + 0.01), 2.0) > 0.5;
+          bool rubble = mod(floor(vBFlags / 2.0 + 0.01), 4.0) > 0.5;
           vec3 wallC = diffuseColor.rgb;
           if (rubble) {
             // broken slabs and masonry: blotchy, no windows left

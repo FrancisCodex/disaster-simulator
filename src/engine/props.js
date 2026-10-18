@@ -146,6 +146,8 @@ export function buildProps(city, groundAt) {
   }
 
   const group = new THREE.Group()
+  // each instanced mesh with the parts it draws, so they can be knocked over later
+  group.userData.parts = []
   const mat = new THREE.MeshStandardMaterial({ roughness: 0.75 })
   for (const g in items) {
     const list = items[g]
@@ -161,6 +163,7 @@ export function buildProps(city, groundAt) {
     mesh.castShadow = true
     mesh.receiveShadow = true
     group.add(mesh)
+    group.userData.parts.push({ mesh, list })
   }
   return group
 }

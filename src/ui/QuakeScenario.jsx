@@ -2,6 +2,58 @@ import { useState } from 'react'
 import { QUAKE_LEVELS, HISTORICAL_QUAKES } from '../engine/config.js'
 import { MECHANISMS, RUPTURE_DIRS, describeEvent, mmiLabel } from '../engine/quakePhysics.js'
 import { quakeEventFrom, CUSTOM_QUAKE } from '../engine/game.js'
+import { groundPeriod } from '../engine/quakeSim.js'
+
+const GROUNDS = [
+  ['map', 'As generated', 'Each part of the district keeps its own ground: rock on the hills, soft sand by the river.'],
+  ['rock', 'Hard rock', 'Rock carries the quake straight up into the frames as fast, jerky shaking: hardest on short, stiff buildings. Nothing liquefies.'],
+  ['stiff', 'Stiff soil', 'Dense gravel and clay: moderate amplification, no liquefaction.'],
+  ['sand', 'Wet sand', 'Loose, saturated sand everywhere: it slows the shaking into a long roll (hard on tall buildings) and liquefies, so buildings sink and tilt, often intact.'],
+]
+// ASCE 7 approximate period of a concrete frame, T = 0.0466·h^0.9, solved for the number of storeys
+const storeysFor = (T) => Math.max(1, Math.round((T / 0.0466) ** (1 / 0.9) / 3.2))
+const hz = (f) => (f < 1 ? f.toFixed(2) : f.toFixed(1))
+
+/** Ground type for the whole district, and the shaking's frequency (what resonates with what). */
+function GroundAndFrequency({ quake, set, ev, rjb }) {
+  const soil = quake.soil ?? 'map'
+  const auto = quake.freq == null
+  const soilIdx = { rock: 0, stiff: 1, sand: 2 }[soil] ?? 1
+  const Tauto = groundPeriod(ev.M, rjb, soilIdx)
+  const T = auto ? Tauto : 1 / quake.freq
+  // log-scale slider: 0.2–10 Hz
+  const toS = (f) => Math.round(Math.log(f / 0.2) / Math.log(50) * 100)
+  const fromS = (s) => +(0.2 * 50 ** (s / 100)).toFixed(2)
+  return (
+    <div className="mt-2 rounded-lg border border-slate-700 bg-slate-800/40 p-3 text-xs">
+      <div className="text-slate-400">Ground under the city</div>
+      <div className="mt-1 grid grid-cols-2 gap-1">
+        {GROUNDS.map(([k, l, d]) => (
+          <button key={k} onClick={() => set({ soil: k })} title={d} className={`rounded-md border px-2 py-1 text-left text-[11px] ${soil === k ? 'border-amber-400 bg-amber-500/15 text-white' : 'border-slate-700 text-slate-300 hover:border-slate-500'}`}>
+            {l}
+          </button>
+        ))}
+      </div>
+      <p className="mt-1 text-[11px] text-slate-500">{GROUNDS.find((g) => g[0] === soil)[2]}</p>
+      <div className="mt-2 flex items-center justify-between">
+        <span className="text-slate-400">Shaking frequency</span>
+        <Toggle label="Auto" on={auto} onChange={(v) => set({ freq: v ? null : +(1 / Tauto).toFixed(2) })} hint="Auto: set by the earthquake's size and distance and by the ground (Rathje et al. 1998)" />
+      </div>
+      <input type="range" min={0} max={100} value={toS(1 / T)} disabled={auto} onChange={(e) => set({ freq: fromS(+e.target.value) })} className={`w-full accent-amber-400 ${auto ? 'opacity-40' : ''}`} />
+      <div className="flex justify-between text-[11px]">
+        <span className="text-slate-500">slow, rolling</span>
+        <span className="font-mono text-amber-300">
+          {hz(1 / T)} Hz · {T.toFixed(2)} s
+        </span>
+        <span className="text-slate-500">fast, jerky</span>
+      </div>
+      <p className="mt-1 text-[11px] text-slate-400">
+        Resonates with buildings of about <span className="text-slate-100">{storeysFor(T)}</span> storeys{' '}
+        {T < 0.25 ? '— short, stiff houses and low blocks snap; towers barely notice.' : T > 1.2 ? '— towers swing hard; low buildings ride it out.' : '— mid-rise blocks take the worst of it.'}
+      </p>
+    </div>
+  )
+}
 
 const BEARINGS = [
   [null, 'Random'],
@@ -165,6 +217,7 @@ export function QuakePicker({ quake, setQuake, level, setLevel }) {
         <Toggle label="Natural scatter" on={quake.variability !== false} onChange={(v) => set({ variability: v })} hint="Off: every shock produces exactly the median ground motion — useful for checking the maths" />
       </div>
 
+      <GroundAndFrequency quake={quake} set={set} ev={ev} rjb={describeEvent(ev).rjb} />
       <QuakePhysics ev={ev} observed={hist?.observed} />
     </div>
   )

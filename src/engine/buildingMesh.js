@@ -60,6 +60,9 @@ function instanced(base, n) {
   return g
 }
 
+// texture rows (and facade instances) kept for broken pieces
+export const FRAG_ROWS = 4096
+
 const _inv = new THREE.Matrix4()
 const _ray = new THREE.Ray()
 const _p = new THREE.Vector3()
@@ -83,9 +86,11 @@ export class BuildingParts {
     const n = Math.max(1, list.length)
     this.list = list
     this.shapes = list.map((b) => shapeOf(b, this.cell))
-    const data = new Float32Array(BLD_TEXELS * 4 * n)
+    // rows after the buildings belong to wreckage: one per broken piece
+    this.fragRow0 = n
+    const data = new Float32Array(BLD_TEXELS * 4 * (n + FRAG_ROWS))
     this.data = data
-    const tex = new THREE.DataTexture(data, BLD_TEXELS, n, THREE.RGBAFormat, THREE.FloatType)
+    const tex = new THREE.DataTexture(data, BLD_TEXELS, n + FRAG_ROWS, THREE.RGBAFormat, THREE.FloatType)
     tex.minFilter = tex.magFilter = THREE.NearestFilter
     tex.generateMipmaps = false
     tex.needsUpdate = true
@@ -145,7 +150,120 @@ export class BuildingParts {
       this.add(geo, this.detailMat, depth)
     }
     this.materials = [bodyMat, this.detailMat]
+    this.buildFragments(depth)
     return this
+  }
+
+  // ------------------------------------------------------------ wreckage
+  // Broken pieces are drawn by the same materials: each piece has its own
+  // texture row (its rigid-body frame) and one facade or detail instance, plus
+  // the small details riding on it.
+  buildFragments(detailDepth) {
+    this.fragFree = []
+    for (let r = this.fragRow0 + FRAG_ROWS - 1; r >= this.fragRow0; r--) this.fragFree.push(r)
+    this.fragInst = new Map() // row → [[pool, slot], ...]
+    this.fragPools = {}
+    const pool = (key, base, cap, mat, depth, body) => {
+      const geo = instanced(base, 0)
+      const attrs = {}
+      for (const [name, w] of [['iPos', 4], ['iSize', 4], ['iColor', 4], ...(body ? [['iInfo', 4]] : [])]) {
+        attrs[name] = new THREE.InstancedBufferAttribute(new Float32Array(cap * w), w).setUsage(THREE.DynamicDrawUsage)
+        geo.setAttribute(name, attrs[name])
+      }
+      const free = []
+      for (let s = cap - 1; s >= 0; s--) free.push(s)
+      this.fragPools[key] = { geo, attrs, free, cap, used: 0, dirty: false }
+      this.add(geo, mat, depth)
+    }
+    pool('body', this.bodyBase, FRAG_ROWS, this.bodyMat, this.group.children[0].customDepthMaterial, true)
+    // rubble heaps strew many small blocks, bars and lumps
+    const caps = { box: FRAG_ROWS * 4, cyl: 3072, pyr: 2048, dome: 1024 }
+    for (const g in this.geos) pool(g, this.geos[g], caps[g] ?? 768, this.detailMat, detailDepth, false)
+  }
+
+  /** A free wreckage row, or -1. */
+  fragAlloc() {
+    if (!this.fragFree?.length) return -1
+    const row = this.fragFree.pop()
+    this.fragInst.set(row, [])
+    return row
+  }
+
+  fragAvailable() {
+    return this.fragFree?.length ?? 0
+  }
+
+  /** Releases a wreckage row and everything drawn with it. */
+  fragRelease(row) {
+    const list = this.fragInst.get(row)
+    if (!list) return
+    for (const [P, s] of list) {
+      P.attrs.iSize.array.fill(0, s * 4, s * 4 + 4)
+      P.free.push(s)
+      P.dirty = true
+    }
+    this.fragInst.delete(row)
+    this.fragFree.push(row)
+    this.data.fill(0, row * BLD_TEXELS * 4, (row + 1) * BLD_TEXELS * 4)
+    this.dirty = true
+  }
+
+  /** Draw a part (facade mass or detail, in the row's frame) with wreckage row `row`. */
+  fragPart(row, key, p) {
+    const P = this.fragPools[key]
+    const list = this.fragInst.get(row)
+    if (!P || !list || !P.free.length) return false
+    const s = P.free.pop()
+    const a = P.attrs
+    a.iPos.array.set([p.x, p.y, p.z, p.ry], s * 4)
+    a.iSize.array.set([p.w, p.h, p.d, row], s * 4)
+    a.iColor.array.set([...p.color, 0], s * 4)
+    if (key === 'body') a.iInfo.array.set([p.fh, p.style, p.seed, p.flags], s * 4)
+    list.push([P, s])
+    P.used = Math.max(P.used, s + 1)
+    P.dirty = true
+    return true
+  }
+
+  /** Live frame of a wreckage row (column-major 4×4 elements), with its flags and tints. */
+  fragSet(row, e, flags) {
+    const o = row * BLD_TEXELS * 4
+    const d = this.data
+    d[o] = e[0]
+    d[o + 1] = e[4]
+    d[o + 2] = e[8]
+    d[o + 3] = e[12]
+    d[o + 4] = e[1]
+    d[o + 5] = e[5]
+    d[o + 6] = e[9]
+    d[o + 7] = e[13]
+    d[o + 8] = e[2]
+    d[o + 9] = e[6]
+    d[o + 10] = e[10]
+    d[o + 11] = e[14]
+    if (flags !== undefined) {
+      d[o + 12] = 0
+      d[o + 13] = 0
+      d[o + 14] = 1
+      d[o + 15] = 1e4
+      d[o + 16] = 0
+      d[o + 17] = flags
+      d[o + 18] = 0
+      d[o + 19] = 0
+    }
+    this.dirty = true
+  }
+
+  fragTint(row, body, detail) {
+    const o = row * BLD_TEXELS * 4 + 20
+    this.data.set(body, o)
+    this.data.set(detail, o + 4)
+  }
+
+  /** The facade and detail tints of building row `row`. */
+  tintOf(row) {
+    const o = row * BLD_TEXELS * 4 + 20
+    return [Array.from(this.data.subarray(o, o + 4)), Array.from(this.data.subarray(o + 4, o + 8))]
   }
 
   add(geo, mat, depth) {
@@ -158,8 +276,8 @@ export class BuildingParts {
     this.group.add(m)
   }
 
-  /** Live state of building `row`. frame: Matrix4 (building metres → world). */
-  set(row, frame, swayX, swayZ, H, cut, sink, flags) {
+  /** Live state of building `row`. frame: Matrix4 (building metres → world); sway at the top and at mid-height. */
+  set(row, frame, swayX, swayZ, H, cut, sink, flags, midX = swayX * 0.5, midZ = swayZ * 0.5) {
     const o = row * BLD_TEXELS * 4
     const e = frame.elements
     const d = this.data
@@ -182,6 +300,8 @@ export class BuildingParts {
     d[o + 15] = cut
     d[o + 16] = sink
     d[o + 17] = flags
+    d[o + 18] = midX
+    d[o + 19] = midZ
     this.frames.set(e, row * 16)
     this.dirty = true
   }
@@ -195,6 +315,15 @@ export class BuildingParts {
   }
 
   flush() {
+    for (const k in this.fragPools || {}) {
+      const P = this.fragPools[k]
+      if (!P.dirty) continue
+      P.dirty = false
+      // trim the drawn range to the highest slot in use
+      while (P.used > 0 && P.attrs.iSize.array[(P.used - 1) * 4] === 0) P.used--
+      P.geo.instanceCount = P.used
+      for (const a of Object.values(P.attrs)) a.needsUpdate = true
+    }
     if (!this.dirty || !this.tex) return
     this.dirty = false
     this.tex.needsUpdate = true

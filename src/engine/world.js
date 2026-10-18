@@ -14,6 +14,9 @@ import { CityLife } from './cityLife.js'
 import { buildRoadMeshes } from './roads.js'
 import { Subsurface } from './subsurface.js'
 import { loadModels } from './quaternius.js'
+import { Wreckage } from './wreckage.js'
+import { buildingPeriod } from './quakeSim.js'
+import { M_SHOP } from './archetypes.js'
 
 const HALF = (GRID * CELL) / 2
 const PX = 16 // terrain texture pixels per cell
@@ -122,6 +125,16 @@ export class World {
     this.debris.onLand = (it, v, bid) => this.debrisLanded(it, v, bid)
     this.debris.onShatter = (it) => this.shatter(it)
     this.rain = new Rain(scene)
+    // collapsing buildings break into rigid pieces once the physics engine has loaded
+    // (until then, or if it fails to load, collapses stay scripted)
+    this.wreck = new Wreckage(this)
+    this.wreck.onHitBuilding = (bid, e) => this.pieceHit(bid, e)
+    this.wreck.onHitGround = (x, y, z, r, e) => this.pieceLanded(x, y, z, r, e)
+    this.wreck.onSettle = (x, y, z, size) => this.pieceSettled(x, z, size)
+    this.wreck.onRetire = (bid) => this.wreckRetired(bid)
+    this.wreck.onBreak = (x, y, z) => this.dustBurst(x, y, z, 14, 8)
+    this.wreck.onShatter = (x, y, z, size) => this.crumble(x, y, z, size)
+    this.wreck.start()
     this.life = new CityLife(scene, this)
     this.lifeCtx = {}
     this.impactAcc = new Map()
@@ -262,6 +275,10 @@ export class World {
     if (!b || Math.abs(x - b.cx) > b.fw / 2 + 0.3 || Math.abs(z - b.cz) > b.fd / 2 + 0.3) return { y: ground, bid: -1 }
     const a = this.anim.get(bid)
     if (a?.topple) return { y: ground, bid: -1 }
+    if (a?.heap) {
+      const hh = this.wreck.heapAt(b, a.heapH, a.spread, x, z)
+      return hh < 0 ? { y: ground, bid: -1 } : { y: Math.max(ground, b.base + b.elevated - (a.settle || 0) + hh), bid }
+    }
     // the roof of whichever part is under the point: a podium, a tower, or open ground in a courtyard
     const row = this.bIndex?.get(bid)
     const top = row === undefined ? b.height * (a?.hScale ?? 1) : this.bld.roofAt(row, x - b.cx, z - b.cz)
@@ -485,6 +502,7 @@ export class World {
     g.computeBoundingSphere()
     g.computeBoundingBox()
     if (this.outerMesh) this.updateOuterHeights()
+    this.wreck.groundChanged()
     if (this.subsurface.city) {
       this.subsurface.build(this.city)
       this.subsurface.setQuake(this.subsurface.quake)
@@ -1056,6 +1074,10 @@ export class World {
     }
     this.propGroup = buildProps(this.city, (x, z) => this.groundAt(x, z))
     this.root.add(this.propGroup)
+    // every prop part, by cell, so falling wreckage can knock it over
+    const parts = []
+    for (const { mesh, list } of this.propGroup.userData.parts || []) list.forEach((it, q) => parts.push({ mesh, q, it }))
+    this.propIdx = this.indexByCell(parts, (p) => [p.it.x, p.it.z])
   }
 
   buildTrees() {
@@ -1075,24 +1097,32 @@ export class World {
     const trunks = new THREE.InstancedMesh(trunkGeo, new THREE.MeshStandardMaterial({ color: 0x5a4030, roughness: 1 }), Math.max(1, n))
     let ci = 0
     let ki = 0
+    // a tree knocked down by falling wreckage lies where it fell, pivoted about its foot
+    const place = (t, x, y, z, m, dy) => {
+      m.elements[13] += dy
+      if (t.fallen) m.premultiply(_r.makeRotationAxis(_a.set(t.fallen.az, 0, -t.fallen.ax), t.fallen.th))
+      m.elements[12] += x
+      m.elements[13] += y
+      m.elements[14] += z
+      return m
+    }
     trees.forEach((t, q) => {
       const x = cellToWorld(t.i) + t.ox
       const z = cellToWorld(t.j) + t.oz
       const y = this.groundAt(x, z)
+      t.wx = x
+      t.wz = z
       const s = t.s
-      _m.makeScale(s, 3 * s, s).setPosition(x, y, z)
-      trunks.setMatrixAt(q, _m)
+      trunks.setMatrixAt(q, place(t, x, y, z, _m.makeScale(s, 3 * s, s), 0))
       _c.setHSL(0.27 + (t.ox % 0.05), 0.45, 0.22 + (t.s - 0.7) * 0.12)
       // burnt by fire: a charred, half-bare skeleton
       const burnt = t.burnt ? 0.5 : 1
       if (t.burnt) _c.set(0x231f1b)
       if (t.kind === 1) {
-        _m.makeScale(3 * s * burnt, 8 * s * (0.4 + burnt * 0.6), 3 * s * burnt).setPosition(x, y + 2 * s, z)
-        cones.setMatrixAt(ki, _m)
+        cones.setMatrixAt(ki, place(t, x, y, z, _m.makeScale(3 * s * burnt, 8 * s * (0.4 + burnt * 0.6), 3 * s * burnt), 2 * s))
         cones.setColorAt(ki++, t.burnt ? _c : _c.offsetHSL(0.03, 0, -0.04))
       } else {
-        _m.makeScale(3.4 * s * burnt, 3.2 * s * burnt, 3.4 * s * burnt).setPosition(x, y + 5 * s, z)
-        crowns.setMatrixAt(ci, _m)
+        crowns.setMatrixAt(ci, place(t, x, y, z, _m.makeScale(3.4 * s * burnt, 3.2 * s * burnt, 3.4 * s * burnt), 5 * s))
         crowns.setColorAt(ci++, _c)
       }
     })
@@ -1106,6 +1136,8 @@ export class World {
     }
     this.treeGroup = group
     this.root.add(group)
+    this.treeIdx = this.indexByCell(trees, (t) => [t.wx, t.wz])
+    this.treesDirty = false
   }
 
   // ------------------------------------------------------------- buildings
@@ -1133,6 +1165,8 @@ export class World {
     }
     this.updateAllBuildings()
     this.refreshColors()
+    // the wreckage rows were reallocated with the meshes
+    this.wreck.reset()
   }
 
   /** Unit-box matrix for a building's footprint volume, including tilt and topple rotation. */
@@ -1177,6 +1211,10 @@ export class World {
    */
   standing(b, a) {
     const H = b.height
+    // a rubble heap (drawn separately) is all that is left on the footprint
+    if (a?.heap) return { cut: 0.05, sink: 0 }
+    // broken into pieces: only the growing rubble mound is left on the footprint
+    if (a?.broken) return { cut: H * Math.min(a.hScale, 0.6), sink: 0 }
     if (!a || a.hScale >= 0.999) return { cut: 1e4, sink: 0 }
     if (a.rubble) return { cut: H * a.hScale, sink: 0 }
     // a pancake starts from whatever was still standing (all of it, or the stub of a partial collapse)
@@ -1189,10 +1227,10 @@ export class World {
     if (i === undefined) return
     this.composeFrame(b, _m)
     const a = this.anim.get(b.id)
-    const live = a && !a.rubble
+    const live = a && !a.rubble && !a.broken
     const { cut, sink } = this.standing(b, a)
-    const lights = a && (a.rubble || a.burnt || a.ds >= 3 || a.dark || a.partial) ? 0 : 1
-    this.bld.set(i, _m, live ? a.ux * a.vis : 0, live ? a.uz * a.vis : 0, b.height, cut, sink, lights + (a?.rubble ? 2 : 0))
+    const lights = a && (a.rubble || a.broken || a.burnt || a.ds >= 3 || a.dark || a.partial) ? 0 : 1
+    this.bld.set(i, _m, live ? a.ux * a.vis : 0, live ? a.uz * a.vis : 0, b.height, cut, sink, lights + (a?.rubble || a?.broken ? 2 : 0), live ? a.mx * a.vis : 0, live ? a.mz * a.vis : 0)
   }
 
   updateAllBuildings() {
@@ -1335,6 +1373,7 @@ export class World {
     mesh.receiveShadow = true
     this.staticMesh = mesh
     this.root.add(mesh)
+    this.wreck.setStatics(items)
     this.buildRoadClosures()
   }
 
@@ -1499,14 +1538,22 @@ export class World {
 
   // -------------------------------------------------------------- shaking
   /** Queue ground shaking. pga in g, realDur in seconds of real time. */
-  addShake(pga, realDur, M, main = false, field = null) {
+  addShake(pga, realDur, M, main = false, field = null, tm = null) {
     // in cut-away view the shaking starts when the S-waves reach the city
     const lag = this.subsurface.group.visible ? this.subsurface.trigger(M, main) : 0
+    // The shaking is a band of frequencies around the ground's predominant one
+    // (tm: its period, set by the earthquake and the soil, or by the scenario):
+    // fast and jerky for small, close events on rock, slow and rolling for great
+    // or distant ones on soft ground. Buildings whose own period falls in the
+    // band resonate; the rest ride it out.
     const freqs = []
-    const lowF = clamp(1.4 - (M - 5) * 0.25, 0.25, 1.4)
-    for (let k = 0; k < 5; k++) freqs.push({ f: lowF * (1 + k * 0.8 + Math.random() * 0.5), px: Math.random() * 6.28, pz: Math.random() * 6.28, w: 1 })
-    // great earthquakes radiate strong long-period waves that make tall towers resonate
-    if (M >= 7.3) freqs.push({ f: 0.14 + Math.random() * 0.12, px: Math.random() * 6.28, pz: Math.random() * 6.28, w: 1.5 + (M - 7.3) })
+    const f0 = tm ? 1 / tm : clamp(1.4 - (M - 5) * 0.25, 0.25, 1.4) * 1.6
+    for (let k = 0; k < 6; k++) {
+      const x = (k - 2.5) / 2
+      freqs.push({ f: f0 * Math.exp(x * 0.55 + (Math.random() - 0.5) * 0.12), px: Math.random() * 6.28, pz: Math.random() * 6.28, w: Math.exp(-x * x) })
+    }
+    // great earthquakes also radiate strong long-period waves that make tall towers resonate
+    if (M >= 7.3 && f0 > 0.4) freqs.push({ f: 0.14 + Math.random() * 0.12, px: Math.random() * 6.28, pz: Math.random() * 6.28, w: 0.8 + 0.5 * (M - 7.3) })
     this.shakes.push({ t0: this.realTime + lag, dur: realDur, pga, freqs, field })
     return lag
   }
@@ -1546,9 +1593,8 @@ export class World {
   animFor(b) {
     let a = this.anim.get(b.id)
     if (!a) {
-      // fundamental period ≈ 0.1 s per storey; tall towers sway slowly and far
-      const T = clamp(0.1 * b.floors, 0.15, 6)
-      a = { ux: 0, uz: 0, vx: 0, vz: 0, w: (2 * Math.PI) / T, vis: b.floors >= 15 ? 4 : 3, hScale: 1, spread: 1, tiltX: 0, tiltZ: 0, ds: 0, active: false }
+      // tall towers sway slowly and far (the sway is drawn exaggerated, more so for the tall)
+      a = { ux: 0, uz: 0, vx: 0, vz: 0, mx: 0, mz: 0, fr: null, vis: b.floors >= 15 ? 4 : 3, hScale: 1, spread: 1, tiltX: 0, tiltZ: 0, ds: 0, active: false }
       this.anim.set(b.id, a)
     }
     return a
@@ -1565,21 +1611,51 @@ export class World {
       a.active = true
       return
     }
-    // Ductile modern frames sway hard and then come down vertically
-    // (progressive collapse). Whole-building overturning needs a weak base:
-    // liquefied soil (Niigata 1964) or a brittle older frame (Taiwan 2016).
+    // Buildings very rarely fall over like dominoes: a frame that fails comes
+    // down on its own footprint (storeys crushing onto each other, then breaking
+    // up into rubble). Whole-building overturning needs gravity to get a lever:
+    //  • the ground under it failed and it is already leaning (Niigata 1964);
+    //  • it is slender (tall on a narrow base), so a small lean puts its centre
+    //    of mass far out;
+    //  • one side is weaker than the other: an open ground floor of shopfronts
+    //    on the street, walls behind (soft, twisting storey; Tainan 2016,
+    //    Kahramanmaraş 2023). It goes over toward the weak side.
     let kind = 'pancake'
     let wait = 0
+    let ang = Math.random() * Math.PI * 2
+    let theta0 = 0
     if (style === 'quake') {
-      const r = Math.random()
       const modern = ['rc_high', 'steel', 'isolated', 'rc_mod'].includes(b.construction)
-      const soft = this.city.soil[idx(b.x + Math.floor(b.w / 2), b.y + Math.floor(b.d / 2))] === 2
       const brittle = ['urm', 'rc_low', 'wood_old'].includes(b.construction)
-      if (b.floors >= 5 && (soft || (brittle && b.floors >= 6)) && r < (soft ? 0.55 : 0.35)) kind = 'topple'
-      else if (b.floors >= 5 && r < 0.3) kind = 'partial'
+      const soft = this.city.soil[idx(b.x + Math.floor(b.w / 2), b.y + Math.floor(b.d / 2))] === 2
+      const slender = b.height / Math.max(4, Math.min(b.fw, b.fd))
+      // a wide, low block with a weak side still comes straight down: there is no lever
+      const open = brittle && b.floors >= 4 && slender >= 1.5 && this.openFront(b)
+      // the angle it would have to lean before its centre of mass passes the edge of its base
+      const tip = Math.atan(1 / slender)
+      let pTopple = 0
+      if ((opts.tilt ?? 0) > 0.01) {
+        // gravity only gets a grip once the lean is a fair part of the tipping angle
+        pTopple = clamp((opts.tilt / tip - 0.15) * 2.5, 0, 0.8)
+        ang = opts.tiltAng
+        theta0 = opts.tilt
+      } else {
+        // even slender towers mostly come down on themselves: a few per cent, rising with slenderness
+        if (slender > 3.5) pTopple += Math.min(0.15, 0.04 * (slender - 3.5))
+        if (open) pTopple += 0.1
+        if (soft && b.floors >= 5) pTopple += 0.02
+      }
+      if (open && !theta0) {
+        // toward the street front (the building's +z, turned by its facing)
+        const th = ((b.facing ?? 0) * Math.PI) / 2
+        ang = Math.atan2(Math.cos(th), Math.sin(th)) + (Math.random() - 0.5) * 0.5
+      }
+      if (b.floors >= 4 && Math.random() < pTopple) {
+        kind = 'topple'
+        theta0 = Math.max(theta0, 0.015)
+      } else if (b.floors >= 5 && Math.random() < 0.22) kind = 'partial'
       if (modern) wait = 1.5 + Math.random() * 2
     }
-    const ang = Math.random() * Math.PI * 2
     // free-fall-like progressive collapse: ~0.65 g net downward acceleration
     const fall = Math.sqrt((2 * b.height) / (0.65 * 9.81))
     a.collapse = {
@@ -1590,9 +1666,17 @@ export class World {
       spawned: 0,
       style,
       kind,
+      theta0,
       started: false,
     }
     a.active = true
+  }
+
+  /** Does b stand on an open ground floor of shopfronts (a soft, weak side) ? */
+  openFront(b) {
+    const row = this.bIndex.get(b.id)
+    if (row === undefined) return false
+    return this.bld.shapes[row].masses.some((m) => m.flags & M_SHOP && m.y < 0.5 && m.h > b.floorH * 1.5)
   }
 
   setDamage(b, ds) {
@@ -1610,26 +1694,55 @@ export class World {
     a.rubble = true
     a.topple = null
     a.partial = false
-    a.hScale = clamp(clamp(b.height * 0.1, 2.5, 8) / b.height, 0.05, 0.6)
-    a.spread = 1.15
+    // What is left on the footprint is a heap of crushed concrete and broken
+    // blocks. With physics the big pieces lie on and around it; without, the
+    // heap is all there is, and it is taller.
+    const m = a.broken ? (a.collapse?.mound ?? clamp(b.height * 0.03, 0.8, 2)) : clamp(b.height * 0.1, 2.5, 8) * 0.8
+    this.setHeap(b, a, m)
     a.ux = a.uz = a.vx = a.vz = 0
     this.updateBuilding(b)
-    this.debris.wakeAll()
+    // chips resting on its roof fall onto the rubble
+    this.debris.wakeNear(b.cx, b.cz, Math.max(b.fw, b.fd) * 0.6 + 1)
     this.life.blockAround(b)
     this.rubbleDirty = true
+  }
+
+  /**
+   * A rubble heap h metres high on b's footprint: drawn as a mound with broken
+   * blocks, and felt by falling pieces as a low box a little under its mean
+   * height (so nothing lands in mid-air over its sloping edges).
+   */
+  setHeap(b, a, h) {
+    a.heap = true
+    a.heapH = h
+    a.spread = 1.12
+    a.hScale = clamp(h / b.height, 0.01, 0.6)
+    this.wreck.heap(b, h, a.spread)
+    this.wreck.setMound(b, h * 0.45, a.spread * 0.8)
+  }
+
+  /** Sway of a building at its top: displacement and velocity (world metres), for the pieces it breaks into. */
+  swayOf(a) {
+    return { x: a.ux * a.vis, z: a.uz * a.vis, vx: a.vx * a.vis, vz: a.vz * a.vis }
   }
 
   stepCollapse(b, a, t) {
     const c = a.collapse
     if (!c.started) {
       c.started = true
+      // decided once: a collapse that began scripted stays scripted. With too many
+      // pieces already moving (a great quake), further collapses are scripted too.
+      c.phys = this.wreck.room() > 0
+      // either way it no longer stands in the way of falling pieces (a sheared-off top leaves its stub)
+      if (c.kind !== 'partial') this.wreck.removeBuilding(b)
       // a building coming down terrifies everyone who can see and hear it
       this.life.alarm(b.cx, b.cz, Math.max(25, b.height * 0.8), c.style === 'flood' ? 0.45 : 0.7, 0.97)
       if (c.kind === 'topple') {
-        // rigid rotation about the base edge, like a falling column
+        // rigid rotation about the base edge, like a falling column: gravity, acting
+        // through the leaning centre of mass, takes it over slowly at first
         a.topple = {
-          theta: Math.max(0.06, c.theta0 || 0),
-          omega: 0.12,
+          theta: Math.max(0.015, c.theta0 || 0),
+          omega: 0.03,
           ax: c.dirZ,
           az: -c.dirX,
           px: b.cx + (c.dirX * b.fw) / 2,
@@ -1637,18 +1750,28 @@ export class World {
           pz: b.cz + (c.dirZ * b.fd) / 2,
         }
       } else if (c.kind === 'partial') {
-        // upper storeys shear off and fall as one block
-        const f = 0.3 + Math.random() * 0.25
+        // upper storeys shear off (at a floor line) and fall as one block
         const H = b.height
+        const keep = clamp(Math.round((H * (0.45 + Math.random() * 0.25)) / b.floorH) * b.floorH, b.floorH, H - b.floorH)
         a.partial = true
-        a.hScale = 1 - f
+        // the storey where it sheared is crushed: the block drops onto what is left below
+        const stub = Math.max(0.5, keep - b.floorH)
+        a.hScale = stub / H
         const v = 1.5 + Math.random() * 2.5
-        this.debris.spawn(b.cx, b.base + b.elevated + H * (1 - f) + (H * f) / 2 + 0.3, b.cz, c.dirX * v, 0.5, c.dirZ * v, 0, b.color, {
-          dims: [b.fw * 0.98, H * f, b.fd * 0.98],
-          fragile: true,
-          src: b.id,
-        })
-        for (let q = 0; q < 30; q++) this.spawnDust(b, 1, b.base + H * (1 - f))
+        if (c.phys) {
+          // the block keeps the sway it had when it sheared off; it breaks up where it lands
+          this.composeFrame(b, _m)
+          this.wreck.breakBuilding(b, { mode: 'chunks', above: keep, frame: _m, sway: this.swayOf(a), vel: [c.dirX * v, 0.5, c.dirZ * v], compound: true })
+        } else {
+          this.debris.spawn(b.cx, b.base + b.elevated + keep + (H - keep) / 2 + 0.3, b.cz, c.dirX * v, 0.5, c.dirZ * v, 0, b.color, {
+            dims: [b.fw * 0.98, H - keep, b.fd * 0.98],
+            fragile: true,
+            src: b.id,
+          })
+        }
+        // what remains standing is the stub
+        this.wreck.addBuilding(b, stub)
+        for (let q = 0; q < 30; q++) this.spawnDust(b, 1, b.base + stub + Math.random() * b.floorH)
         this.rubbleDirty = true
       }
     }
@@ -1688,6 +1811,9 @@ export class World {
         c.kind = 'pancake'
         c.t0 = t
         c.h0 = a.hScale
+        this.wreck.removeBuilding(b)
+        // the block that sat on it comes down with it and breaks up too
+        if (c.phys) this.wreck.crushWreck(b.id)
       }
       return true
     }
@@ -1695,6 +1821,7 @@ export class World {
     const p = clamp((t - c.t0) / c.dur, 0, 1)
     const e = p * p
     const h0 = c.h0 ?? 1
+    if (c.phys) return this.crushPieces(b, a, c, p, h0)
     const rub = clamp(clamp(b.height * 0.1, 2.5, 8) / b.height, 0.05, 0.6)
     a.hScale = h0 - (h0 - rub) * e
     a.sink = (1 - a.hScale) * b.height
@@ -1714,16 +1841,68 @@ export class World {
     return true
   }
 
+  /**
+   * Progressive collapse with physics: the building breaks into its facade
+   * walls and floor slabs, which fall and pile up; the pulverised remainder
+   * builds a low mound on the footprint as the collapse runs its course.
+   */
+  crushPieces(b, a, c, p, h0) {
+    if (!c.broken) {
+      c.broken = true
+      // the failed soft storey (or two, under a tall block) is crushed to dust
+      const drop = b.floors >= 3 ? b.floorH * (b.floors >= 12 ? 2 : 1) : 0
+      this.composeFrame(b, _m)
+      this.wreck.removeBuilding(b)
+      this.wreck.breakBuilding(b, { mode: 'crush', below: h0 >= 0.999 ? Infinity : b.height * h0 + 0.01, drop, frame: _m, sway: this.swayOf(a) })
+      a.broken = true
+      a.partial = false
+      c.mound = clamp(b.height * 0.04, 1.2, 3.5)
+      for (let q = 0; q < 20; q++) this.spawnDust(b, 1.4, b.base + Math.random() * drop)
+    }
+    // the crushed material piles up on the footprint as the pieces come down
+    const m = c.mound * clamp(p * 1.4, 0, 1)
+    a.hScale = m / b.height
+    a.spread = 1 + 0.1 * p
+    // the floors that came down onto each other do not stay whole: once they have landed,
+    // what is still an intact slab or panel is broken up by the crushing
+    if (p >= 0.75 && !c.crushed) {
+      c.crushed = true
+      this.wreck.crushWreck(b.id)
+    }
+    const target = Math.min(40, Math.round(b.area / 300) + 6)
+    const want = Math.floor(target * Math.min(1, p * 1.3))
+    for (; c.spawned < want; c.spawned++) this.spawnDebris(b, Math.max(0.1, 1 - p))
+    const k = c.style === 'flood' ? 0.3 : 1
+    for (let q = 0; q < (p > 0.02 ? 3 : 0); q++) this.spawnDust(b, k * 1.2, b.base + Math.random() * 3)
+    if (p >= 1) {
+      this.becomeRubble(b, a)
+      for (let q = 0; q < 25; q++) this.spawnDust(b, c.style === 'flood' ? 0.3 : 1.5)
+    }
+    return true
+  }
+
   /** A toppling building hits the ground or a neighbour and breaks apart; pieces keep their momentum. */
   breakTopple(b, a, hitBid = -1) {
     const T = a.topple
     const H = b.height
+    const c = a.collapse
     // rotational kinetic energy of a rigid column: ½·(⅓·m·H²)·ω²
     const mass = b.area * 800
     const ke = 0.5 * ((mass * H * H) / 3) * T.omega * T.omega
+    if (c.phys) {
+      // the column breaks into blocks along its storeys, each moving as it was (v = ω × r);
+      // they hit the ground, the street and the neighbours themselves
+      this.composeFrame(b, _m)
+      this.wreck.breakBuilding(b, { mode: 'chunks', frame: _m, topple: { omega: T.omega, ax: T.ax, az: T.az, px: T.px, py: T.py, pz: T.pz } })
+      a.broken = true
+      if (hitBid >= 0) this.onImpact?.(hitBid, ke * 0.2)
+      for (let q = 0; q < 40; q++) this.spawnDust(b, 1.8)
+      for (let q = 0; q < 20; q++) this.spawnDebris(b, 0.2)
+      this.becomeRubble(b, a)
+      return
+    }
     if (hitBid >= 0) this.onImpact?.(hitBid, ke * 0.6)
     // anyone under the falling building
-    const c = a.collapse
     for (let f = 0.2; f <= 1.0001; f += 0.1) {
       const hit = this.life.hitArea(T.px + c.dirX * Math.sin(T.theta) * H * f, T.pz + c.dirZ * Math.sin(T.theta) * H * f, Math.max(b.fw, b.fd) * 0.5, ke)
       if (hit.killed || hit.crushed) this.onStreetHit?.(hit)
@@ -1748,6 +1927,154 @@ export class World {
     this.becomeRubble(b, a)
   }
 
+  /**
+   * A falling piece struck a standing building at (x, y, z), delivering
+   * impulse (jx, jz) and e joules. Where it strikes matters to the damage
+   * model: columns near the base carry the whole building above them, a
+   * parapet or roof slab up top far less. The building is shoved, too: the
+   * impulse goes into the storey it hit and the frame sways from it.
+   */
+  pieceHit(bid, e, x = 0, y = 0, z = 0, jx = 0, jz = 0) {
+    const b = this.city?.byId.get(bid)
+    if (!b) return
+    const a = this.animFor(b)
+    const rel = clamp((y - b.base - b.elevated) / b.height, 0, 1)
+    e *= rel < 0.3 ? 1.4 : rel > 0.8 ? 0.6 : 1
+    if (!a.rubble && !a.broken && !a.topple) {
+      const fr = this.frameOf(b, a)
+      const k = clamp(Math.ceil(rel * fr.n) - 1, 0, fr.n - 1)
+      // lumped mass of that storey band: gross density ~300 kg/m³
+      const m = (b.fw * b.fd * b.height * 300) / fr.n
+      fr.vx[k] += jx / m
+      fr.vz[k] += jz / m
+      a.active = true
+    }
+    // chips and dust burst off the struck facade
+    if (e > 5e4) {
+      this.dustBurst(x, y, z, Math.min(10, 2 + e / 2e5), 4)
+      const n = Math.min(6, Math.round(e / 1e5))
+      for (let q = 0; q < n; q++) this.debris.spawn(x, y, z, (Math.random() - 0.5) * 4 - jx * 1e-5, Math.random() * 2, (Math.random() - 0.5) * 4 - jz * 1e-5, 0.4 + Math.random() * 0.6, Math.random() < 0.5 ? 0x8a8478 : b.color, { src: bid })
+    }
+    const acc = (this.impactAcc.get(bid) || 0) + e
+    if (acc > 1.5e5) {
+      this.impactAcc.set(bid, 0)
+      this.onImpact?.(bid, acc)
+    } else this.impactAcc.set(bid, acc)
+  }
+
+  /** A falling piece hit the ground, a road or the pile, losing e joules. */
+  pieceLanded(x, y, z, r, e) {
+    this.strikeAt(x, z, r, e)
+    if (e > 1.5e6) this.dustBurst(x, y, z, Math.min(16, 4 + e / 1e6), 6 + r)
+  }
+
+  /** A piece broke up on impact: a puff of concrete dust and a spray of small chips. */
+  crumble(x, y, z, size) {
+    this.dustBurst(x, y, z, Math.min(12, 3 + size * 1.5), size)
+    for (let q = 0; q < Math.min(8, Math.round(size * 1.5)); q++) {
+      const ang = Math.random() * Math.PI * 2
+      const v = 1 + Math.random() * 3
+      this.debris.spawn(x + (Math.random() - 0.5) * size, y, z + (Math.random() - 0.5) * size, Math.cos(ang) * v, Math.random() * 2.5, Math.sin(ang) * v, 0.3 + Math.random() * 0.6, Math.random() < 0.6 ? 0x8a8478 : 0x6a655c)
+    }
+  }
+
+  /**
+   * Something heavy came down on (x, z) with energy e: people and cars under
+   * it, and trees, lamps, benches and the like within reach are knocked over,
+   * away from where it struck.
+   */
+  strikeAt(x, z, r, e) {
+    const hit = this.life.hitArea(x, z, r, e)
+    if (hit.killed || hit.crushed) this.onStreetHit?.(hit)
+    if (e < 2e4) return
+    const reach = r + Math.min(3, e / 5e5)
+    for (const t of this.near(this.treeIdx, x, z, reach + 2)) {
+      if (t.fallen) continue
+      const dx = t.wx - x
+      const dz = t.wz - z
+      const d = Math.hypot(dx, dz)
+      if (d > reach + 1.5 * t.s) continue
+      const ang = d > 0.1 ? Math.atan2(dz, dx) : Math.random() * Math.PI * 2
+      t.fallen = { ax: Math.cos(ang), az: Math.sin(ang), th: 1.25 + Math.random() * 0.3 }
+      this.treesDirty = true
+    }
+    for (const p of this.near(this.propIdx, x, z, reach + 1)) {
+      if (p.it.fallen) continue
+      const dx = p.it.x - x
+      const dz = p.it.z - z
+      if (Math.hypot(dx, dz) > reach + Math.max(p.it.w, p.it.d) * 0.5) continue
+      const ang = Math.hypot(dx, dz) > 0.1 ? Math.atan2(dz, dx) : Math.random() * Math.PI * 2
+      p.it.fallen = { ax: Math.cos(ang), az: Math.sin(ang), th: p.it.h > 1.5 ? 1.3 + Math.random() * 0.25 : 0.3 + Math.random() * 0.5 }
+      p.mesh.setMatrixAt(p.q, this.propMatrix(p.it))
+      p.mesh.instanceMatrix.needsUpdate = true
+    }
+  }
+
+  /** Items bucketed by cell (see indexByCell) within the cells around (x, z). */
+  *near(index, x, z, r) {
+    if (!index) return
+    const i0 = clamp(Math.floor((x - r + HALF) / CELL), 0, GRID - 1)
+    const i1 = clamp(Math.floor((x + r + HALF) / CELL), 0, GRID - 1)
+    const j0 = clamp(Math.floor((z - r + HALF) / CELL), 0, GRID - 1)
+    const j1 = clamp(Math.floor((z + r + HALF) / CELL), 0, GRID - 1)
+    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) yield* index.get(idx(i, j)) || []
+  }
+
+  indexByCell(list, xz) {
+    const m = new Map()
+    for (const o of list) {
+      const [x, z] = xz(o)
+      if (Math.abs(x) >= HALF || Math.abs(z) >= HALF) continue
+      const k = idx(Math.floor((x + HALF) / CELL), Math.floor((z + HALF) / CELL))
+      const a = m.get(k)
+      if (a) a.push(o)
+      else m.set(k, [o])
+    }
+    return m
+  }
+
+  /** Placement of a prop part, knocked over about its foot if it was struck. */
+  propMatrix(it) {
+    _m.makeScale(it.w, it.h, it.d)
+    if (it.ry) _m.premultiply(_r.makeRotationY(it.ry))
+    if (!it.fallen) return _m.setPosition(it.x, it.y, it.z)
+    // rotate about where it stands on the ground
+    const g = this.groundAt(it.x, it.z)
+    _m.setPosition(0, it.y - g, 0)
+    _m.premultiply(_r.makeRotationAxis(_a.set(it.fallen.az, 0, -it.fallen.ax), it.fallen.th))
+    _m.elements[12] += it.x
+    _m.elements[13] += g
+    _m.elements[14] += it.z
+    return _m
+  }
+
+  /** A piece came to rest; a big one lying across a street blocks it. */
+  pieceSettled(x, z, size) {
+    if (size < 2.5 || !this.city || Math.abs(x) >= HALF || Math.abs(z) >= HALF) return
+    const k = idx(Math.floor((x + HALF) / CELL), Math.floor((z + HALF) / CELL))
+    if (this.life.road?.[k]) this.life.block(k)
+  }
+
+  /** The pieces of an old pile were recycled: the building keeps a full rubble mound instead. */
+  wreckRetired(bid) {
+    const b = this.city?.byId.get(bid)
+    const a = b && this.anim.get(bid)
+    if (!a) return
+    const m = clamp(b.height * 0.1, 2.5, 8) * 0.8
+    if (a.collapse) a.collapse.mound = m
+    if (a.rubble) this.setHeap(b, a, m)
+    else a.hScale = clamp(m / b.height, 0.05, 0.6)
+    this.updateBuilding(b)
+  }
+
+  dustBurst(x, y, z, n, size) {
+    for (let q = 0; q < n; q++) {
+      const v = 3 + Math.random() * 5
+      const ang = Math.random() * Math.PI * 2
+      this.dust.emit(x + (Math.random() - 0.5) * size, y, z + (Math.random() - 0.5) * size, Math.cos(ang) * v, 1 + Math.random() * 2, Math.sin(ang) * v, size, size * 0.7, 6 + Math.random() * 5, [0.62, 0.57, 0.5, 0.55], [0.7, 0.66, 0.6, 0])
+    }
+  }
+
   /** Falling debris landed on something. */
   debrisLanded(it, v, bid) {
     const mass = it.sx * it.sy * it.sz * 900
@@ -1759,8 +2086,7 @@ export class World {
         this.onImpact?.(bid, acc)
       } else this.impactAcc.set(bid, acc)
     }
-    const hit = this.life.hitArea(it.x, it.z, Math.max(it.sx, it.sz) * 0.5, E)
-    if (hit.killed || hit.crushed) this.onStreetHit?.(hit)
+    this.strikeAt(it.x, it.z, Math.max(it.sx, it.sz) * 0.5, E)
     if (E > 2e6) for (let q = 0; q < 6; q++) this.dust.emit(it.x + (Math.random() - 0.5) * it.sx, it.y, it.z + (Math.random() - 0.5) * it.sz, (Math.random() - 0.5) * 6, 1.5, (Math.random() - 0.5) * 6, 10, 7, 6, [0.62, 0.57, 0.5, 0.55], [0.7, 0.66, 0.6, 0])
   }
 
@@ -1921,20 +2247,8 @@ export class World {
         if (shaking) a.active = true
         if (!a.active) continue
         let moving = false
-        if (!a.rubble && !a.topple) {
-          for (let s = 0; s < sub; s++) {
-            const w = a.w
-            const axx = -g.ax - 2 * 0.05 * w * a.vx - w * w * a.ux
-            const azz = -g.az - 2 * 0.05 * w * a.vz - w * w * a.uz
-            a.vx += axx * h
-            a.vz += azz * h
-            a.ux += a.vx * h
-            a.uz += a.vz * h
-          }
-          const lim = b.height * 0.012
-          a.ux = clamp(a.ux, -lim, lim)
-          a.uz = clamp(a.uz, -lim, lim)
-          moving = Math.hypot(a.ux, a.uz) > 0.002 || Math.hypot(a.vx, a.vz) > 0.002
+        if (!a.rubble && !a.topple && !a.broken) {
+          moving = this.stepFrame(b, a, g, sub * h)
           if (shaking && g.env > 0.15) this.shedFacade(b, a, g.env, dt)
         }
         if (a.collapse && !a.rubble) {
@@ -1985,10 +2299,94 @@ export class World {
     this.smoke.update(dt, 3)
     this.dust.update(dt, 1)
     this.debris.update(dt)
+    this.wreck.update(dt)
+    if (this.treesDirty && this.realTime - (this.treesT ?? -1) > 0.4) {
+      this.treesT = this.realTime
+      this.buildTrees()
+    }
     // drops stop on roofs and streets; in cut-away view it only rains over the block
     this.rain.update(dt, this.rainIntensity || 0, this.controls.target, (x, z) => this.surfaceAt(x, z).y, this.subsurface.group.visible ? HALF - 2 : 0)
     this.bld.flush()
     this.renderer.render(this.scene, this.camera)
+  }
+
+  /**
+   * A building's frame as a shear building: storey masses on springs (the
+   * columns) and dampers, each band of storeys one lumped mass. The ground
+   * acceleration drives the base. Its first natural period is the building's
+   * (ASCE 7 approximate period), so short stiff buildings snap back and forth
+   * in fast, jerky shaking and tall towers swing in slow, rolling shaking;
+   * higher modes give the S-shaped whip of a tall frame. Damage softens the
+   * columns: a cracked frame sways slower and further.
+   */
+  frameOf(b, a) {
+    if (a.fr) return a.fr
+    const n = clamp(Math.round(b.floors / 4), 1, 5)
+    const w1 = (2 * Math.PI) / buildingPeriod(b)
+    // uniform shear building: ω₁ = 2√(k/m)·sin(π / (2(2n+1)))
+    const kappa = (w1 / (2 * Math.sin(Math.PI / (2 * (2 * n + 1))))) ** 2
+    a.fr = { n, kappa, w1, wMax: 2 * Math.sqrt(kappa), ux: new Float32Array(n), uz: new Float32Array(n), vx: new Float32Array(n), vz: new Float32Array(n), drift: 0 }
+    return a.fr
+  }
+
+  /** Advance b's frame by dt under ground acceleration g; returns whether it is still moving. */
+  stepFrame(b, a, g, dt) {
+    const fr = this.frameOf(b, a)
+    const { n, ux, uz, vx, vz } = fr
+    // cracked columns lose stiffness (period lengthens by ~40 % at heavy damage)
+    const soft = 1 - 0.12 * Math.min(a.ds, 4)
+    const kappa = fr.kappa * soft * soft
+    // stiffness-proportional damping: 5 % in the first mode, more in the higher ones
+    const beta = (2 * 0.05) / (fr.w1 * soft)
+    const sub = Math.max(1, Math.ceil((dt * fr.wMax) / 0.7))
+    const h = dt / sub
+    for (let s = 0; s < sub; s++) {
+      // storey shear per unit mass: f_i = κ(u_i − u_{i−1}) + βκ(v_i − v_{i−1})
+      let fxBelow = 0
+      let fzBelow = 0
+      for (let i = 0; i < n; i++) {
+        const fx = kappa * (ux[i] - (i ? ux[i - 1] : 0) + beta * (vx[i] - (i ? vx[i - 1] : 0)))
+        const fz = kappa * (uz[i] - (i ? uz[i - 1] : 0) + beta * (vz[i] - (i ? vz[i - 1] : 0)))
+        if (i) {
+          vx[i - 1] += (-g.ax - fxBelow + fx) * h
+          vz[i - 1] += (-g.az - fzBelow + fz) * h
+        }
+        fxBelow = fx
+        fzBelow = fz
+      }
+      vx[n - 1] += (-g.ax - fxBelow) * h
+      vz[n - 1] += (-g.az - fzBelow) * h
+      for (let i = 0; i < n; i++) {
+        ux[i] += vx[i] * h
+        uz[i] += vz[i] * h
+      }
+    }
+    // storey drift: what cracks the columns (kept to what a frame can take before it goes)
+    const dh = b.height / n
+    const lim = dh * 0.015
+    let drift = 0
+    let moving = false
+    for (let i = 0; i < n; i++) {
+      const bx = i ? ux[i - 1] : 0
+      const bz = i ? uz[i - 1] : 0
+      ux[i] = bx + clamp(ux[i] - bx, -lim, lim)
+      uz[i] = bz + clamp(uz[i] - bz, -lim, lim)
+      drift = Math.max(drift, Math.hypot(ux[i] - bx, uz[i] - bz) / dh)
+      if (Math.abs(vx[i]) + Math.abs(vz[i]) > 0.003 || Math.abs(ux[i]) + Math.abs(uz[i]) > 0.003) moving = true
+    }
+    fr.drift = drift
+    a.ux = ux[n - 1]
+    a.uz = uz[n - 1]
+    a.vx = vx[n - 1]
+    a.vz = vz[n - 1]
+    // displacement at mid-height, between the lumped masses (the base is fixed)
+    const f = n / 2 - 1
+    const i0 = Math.floor(f)
+    const t = f - i0
+    const at = (u, i) => (i < 0 ? 0 : u[i])
+    a.mx = at(ux, i0) * (1 - t) + at(ux, i0 + 1) * t
+    a.mz = at(uz, i0) * (1 - t) + at(uz, i0 + 1) * t
+    return moving
   }
 
   spawnDebris(b, hFrac) {
@@ -2016,6 +2414,7 @@ export class World {
   dispose() {
     this.ro.disconnect()
     this.life.dispose()
+    this.wreck.dispose()
     this.bld.dispose()
     this.renderer.dispose()
     this.renderer.domElement.remove()
