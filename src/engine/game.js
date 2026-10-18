@@ -23,10 +23,10 @@ import {
 } from './config.js'
 import { generateCity, addBuilding, idx, occupancyAt, cityStats } from './cityGen.js'
 import { Rng, clamp } from './math.js'
-import { World } from './world.js'
+import { World, sheddingFacade } from './world.js'
 import { FloodSim } from './floodSim.js'
 import { FloodImpact } from './floodImpact.js'
-import { QuakeSim, demand, mediansFor, damageProbs, collapseProb, cellOfBuilding, soilName, rockPgaAt, withGeometry, quakeAzimuth, shapeOf, dsFromD, compass, groundPeriod } from './quakeSim.js'
+import { QuakeSim, demand, mediansFor, damageProbs, collapseProb, cellOfBuilding, soilName, rockPgaAt, withGeometry, quakeAzimuth, shapeOf, dsFromD, compass, groundPeriod, buildingPeriod, resonance } from './quakeSim.js'
 import { siteDistances } from './quakePhysics.js'
 
 /**
@@ -67,7 +67,11 @@ export const TOOLS = [
   { key: 'elevate', name: 'Elevate', group: 'Flood', icon: '⬆️', desc: 'Raise a low-rise building 2 m on a new foundation.' },
   { key: 'retrofit', name: 'Retrofit', group: 'Quake', icon: '🔩', desc: 'Strengthen the structure one code level (e.g. masonry → reinforced concrete).' },
   { key: 'isolate', name: 'Base isolation', group: 'Quake', icon: '🛞', desc: 'Put the building on seismic isolators. Very effective, very expensive.' },
+  { key: 'softstorey', name: 'Brace soft storey', group: 'Quake', icon: '🏗️', desc: 'Add steel frames or shear walls to an open shopfront ground floor (the LA / San Francisco soft-storey retrofit). Cheap: only the ground floor is worked on.' },
+  { key: 'anchor', name: 'Anchor facade', group: 'Quake', icon: '🧷', desc: 'Tie back brick facades and parapets, film the glass. Stops most of the falling masonry and glass that kills people in the street (Christchurch 2011).' },
 ]
+
+const BUILDING_TOOLS = ['retrofit', 'isolate', 'elevate', 'softstorey', 'anchor']
 
 const NEW_BUILD = {
   house: { floors: 2, construction: 'wood_mod' },
@@ -364,6 +368,10 @@ export class Game {
         return b ? (b.area * COSTS.retrofitM2) / 1e6 : 0
       case 'isolate':
         return b ? (b.area * COSTS.isolateM2) / 1e6 : 0
+      case 'softstorey':
+        return b ? (b.fw * b.fd * COSTS.softStoreyM2) / 1e6 : 0
+      case 'anchor':
+        return b ? (2 * (b.fw + b.fd) * b.height * COSTS.anchorM2) / 1e6 : 0
       case 'elevate':
         return b ? (b.fw * b.fd * COSTS.elevateM2) / 1e6 : 0
       case 'levee':
@@ -398,6 +406,17 @@ export class Game {
       if (b.floors > 40) return 'Too tall for isolation retrofit'
       return null
     }
+    if (tool === 'softstorey') {
+      if (b.softFixed) return 'Ground floor already braced'
+      if (!this.world.openFront(b)) return 'No open shopfront ground floor to brace'
+      if (!this.world.softStorey(b)) return 'Built to a modern code: the ground floor is already designed for it'
+      return null
+    }
+    if (tool === 'anchor') {
+      if (b.facadeAnchored) return 'Facade already anchored'
+      if (!sheddingFacade(b)) return 'Low-rise without masonry parapets: little to fall off'
+      return null
+    }
     if (tool === 'elevate') {
       if (b.elevated) return 'Already elevated'
       if (b.floors > 3) return 'Only low-rise buildings (≤3 floors) can be raised'
@@ -420,7 +439,7 @@ export class Game {
     let hl = null
     let cost = 0
     let reason = null
-    if (['inspect', 'demolish', 'retrofit', 'isolate', 'elevate'].includes(tool)) {
+    if (tool === 'inspect' || tool === 'demolish' || BUILDING_TOOLS.includes(tool)) {
       if (b) {
         reason = tool === 'inspect' || tool === 'demolish' ? null : this.checkTool(tool, b)
         cost = this.toolCost(tool, b)
@@ -460,14 +479,19 @@ export class Game {
     if (this.phase !== 'prepare') return
     const tool = this.tool
     if (tool === 'demolish') return this.demolish(b, p)
-    if (['retrofit', 'isolate', 'elevate'].includes(tool)) {
+    if (BUILDING_TOOLS.includes(tool)) {
       if (!b) return
       const why = this.checkTool(tool, b)
       if (why) return this.notify(why, 'bad')
       const cost = this.toolCost(tool, b)
       if (!this.pay(cost, tool)) return
-      if (tool === 'retrofit') b.construction = CONSTRUCTION[b.construction].next
+      if (tool === 'retrofit') {
+        b.construction = CONSTRUCTION[b.construction].next
+        b.softFixed = true // a full retrofit braces the ground floor too
+      }
       if (tool === 'isolate') b.construction = 'isolated'
+      if (tool === 'softstorey') b.softFixed = true
+      if (tool === 'anchor') b.facadeAnchored = true
       if (tool === 'elevate') {
         b.elevated = 2
         this.world.rebuildStatic()
@@ -667,11 +691,13 @@ export class Game {
   quakeRisk(b) {
     const L = this.quakeEvent()
     const soil = this.city.soil[cellOfBuilding(b)]
-    const p = demand(b, soil, L.M, rockPgaAt(L, b.cx, b.cz), groundPeriod(L.M, siteDistances(L.geo, 0, 0).rjb, soil, L.freq))
+    const Tm = groundPeriod(L.M, siteDistances(L.geo, 0, 0).rjb, soil, L.freq)
+    b.softStorey = this.world.softStorey(b)
+    const p = demand(b, soil, L.M, rockPgaAt(L, b.cx, b.cz), Tm)
     const med = mediansFor(b, L.M, 0)
     const probs = damageProbs(p, med)
     const sh = shapeOf(b)
-    return { pga: p, soil, pComplete: probs[3], pExtensive: probs[2], pCollapse: probs[3] * collapseProb(b, p, med), slender: sh.slender, shapeCap: sh.cap }
+    return { pga: p, soil, pComplete: probs[3], pExtensive: probs[2], pCollapse: probs[3] * collapseProb(b, p, med), slender: sh.slender, shapeCap: sh.cap, T: buildingPeriod(b), Tm, res: resonance(b, Tm) }
   }
 
   // ----------------------------------------------------------- simulation
@@ -712,6 +738,7 @@ export class Game {
         this.world.subsurface.build(city)
         this.world.subsurface.setQuake(this.world.subsurface.quake)
       }
+      for (const b of city.buildings) b.softStorey = this.world.softStorey(b)
       this.quake = new QuakeSim(city, this.level, { warning: this.upgrades.quakeWarning, gasShutoff: this.upgrades.gasShutoff, startHour: settings.startHour, rng: this.rng })
       this.population = this.quake.population
       this.pushLog(0, `A normal day in ${city.name}. ${stats.present.toLocaleString()} people are in the district…`, 'info')
@@ -1130,6 +1157,11 @@ export class Game {
       const cls = Object.entries(q.deathsByClass).sort((a, b) => b[1] - a[1])
       if (cls.length && cls[0][1] >= 1)
         lessons.push(`${Math.round((cls[0][1] / Math.max(1, T.dead)) * 100)}% of deaths were in ${CONSTRUCTION[cls[0][0]].name.toLowerCase()} buildings. Retrofitting or replacing them gives the biggest reduction.`)
+      const softDown = city.buildings.filter((b) => b.softStorey && q.st.get(b.id)?.collapsed).length
+      if (softDown) lessons.push(`${softDown} building${softDown > 1 ? 's' : ''} with an open shopfront ground floor (a soft storey) collapsed. Bracing just that floor costs a fraction of a full retrofit.`)
+      const outdoor = T.outdoorDead - (this.world.life.stats.bridgeDead || 0)
+      if (outdoor >= 1 && city.buildings.some((b) => sheddingFacade(b) && !b.facadeAnchored))
+        lessons.push(`${Math.round(outdoor)} people outdoors were killed by falling debris. Anchoring masonry facades, parapets and glass on busy streets stops most of what falls (New Zealand ordered this after Christchurch 2011).`)
       if (c.trapped >= 1) lessons.push(`${Math.round(c.trapped)} people died trapped under rubble. More fire & rescue stations shorten search-and-rescue times.`)
       if (c.injuries >= 1) lessons.push(`${Math.round(c.injuries)} people died from injuries that weren't treated in time. Hospitals built to high seismic code stay open when they're needed most.`)
       if (c.fire >= 1) lessons.push(`Fires killed ${Math.round(c.fire)} people.${this.upgrades.gasShutoff ? '' : ' Seismic gas shut-off valves prevent most post-quake ignitions.'}`)
@@ -1208,6 +1240,11 @@ export class Game {
       elevated: b.elevated,
       beds: b.beds,
       capacity: b.capacity,
+      openFront: this.world.openFront(b),
+      softStorey: this.world.softStorey(b),
+      softFixed: !!b.softFixed,
+      sheds: sheddingFacade(b),
+      facadeAnchored: !!b.facadeAnchored,
     }
     if (this.settings?.disaster === 'quake') info.quake = this.quakeRisk(b)
     if (this.quake) {

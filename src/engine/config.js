@@ -579,6 +579,8 @@ export const COSTS = {
   demolishM2: 60, // $/m² floor area
   retrofitM2: 350,
   isolateM2: 1100,
+  softStoreyM2: 300, // $/m² footprint: steel frames / shear walls in the ground floor only
+  anchorM2: 60, // $/m² facade: ties, parapet bracing, glazing film
   elevateM2: 1400, // $/m² footprint
   leveeCell: 0.3, // $M per 10 m of 3 m flood wall
   pump: 6,

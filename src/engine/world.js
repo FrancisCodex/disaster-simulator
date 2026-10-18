@@ -18,6 +18,11 @@ import { Wreckage } from './wreckage.js'
 import { buildingPeriod } from './quakeSim.js'
 import { M_SHOP } from './archetypes.js'
 
+/** Constructions whose open ground floors act as a soft storey. */
+export const SOFT_STOREY_CLASSES = ['wood_old', 'urm', 'rc_low', 'rc_mod']
+/** Does b throw facade pieces in strong shaking: tall cladding, or masonry parapets. */
+export const sheddingFacade = (b) => b.floors >= 7 || b.construction === 'urm'
+
 const HALF = (GRID * CELL) / 2
 const PX = 16 // terrain texture pixels per cell
 const OFF_BLOCK = { y: -1e6, bid: -1 }
@@ -1630,7 +1635,8 @@ export class World {
       const soft = this.city.soil[idx(b.x + Math.floor(b.w / 2), b.y + Math.floor(b.d / 2))] === 2
       const slender = b.height / Math.max(4, Math.min(b.fw, b.fd))
       // a wide, low block with a weak side still comes straight down: there is no lever
-      const open = brittle && b.floors >= 4 && slender >= 1.5 && this.openFront(b)
+      // (a braced ground floor has no weak side left)
+      const open = brittle && !b.softFixed && b.floors >= 4 && slender >= 1.5 && this.openFront(b)
       // the angle it would have to lean before its centre of mass passes the edge of its base
       const tip = Math.atan(1 / slender)
       let pTopple = 0
@@ -1670,6 +1676,14 @@ export class World {
       started: false,
     }
     a.active = true
+  }
+
+  /**
+   * Soft storey: an open ground floor of shopfronts under a building that is
+   * not built to a modern code (and not yet braced).
+   */
+  softStorey(b) {
+    return !b.softFixed && SOFT_STOREY_CLASSES.includes(b.construction) && b.floors >= 2 && this.openFront(b)
   }
 
   /** Does b stand on an open ground floor of shopfronts (a soft, weak side) ? */
@@ -2109,10 +2123,16 @@ export class World {
     }
   }
 
-  /** Cladding, glass and masonry shaken loose from tall buildings. */
+  /**
+   * Cladding, glass and masonry shaken loose from tall buildings, and parapets
+   * and brick facades off unreinforced masonry of any height (Christchurch 2011).
+   * Anchored facades (ties, parapet bracing, glazing film) shed far less.
+   */
   shedFacade(b, a, env, dt) {
-    if (b.floors < 7 || a.rubble || a.topple) return
-    const rate = env * (b.floors / 8) * (1 + a.ds * 0.8) * 1.4
+    if (!sheddingFacade(b) || a.rubble || a.topple) return
+    const urm = b.floors < 7
+    if (urm && env < 0.25) return
+    const rate = env * (urm ? 0.5 : b.floors / 8) * (1 + a.ds * 0.8) * 1.4 * (b.facadeAnchored ? 0.15 : 1)
     let n = rate * dt
     while (n > 0) {
       if (Math.random() > n) break

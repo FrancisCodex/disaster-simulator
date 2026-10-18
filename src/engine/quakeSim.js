@@ -52,7 +52,7 @@ export function buildingPeriod(b) {
       return Math.max(2, 0.0466 * h ** 0.9) // the isolators stretch the period out
     case 'urm':
     case 'wood_old':
-    case 'wood':
+    case 'wood_mod':
       return 0.0488 * h ** 0.75
     default:
       return 0.0466 * h ** 0.9 // reinforced-concrete frame
@@ -94,7 +94,11 @@ export function spectralShape(T, Tm) {
  * fast, jerky shaking; tall ones in slow, rolling shaking.
  */
 export function resonance(b, Tm) {
-  const T = buildingPeriod(b)
+  return resonanceAt(buildingPeriod(b), Tm)
+}
+
+/** resonance() for a building of period T (s): the demand multiplier, 0.5–1.5. */
+export function resonanceAt(T, Tm) {
   return clamp(Math.pow(spectralShape(T, Tm) / spectralShape(T, T_REF), 0.8), 0.5, 1.5)
 }
 
@@ -146,13 +150,22 @@ export const dsFromD = (D) => (D >= DS_FLOOR[4] ? 4 : D >= DS_FLOOR[3] ? 3 : D >
  */
 export const residual = (D, sh) => Math.max(0.3, 1 - 0.6 * D * (sh ? clamp(0.4 + 0.3 * sh.slender, 0.55, 1.4) : 1))
 
+/**
+ * Soft storey: an open ground floor of shopfronts or parking under stiffer
+ * floors above. The drift concentrates in that one storey, so it reaches heavy
+ * damage and collapse sooner (Northridge 1994, Kahramanmaraş 2023). Bracing the
+ * ground floor (the Los Angeles / San Francisco retrofit ordinances) removes it.
+ * b.softStorey is tagged by the game from the building's shape.
+ */
+export const SOFT_STOREY = { medians: [1, 0.92, 0.8, 0.75], collapse: 1.4 }
+
 export function mediansFor(b, M, D = 0) {
   const C = CONSTRUCTION[b.construction]
   let iso = 1
   if (b.construction === 'isolated' && M > 8.5) iso = clamp(1 - (M - 8.5) * 0.45, 0.3, 1) // isolator displacement limits
   const sh = shapeOf(b)
   const k = residual(D, sh) * iso * sh.cap
-  return C.medians.map((m) => m * k)
+  return C.medians.map((m, i) => m * k * (b.softStorey ? SOFT_STOREY.medians[i] : 1))
 }
 
 /** Probability of reaching each damage state ≥1..4 */
@@ -164,7 +177,7 @@ export function collapseProb(b, p, med, D = 0) {
   const C = CONSTRUCTION[b.construction]
   const over = Math.max(1, p / med[3])
   const worn = 1 + 1.5 * Math.max(0, D - 0.6)
-  return Math.min(0.95, C.collapse * Math.pow(over, 1.5) * shapeOf(b).coll * worn)
+  return Math.min(0.95, C.collapse * Math.pow(over, 1.5) * shapeOf(b).coll * worn * (b.softStorey ? SOFT_STOREY.collapse : 1))
 }
 
 /**
