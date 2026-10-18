@@ -44,3 +44,27 @@ body,
 .fadein {
   animation: fadein 0.25s ease-out;
 }
+
+/* toasts: above the bottom bar on desktop, under the top bar on phones */
+.notice-pos {
+  bottom: 6rem;
+}
+@media (max-width: 767px), (max-height: 500px) {
+  .notice-pos {
+    bottom: auto;
+    top: 4.5rem;
+  }
+}
+
+/* horizontal strips (the phone tool bar) scroll without a visible bar */
+.no-scrollbar {
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* keep the phone HUD clear of the home indicator */
+.safe-bottom {
+  padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
+}

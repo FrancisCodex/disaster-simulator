@@ -1,5 +1,55 @@
+import { useState } from 'react'
 import { fmtInt, fmtMoney } from '../engine/math.js'
 import { resonanceAt } from '../engine/quakeSim.js'
+
+function readOpen(id, fallback) {
+  try {
+    const v = localStorage.getItem(`metrorisk.open.${id}`)
+    return v == null ? fallback : v === '1'
+  } catch {
+    return fallback
+  }
+}
+
+/** A panel whose body folds away; remembers whether it was open. summary shows while folded. */
+export function Section({ id, title, summary, defaultOpen = true, className = '', children }) {
+  const [open, setOpen] = useState(() => readOpen(id, defaultOpen))
+  const toggle = () => {
+    setOpen(!open)
+    try {
+      localStorage.setItem(`metrorisk.open.${id}`, open ? '0' : '1')
+    } catch {
+      /* storage unavailable: it just won't be remembered */
+    }
+  }
+  return (
+    <div className={`panel p-3 ${className}`}>
+      <button onClick={toggle} aria-expanded={open} className="flex w-full items-center justify-between gap-2 text-left text-[11px] tracking-wider text-slate-400 uppercase hover:text-slate-200">
+        <span>{title}</span>
+        <span className="flex items-center gap-2 normal-case">
+          {!open && summary && <span className="text-[12px] tracking-normal text-slate-300">{summary}</span>}
+          <span className={`text-xs transition-transform ${open ? 'rotate-180' : ''}`}>▾</span>
+        </span>
+      </button>
+      {open && <div className="mt-1.5">{children}</div>}
+    </div>
+  )
+}
+
+/** A panel that slides up over the lower part of the map, with its own close button. */
+export function Sheet({ title, onClose, children }) {
+  return (
+    <div className="panel fadein scroll-thin pointer-events-auto max-h-[45vh] overflow-y-auto p-3">
+      <div className="mb-1.5 flex items-center justify-between">
+        <span className="text-[11px] tracking-wider text-slate-400 uppercase">{title}</span>
+        <button onClick={onClose} className="px-1 text-slate-400 hover:text-white" aria-label="Close">
+          ✕
+        </button>
+      </div>
+      {children}
+    </div>
+  )
+}
 
 export function Row({ k, v, accent }) {
   return (
@@ -199,7 +249,7 @@ export function Notice({ notice }) {
   if (!notice) return null
   const tone = notice.kind === 'bad' ? 'border-red-500/50 text-red-200' : notice.kind === 'good' ? 'border-emerald-500/50 text-emerald-200' : 'border-sky-500/40 text-sky-100'
   return (
-    <div key={notice.t} className={`panel fadein pointer-events-none absolute bottom-24 left-1/2 -translate-x-1/2 border px-4 py-2 text-sm ${tone}`}>
+    <div key={notice.t} className={`panel fadein notice-pos pointer-events-none absolute left-1/2 max-w-[90vw] -translate-x-1/2 border px-4 py-2 text-sm ${tone}`}>
       {notice.text}
     </div>
   )
@@ -212,7 +262,7 @@ export function ModelToggle({ s, game }) {
       onClick={() => game.setModelStyle(!s.detailedModels)}
       disabled={!s.modelsReady}
       title="Switch vehicles and people between the detailed (Quaternius) models and the simpler built-in ones"
-      className="rounded-md px-3 py-1.5 text-sm text-slate-300 hover:bg-slate-700/60 disabled:opacity-40"
+      className="rounded-md px-3 py-1.5 text-sm whitespace-nowrap text-slate-300 hover:bg-slate-700/60 disabled:opacity-40"
     >
       Models: {s.detailedModels ? 'Detailed' : 'Built-in'}
     </button>

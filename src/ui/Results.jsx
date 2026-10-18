@@ -25,18 +25,18 @@ export default function Results({ s, game }) {
   const maxCause = Math.max(1, ...r.causes.map((c) => c.value))
   const d = s.settings.disaster
   return (
-    <div className="absolute inset-0 grid place-items-center bg-black/40 p-4">
-      <div className="panel fadein scroll-thin max-h-full w-[680px] max-w-full overflow-y-auto p-6">
+    <div className="absolute inset-0 flex items-center justify-center bg-black/40 p-2 sm:p-4">
+      <div className="panel fadein scroll-thin max-h-full w-full max-w-[680px] min-w-0 overflow-y-auto p-4 sm:p-6">
         <div className="flex items-start justify-between gap-4">
           <div>
             <div className="text-xs tracking-wider text-slate-400 uppercase">Disaster report — {s.city.name}</div>
-            <h2 className="text-2xl font-bold text-white">{d === 'quake' ? `M${s.level.M.toFixed(1)} earthquake${s.level.title ? ` · ${s.level.title}` : ''}` : s.level.name}</h2>
+            <h2 className="text-xl font-bold text-white sm:text-2xl">{d === 'quake' ? `M${s.level.M.toFixed(1)} earthquake${s.level.title ? ` · ${s.level.title}` : ''}` : s.level.name}</h2>
             <div className="text-sm text-slate-400">
               {s.city.typeName} · {r.hours.toFixed(1)} hours simulated · {fmtInt(r.pop)} people in the district
             </div>
           </div>
           <div className="text-center">
-            <div className={`text-6xl leading-none font-black ${GRADE_TONE[r.grade]}`}>{r.grade}</div>
+            <div className={`text-5xl leading-none font-black sm:text-6xl ${GRADE_TONE[r.grade]}`}>{r.grade}</div>
             <div className="mt-1 text-xs text-slate-400">{GRADE_TEXT[r.grade]}</div>
           </div>
         </div>
@@ -173,8 +173,8 @@ function PrepComparison({ r, p }) {
         <thead>
           <tr className="text-left text-[11px] text-slate-500 uppercase">
             <th className="py-1 font-medium">Measure</th>
-            <th className="py-1 text-right font-medium">Buildings</th>
-            <th className="py-1 text-right font-medium">Spent</th>
+            <th className="hidden py-1 text-right font-medium sm:table-cell">Buildings</th>
+            <th className="hidden py-1 text-right font-medium sm:table-cell">Spent</th>
             <th className="py-1 text-right font-medium">Lives saved</th>
             <th className="py-1 text-right font-medium">Damage avoided</th>
           </tr>
@@ -183,8 +183,8 @@ function PrepComparison({ r, p }) {
           {p.rows.map((m) => (
             <tr key={m.key} className="border-t border-slate-800 text-slate-300">
               <td className="py-1">{m.label}</td>
-              <td className="py-1 text-right font-mono">{m.key === 'warning' || m.key === 'gas' ? 'city-wide' : fmtInt(m.count)}</td>
-              <td className="py-1 text-right font-mono">{m.spent > 0 ? fmtMoney(m.spent) : '—'}</td>
+              <td className="hidden py-1 text-right font-mono sm:table-cell">{m.key === 'warning' || m.key === 'gas' ? 'city-wide' : fmtInt(m.count)}</td>
+              <td className="hidden py-1 text-right font-mono sm:table-cell">{m.spent > 0 ? fmtMoney(m.spent) : '—'}</td>
               <td className="py-1 text-right font-mono text-emerald-300">{approx(Math.max(0, m.lives))}</td>
               <td className="py-1 text-right font-mono">{m.loss > 0.005 ? fmtMoney(m.loss) : '—'}</td>
             </tr>
@@ -202,7 +202,7 @@ function Big({ label, value, tone = 'text-white', sub }) {
   return (
     <div className="rounded-lg bg-slate-800/60 p-3">
       <div className="text-[11px] tracking-wide text-slate-400 uppercase">{label}</div>
-      <div className={`text-2xl font-bold tabular-nums ${tone}`}>{value}</div>
+      <div className={`text-xl font-bold tabular-nums sm:text-2xl ${tone}`}>{value}</div>
       {sub && <div className="text-[11px] text-slate-500">{sub}</div>}
     </div>
   )
