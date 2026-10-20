@@ -217,7 +217,7 @@ export class FloodSim {
 
     // ---- pumps (fail when their own site floods)
     for (const p of this.pumps) {
-      if (!p.active) continue
+      if (!p.active || p.unpowered) continue
       const pk = p.j * N + p.i
       if (h[pk] > 1.2) {
         p.active = false

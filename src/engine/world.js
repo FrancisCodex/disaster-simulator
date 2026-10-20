@@ -1282,6 +1282,17 @@ export class World {
       detail[1] = body[1]
       detail[2] = body[2]
       detail[3] = c ? 0.9 : t
+      // roofs (the detail parts of pitched-roof buildings) stripped by the wind: bare, dark timber
+      if (!c && (a?.roofLost || a?.roofCover) && !a.rubble) {
+        const k = a.roofLost ? 0.85 : 0.45
+        detail[0] = detail[0] * detail[3] * (1 - k) + 0.2 * k
+        detail[1] = detail[1] * detail[3] * (1 - k) + 0.16 * k
+        detail[2] = detail[2] * detail[3] * (1 - k) + 0.12 * k
+        detail[3] = 1 - (1 - detail[3]) * (1 - k)
+        detail[0] /= detail[3]
+        detail[1] /= detail[3]
+        detail[2] /= detail[3]
+      }
       this.bld.setTint(i, body, detail)
       this.updateBuilding(b)
     })
@@ -1741,7 +1752,7 @@ export class World {
       // either way it no longer stands in the way of falling pieces (a sheared-off top leaves its stub)
       if (c.kind !== 'partial') this.wreck.removeBuilding(b)
       // a building coming down terrifies everyone who can see and hear it
-      this.life.alarm(b.cx, b.cz, Math.max(25, b.height * 0.8), c.style === 'flood' ? 0.45 : 0.7, 0.97)
+      this.life.alarm(b.cx, b.cz, Math.max(25, b.height * 0.8), c.style === 'flood' || c.style === 'wind' ? 0.45 : 0.7, 0.97)
       if (c.kind === 'topple') {
         // rigid rotation about the base edge, like a falling column: gravity, acting
         // through the leaning centre of mass, takes it over slowly at first
@@ -1839,11 +1850,11 @@ export class World {
     const want = Math.floor(target * Math.min(1, p * 1.3))
     for (; c.spawned < want; c.spawned++) this.spawnDebris(b, Math.min(a.hScale, 0.25))
     // dust and debris burst out of the crush zone at street level
-    const k = c.style === 'flood' ? 0.3 : 1
+    const k = c.style === 'flood' || c.style === 'wind' ? 0.3 : 1
     for (let q = 0; q < (p > 0.02 ? 3 : 0); q++) this.spawnDust(b, k * 1.2, b.base + Math.random() * 3)
     if (p >= 1) {
       this.becomeRubble(b, a)
-      for (let q = 0; q < 25; q++) this.spawnDust(b, c.style === 'flood' ? 0.3 : 1.5)
+      for (let q = 0; q < 25; q++) this.spawnDust(b, c.style === 'flood' || c.style === 'wind' ? 0.3 : 1.5)
     }
     return true
   }
@@ -1879,11 +1890,11 @@ export class World {
     const target = Math.min(40, Math.round(b.area / 300) + 6)
     const want = Math.floor(target * Math.min(1, p * 1.3))
     for (; c.spawned < want; c.spawned++) this.spawnDebris(b, Math.max(0.1, 1 - p))
-    const k = c.style === 'flood' ? 0.3 : 1
+    const k = c.style === 'flood' || c.style === 'wind' ? 0.3 : 1
     for (let q = 0; q < (p > 0.02 ? 3 : 0); q++) this.spawnDust(b, k * 1.2, b.base + Math.random() * 3)
     if (p >= 1) {
       this.becomeRubble(b, a)
-      for (let q = 0; q < 25; q++) this.spawnDust(b, c.style === 'flood' ? 0.3 : 1.5)
+      for (let q = 0; q < 25; q++) this.spawnDust(b, c.style === 'flood' || c.style === 'wind' ? 0.3 : 1.5)
     }
     return true
   }
@@ -2148,6 +2159,7 @@ export class World {
 
   setEnvironment({ hour = 12, rain = 0, haze = 0, wind = [0, 0] }) {
     this.windVec = wind
+    this.debris.wind = wind
     const h = ((hour % 24) + 24) % 24
     const elev = Math.sin(((h - 6) / 12) * Math.PI) // -1..1
     const az = ((h - 6) / 12) * Math.PI

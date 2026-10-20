@@ -130,6 +130,40 @@ export const CONSTRUCTION = {
 
 export const DAMAGE_STATES = ['None', 'Slight', 'Moderate', 'Extensive', 'Complete']
 
+// ------------------------------------------------------------------ Wind
+// Wind resistance as the 3-s gust (m/s) at roof height that gives a 50%
+// chance of failure (lognormal, β = WIND_BETA), for the HAZUS-Hurricane chain
+// of components: windows and doors breached → roof cover peeled off → roof
+// structure lifted off → walls / whole building fail. Tuned to the pattern
+// of post-Haiyan (2013) surveys: light timber and hollow-block homes lost
+// roofs at gusts of ~150–200 km/h and were flattened above ~250 km/h, while
+// engineered concrete kept its frame and lost glass and cladding.
+export const WIND_BETA = 0.2
+export const WIND = {
+  wood_old: { glass: 42, cover: 36, roof: 46, collapse: 62 },
+  wood_mod: { glass: 48, cover: 48, roof: 60, collapse: 80 },
+  urm: { glass: 45, cover: 39, roof: 50, collapse: 68 },
+  rc_low: { glass: 48, cover: 42, roof: 55, collapse: 115 },
+  rc_mod: { glass: 52, cover: 46, roof: 60, collapse: 140 },
+  rc_high: { glass: 56, cover: 50, roof: 64, collapse: 160 },
+  steel: { glass: 56, cover: 48, roof: 62, collapse: 155 },
+  isolated: { glass: 56, cover: 50, roof: 64, collapse: 160 },
+}
+// masonry under a concrete roof slab is tied together: far harder to flatten than under a light roof
+export const SLAB_COLLAPSE = 1.5
+// Roof by building type: 'light' = sheet or tile on timber, 'metal' = metal
+// sheet on steel purlins (sheds, stands), 'slab' = concrete roof slab (it
+// never blows off; only rooftop plant and cladding go).
+export const ROOF_KIND = { house: 'light', school: 'light', shelter: 'light', worship: 'light', museum: 'light', industrial: 'metal', stadium: 'metal' }
+export const roofKind = (type) => ROOF_KIND[type] ?? 'slab'
+// metal sheds: cladding fails early, the steel frame holds
+export const METAL_ROOF = { cover: 42, roof: 55 }
+// Trees: windthrow or stem breakage (broadleaf / conifer), 3-s gust at crown height
+export const TREE_WIND = [42, 46]
+// Distribution poles and lines along a 250 m feeder; the line into the city
+export const POLE_WIND = 47
+export const GRID_WIND = 58
+
 // Casualty fractions of occupants present, by damage state reached.
 // [dead, trapped (alive), critical injured, minor injured]
 export const QUAKE_CASUALTY = [

@@ -308,8 +308,8 @@ src/ui/TyphoonScenario.jsx     Tier / Historical / Custom (bulletin) picker + fo
 ```
 
 Suggested phases, each one shippable:
-1. **Storm core + rain into FloodSim:** tracks, Holland wind (HUD readout only), R-CLIPER with rainbands, catchment inflow, the three-mode picker, TCWS signals. *Replaces the flood mode with nothing lost.*
-2. **Wind damage:** component fragility, trees, power, reversal fatigue, roof loss visuals, slanted rain.
+1. ✅ **Storm core + rain into FloodSim:** tracks, Holland wind (HUD readout only), R-CLIPER with rainbands, catchment inflow, the three-mode picker, TCWS signals. *Replaces the flood mode with nothing lost.*
+2. ✅ **Wind damage:** component fragility, trees, power, reversal fatigue, roof loss visuals, slanted rain. Torn-off roof sheets already fly downwind with a simple drag model; phase 4 adds full plate aerodynamics and impact damage.
 3. **Storm surge:** coastal city variant, tide, downstream boundary, Haiyan and Nargis presets.
 4. **Debris, lightning and tornadoes:** Rapier debris flight, rolling-sphere strikes, TC-tornado vortex.
 5. **Prep tools and after-action report:** shutters, roof straps, tree trimming, buried lines, generators at pumps, sea wall, mangrove belt, signal-triggered evacuation plans.

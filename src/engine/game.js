@@ -14,6 +14,7 @@ import {
   HISTORICAL_QUAKES,
   TYPHOON_LEVELS,
   HISTORICAL_TYPHOONS,
+  roofKind,
   COSTS,
   UPGRADES,
   SPEEDS,
@@ -29,6 +30,7 @@ import { FloodSim } from './floodSim.js'
 import { FloodImpact } from './floodImpact.js'
 import { TyphoonSim } from './typhoonSim.js'
 import { buildStorm, forecastSummary } from './typhoonPhysics.js'
+import { WindDamage, windRisk } from './windDamage.js'
 import { QuakeSim, demand, mediansFor, damageProbs, collapseProb, cellOfBuilding, soilName, rockPgaAt, withGeometry, quakeAzimuth, shapeOf, dsFromD, compass, groundPeriod, buildingPeriod, resonance, softStoreyOf } from './quakeSim.js'
 import { siteDistances } from './quakePhysics.js'
 
@@ -238,7 +240,7 @@ export class Game {
     this.overlay = false
     this.log = []
     this.results = null
-    this.flood = this.quake = this.impact = this.shadow = this.typhoon = null
+    this.flood = this.quake = this.impact = this.shadow = this.typhoon = this.windDmg = null
     this.world.controls.autoRotate = false
     this.world.buildCity(city, this.settings.startHour)
     for (const b of city.buildings) b.openFront = this.world.openFront(b)
@@ -776,9 +778,12 @@ export class Game {
           return heat(r.pComplete * 0.6 + r.pCollapse * 3)
         })
       } else {
+        // the worse of the two: low ground by the river, or a roof / structure the forecast gusts can take
+        const gust = this.level.forecast.peakGust
         this.world.setColorFn((b) => {
           const e = b.floorZ + b.elevated - this.city.bankZ[b.y]
-          return heat(1 - clamp((e - 0.5) / 4, 0, 1))
+          const w = windRisk(b, gust)
+          return heat(Math.max(1 - clamp((e - 0.5) / 4, 0, 1), w.pCollapse, w.pRoof * 0.7, w.pGlass * 0.3))
         })
       }
     } else if (this.quake) {
@@ -841,6 +846,8 @@ export class Game {
       this.typhoon = new TyphoonSim(this.level, { place: city.name })
       this.flood = new FloodSim(city, { storm: this.typhoon, drainage: P.drainage + 15 * this.upgrades.drainage })
       this.impact = new FloodImpact(city, this.flood, { warning: this.upgrades.floodWarning, startHour: settings.startHour, signal: () => this.typhoon.signal, rng: this.rng })
+      this.windDmg = new WindDamage(city, this.impact, this.typhoon, { rng: new Rng((settings.seed ^ 0x2545f491) >>> 0), life: this.world.life })
+      this.windAcc = 0
       this.population = this.impact.population
       this.drainTyphoonLog()
     } else {
@@ -941,7 +948,8 @@ export class Game {
     }
     if (this.flood) {
       ctx.flood = true
-      ctx.warned = this.impact.warned
+      // in a gale people get off the streets whether or not anyone told them to
+      ctx.warned = this.impact.warned || (this.typhoon?.now.kmh10 ?? 0) >= 62
       ctx.rain = this.flood.rain
     }
     return ctx
@@ -972,6 +980,14 @@ export class Game {
     this.simTime = f.time
     this.typhoon.update(f.time)
     this.drainTyphoonLog()
+    // wind damage every simulated minute (the eyewall passes in under an hour)
+    this.windAcc += done
+    const ticks = Math.floor(this.windAcc / 60)
+    if (ticks > 0) {
+      this.windAcc -= ticks * 60
+      for (let q = ticks - 1; q >= 0; q--) this.windDmg.update(f.time - this.windAcc - q * 60, 1 / 60, { cumRain: f.cumRain })
+      this.syncWind()
+    }
     this.acc += done
     let tick = false
     while (this.acc >= 300) {
@@ -990,6 +1006,63 @@ export class Game {
 
   drainTyphoonLog() {
     for (const e of this.typhoon.events.splice(0)) this.pushLog(e.t, e.text, e.level)
+  }
+
+  /** Show what the wind did: roofs, broken windows, flattened buildings, fallen trees, power cuts. */
+  syncWind() {
+    const { world, city, windDmg: W } = this
+    let colors = false
+    let power = false
+    for (const e of W.events.splice(0)) {
+      if (e.text) this.pushLog(e.t, e.text, e.level)
+      else if (e.damage !== undefined) {
+        const b = city.byId.get(e.damage)
+        if (!b) continue
+        world.setDamage(b, e.ds)
+        const a = world.animFor(b)
+        if (e.roof === 'lost') a.roofLost = true
+        else if (e.roof === 'cover') a.roofCover = true
+        if (e.roof) this.throwRoof(b, e.roof === 'lost' ? 6 : 3)
+        colors = true
+      } else if (e.collapse !== undefined) {
+        const b = city.byId.get(e.collapse)
+        if (b) world.collapse(b, Math.random() * 0.4, 'wind')
+        if (b && roofKind(b.type) !== 'slab') this.throwRoof(b, 4)
+      } else if (e.tree) world.treesDirty = true
+      else if (e.power) power = true
+    }
+    if (power) {
+      for (const b of world.bList) {
+        // hospitals and fire stations run on their own generators
+        const lit = b.type === 'hospital' || b.type === 'fire' || W.powered(b.x, b.y)
+        world.animFor(b).dark = !lit
+      }
+      let cut = 0
+      for (const p of this.flood.pumps) {
+        const was = p.unpowered
+        p.unpowered = !W.powered(p.i, p.j)
+        if (p.unpowered && !was && p.active) cut++
+      }
+      if (cut) this.pushLog(this.simTime, `${cut} pump station${cut > 1 ? 's have' : ' has'} lost power and stopped.`, 'bad')
+      colors = true
+    }
+    if (colors) {
+      if (this.overlay) this.applyColorMode()
+      else world.refreshColors()
+    }
+  }
+
+  /** Roof sheets and tiles torn off and carried downwind. */
+  throwRoof(b, n) {
+    const { world } = this
+    const [wx, wz] = world.windVec ?? [0, 0]
+    const col = b.roofColor ?? '#8a8f94'
+    const top = b.base + b.elevated + b.height
+    for (let q = 0; q < n; q++) {
+      const x = b.cx + (Math.random() - 0.5) * b.fw * 0.8
+      const z = b.cz + (Math.random() - 0.5) * b.fd * 0.8
+      world.debris.spawn(x, top + 0.5, z, wx * 0.3, 2 + Math.random() * 4, wz * 0.3, 1, col, { dims: [1.2 + Math.random() * 1.2, 0.06, 0.6 + Math.random() * 0.4], windborne: true, src: b.id })
+    }
   }
 
   syncFlood() {
@@ -1250,7 +1323,7 @@ export class Game {
 
   backToMenu() {
     this.phase = 'menu'
-    this.flood = this.quake = this.impact = this.shadow = this.typhoon = null
+    this.flood = this.quake = this.impact = this.shadow = this.typhoon = this.windDmg = null
     this.results = null
     this.loadDemo()
     this.emit()
@@ -1326,7 +1399,14 @@ export class Game {
     } else {
       const im = this.impact
       const c = im.deathsByCause
-      causes.push({ label: 'Drowned indoors', value: c.drowning }, { label: 'Buildings swept away', value: c.collapse }, { label: 'Caught while evacuating', value: c.evacuation }, { label: 'Swept away outdoors', value: T.outdoorDead })
+      causes.push(
+        { label: 'Drowned indoors', value: c.drowning },
+        { label: 'Buildings swept away', value: c.collapse },
+        { label: 'Caught while evacuating', value: c.evacuation },
+        { label: 'Homes flattened by the wind', value: c.wind },
+        { label: 'Roofs torn off, flying glass', value: c.roof },
+        { label: 'Outdoors: water, debris', value: T.outdoorDead },
+      )
       if (c.drowning >= 1) lessons.push('Most drownings happened in low-rise homes in low-lying areas. Flood walls, elevating homes and earlier evacuation all reduce this.')
       if (c.evacuation >= 1) lessons.push(`${Math.round(c.evacuation)} people died wading through floodwater. ${this.upgrades.floodWarning ? 'Shelters closer to people help.' : 'An early-warning system gets people out before the streets flood.'}`)
       if (this.flood.stageMax > 0) lessons.push(`The river rose ${this.flood.stageMax.toFixed(1)} m above its banks. Continuous flood walls along the river, dredging and upstream storage help — but walls can fail if overtopped.`)
@@ -1335,10 +1415,27 @@ export class Game {
       if (failedP) lessons.push(`${failedP} pump station${failedP > 1 ? 's' : ''} flooded and failed. Put pumps on higher ground or protect them with walls.`)
       if (this.flood.cumRain > 0) lessons.push(`${Math.round(this.flood.cumRain)} mm of rain fell on the city in ${(this.simTime / 3600).toFixed(1)} hours, and ~${Math.round(this.flood.cumBasin)} mm on the hills upstream. The river peaks hours after the heaviest rain, as runoff from the catchment arrives.`)
       const P = this.typhoon.peak
-      if (P.kmh10 >= 39)
-        lessons.push(`Peak wind in the city: ${Math.round(P.kmh10)} km/h sustained (10-min) from the ${P.from}, gusting ~${Math.round(P.gust * 3.6)} km/h${P.signal ? `; the highest wind signal raised was No. ${P.signal}` : ''}. Wind damage to roofs, trees and power lines arrives in a later version of the simulation.`)
+      if (P.kmh10 >= 39) lessons.push(`Peak wind in the city: ${Math.round(P.kmh10)} km/h sustained (10-min) from the ${P.from}, gusting ~${Math.round(P.gust * 3.6)} km/h${P.signal ? `; the highest wind signal raised was No. ${P.signal}` : ''}.`)
+      const W = this.windDmg
+      const S = W.stats
+      if (S.roof + S.collapsed > 0) {
+        // which kind of building lost its roof or was flattened
+        const by = {}
+        for (const b of city.buildings) {
+          const w = W.st.get(b.id)
+          if (w && (w.roof || w.byWind)) by[b.construction] = (by[b.construction] || 0) + 1
+        }
+        const top = Object.entries(by).sort((a, b) => b[1] - a[1])[0]
+        lessons.push(
+          `${S.roof} buildings lost their roofs and ${S.collapsed} were flattened; ${Math.round((top[1] / (S.roof + S.collapsed)) * 100)}% of them ${CONSTRUCTION[top[0]].name.toLowerCase()}. Roof-to-wall straps, more nails per sheet and storm shutters are the cheapest fixes; for the weakest homes, getting the family out to a shelter at Signal No. 3 is what saves them.`,
+        )
+      }
+      if (c.wind + c.roof >= 1) lessons.push(`${Math.round(c.wind + c.roof)} people died in buildings that failed in the wind. Most were in light-material homes, as in Haiyan, where the wind and the surge both took the poorest-built homes first.`)
+      if (S.glass >= 5) lessons.push(`${S.glass} buildings had windows blown in, many by flying roof sheets from upwind. Once a window goes, the roof is pushed off from inside as well as pulled from outside.`)
+      if (S.trees >= 5) lessons.push(`${S.trees} trees came down${S.roads ? `, blocking ${S.roads} road sections` : ''}. Pruning and choosing wind-firm species along main roads and power lines keeps routes open for rescue.`)
+      if (!W.gridUp || W.poweredShare() < 1) lessons.push(`${W.gridUp ? `${Math.round((1 - W.poweredShare()) * 100)}% of the city lost power` : 'The whole city lost power'}${this.flood.pumps.some((p) => p.unpowered) ? ', and pump stations without backup generators stopped when they were needed most' : ''}.`)
       if (this.typhoon.flags.inEye) lessons.push('The eye passed over the city. The calm in the eye is the most dangerous moment to go outside: the back eyewall returns within the hour, from the opposite direction.')
-      if (!this.upgrades.floodWarning && dead > 0) lessons.push('Pre-emptive evacuation tied to the PAGASA wind signals gets people out of low-lying homes before the water rises, rather than after.')
+      if (!this.upgrades.floodWarning && dead > 0) lessons.push('Pre-emptive evacuation tied to the PAGASA wind signals gets people out of low-lying and light-material homes before the water rises and the roofs go, rather than after.')
     }
     if (this.relocated > 0) lessons.push(`${this.relocated.toLocaleString()} residents displaced by demolition were never rehoused.`)
     if (!lessons.length) lessons.push('Excellent preparation — the city came through without loss of life.')
@@ -1519,9 +1616,20 @@ export class Game {
         }
       }
     }
+    if (this.settings?.disaster === 'typhoon') {
+      const r = windRisk(b, this.level.forecast.peakGust)
+      info.wind = { kind: r.kind, medians: r.medians, gust: r.gust, pGlass: r.pGlass, pCover: r.pCover, pRoof: r.pRoof, pCollapse: r.pCollapse }
+    }
     if (this.impact) {
       const s = this.impact.st.get(id)
       if (s) info.state = { depthIn: s.dIn, depthOut: s.dOut, maxIn: s.maxIn, velocity: s.v, dead: s.dead, present: s.present, evacuated: s.evacuated, collapsed: s.collapsed }
+      const w = this.windDmg?.st.get(id)
+      if (s && w) {
+        info.state.wind = w.byWind ? 'Flattened by the wind' : w.collapsed ? null : w.roof ? 'Roof torn off' : w.cover ? 'Roof sheets / tiles lost' : w.glass ? 'Windows broken' : 'Intact'
+        info.state.gust = w.gust
+        info.state.maxGust = w.maxGust
+        info.state.powered = b.type === 'hospital' || b.type === 'fire' || this.windDmg.powered(b.x, b.y)
+      }
     }
     return info
   }
@@ -1557,6 +1665,20 @@ export class Game {
       out.leveeM = levee * 10
       out.pumps = city.pumps.length
       out.shelterCap = city.buildings.filter((b) => b.type === 'shelter').reduce((s, b) => s + b.capacity, 0)
+      // expected wind damage at the forecast peak gust
+      const gust = this.level.forecast.peakGust
+      let roofs = 0
+      let flattened = 0
+      let lightPeople = 0
+      for (const b of city.buildings) {
+        const r = windRisk(b, gust)
+        roofs += r.pRoof
+        flattened += r.pCollapse
+        if (r.pCollapse > 0.1) lightPeople += occupancyAt(b, settings.startHour)
+      }
+      out.expRoofs = roofs
+      out.expFlattened = flattened
+      out.windExposed = lightPeople
     }
     return out
   }
@@ -1604,6 +1726,8 @@ export class Game {
       if (this.typhoon) {
         const ty = this.typhoon
         s.sim.typhoon = { ...ty.now, signal: ty.signal, peak: { ...ty.peak }, passed: !!ty.flags.passed }
+        const W = this.windDmg
+        s.sim.wind = { ...W.stats, power: W.poweredShare(), gridUp: W.gridUp, pumpsOff: this.flood.pumps.filter((p) => p.unpowered).length }
       }
       if (this.quake) {
         const q = this.quake

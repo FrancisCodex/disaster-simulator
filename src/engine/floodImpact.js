@@ -19,7 +19,7 @@ export class FloodImpact {
     this.events = []
     this.leftArea = 0
     this.rescued = 0
-    this.deathsByCause = { drowning: 0, collapse: 0, evacuation: 0 }
+    this.deathsByCause = { drowning: 0, collapse: 0, evacuation: 0, roof: 0, wind: 0 }
     this.deathsByType = {}
     this.st = new Map()
     this.population = 0
@@ -140,6 +140,8 @@ export class FloodImpact {
       const inZone = b.groundZ < city.bankZ[b.y] + zoneMargin
       let rate = 0
       if (this.warned && inZone) rate = this.warningSystem ? 0.35 : 0.15
+      // the typhoon plan also moves families out of light-material homes, wherever they are
+      if (this.warned && this.warningSystem && b.type === 'house' && (b.construction === 'wood_old' || b.construction === 'urm')) rate = Math.max(rate, 0.3)
       if (dOut > 0.15) rate = Math.max(rate, 0.12)
       if (b.floors >= 4) rate *= 0.15 // vertical evacuation: people move upstairs
       if (b.type === 'shelter') rate = dIn > 0.3 ? 0.2 : 0
@@ -270,10 +272,13 @@ export class FloodImpact {
       injured += s.injured
       if (s.maxIn > 0.3) flooded++
       if (s.collapsed) destroyed++
-      if (s.maxIn > 0.5 || s.collapsed) displaced += b.residents
+      // wind damage (WindDamage sets this.wind): a lost roof lets the rain in and the home is unlivable
+      const w = this.wind?.st.get(b.id)
+      if (s.maxIn > 0.5 || s.collapsed || w?.roof) displaced += b.residents
       if (s.dIn > 0.5) atRisk += s.present
       const share = Math.min(1, Math.ceil(s.maxIn / b.floorH) / b.floors)
-      const f = s.collapsed ? 1 : Math.min(1, 0.33 * Math.sqrt(s.maxIn)) * share
+      const windF = !w ? 0 : w.roof ? 0.3 : w.cover ? 0.1 : w.glass ? 0.04 : 0
+      const f = s.collapsed ? 1 : Math.max(windF, Math.min(1, 0.33 * Math.sqrt(s.maxIn)) * share)
       loss += b.value * f
     }
     for (let k = 0; k < GRID * GRID; k++) if (this.city.levee[k] > 0 && this.sim.maxH[k] > 0.3) loss += 0.02

@@ -85,12 +85,51 @@ function StormNow({ ty }) {
   )
 }
 
+/** What the wind has done so far: roofs, glass, flattened buildings, trees and power. */
+function WindToll({ w }) {
+  const any = w.glass + w.cover + w.roof + w.collapsed + w.trees > 0 || w.power < 1
+  if (!any) return null
+  const out = Math.round((1 - w.power) * 100)
+  return (
+    <div className="mb-3">
+      <div className="text-[11px] tracking-wider text-slate-400 uppercase">Wind damage</div>
+      <div className="mt-1 grid grid-cols-2 gap-x-3 text-xs">
+        <span className="text-slate-400">
+          Roofs lost <span className={w.roof ? 'text-orange-300' : 'text-slate-200'}>{fmtInt(w.roof)}</span>
+        </span>
+        <span className="text-slate-400">
+          Sheets / tiles <span className="text-slate-200">{fmtInt(w.cover)}</span>
+        </span>
+        <span className="text-slate-400">
+          Flattened <span className={w.collapsed ? 'text-red-300' : 'text-slate-200'}>{fmtInt(w.collapsed)}</span>
+        </span>
+        <span className="text-slate-400">
+          Windows <span className="text-slate-200">{fmtInt(w.glass)}</span>
+        </span>
+        <span className="text-slate-400">
+          Trees down <span className="text-slate-200">{fmtInt(w.trees)}</span>
+        </span>
+        <span className="text-slate-400">
+          Roads blocked <span className={w.roads ? 'text-amber-300' : 'text-slate-200'}>{fmtInt(w.roads)}</span>
+        </span>
+      </div>
+      {out > 0 && (
+        <div className="mt-1 text-xs text-amber-300">
+          ⚡ {w.gridUp ? `${out}% of the city without power` : 'Citywide blackout'}
+          {w.pumpsOff > 0 && <span className="text-red-300"> · {w.pumpsOff} pump{w.pumpsOff > 1 ? 's' : ''} stopped</span>}
+        </div>
+      )}
+    </div>
+  )
+}
+
 /** What the disaster is doing right now: rain and river, or shocks, fires and ground failure. */
 function Situation({ s }) {
-  const { flood, quake, typhoon: ty, totals: T } = s.sim
+  const { flood, quake, typhoon: ty, wind, totals: T } = s.sim
   return (
     <>
     {ty && <StormNow ty={ty} />}
+    {wind && <WindToll w={wind} />}
     {flood && (
       <div className="mb-3">
         <div className="flex items-baseline justify-between">

@@ -305,7 +305,7 @@ export function TyphoonForecast({ sc, defaultOpen = false }) {
             <R k="Holland B · outer exponent" v={`${fc.B.toFixed(2)} · ${fc.xn.toFixed(2)}`} />
           </Sec>
           <p className="text-[10px] text-slate-500">
-            City winds are for open ground at the coast (×{SITE_EXPOSURE} of the marine wind). Wind damage to buildings, trees and power, and storm surge, come in later versions; rain and river floods are simulated now.
+            City winds are for open ground at the coast (×{SITE_EXPOSURE} of the marine wind). Buildings feel more at roof height and in the open, less behind taller neighbours. Storm surge comes in a later version.
           </p>
           <button onClick={() => setEq(!eq)} className="text-sky-300 hover:text-sky-200">
             {eq ? 'Hide' : 'Show'} equations

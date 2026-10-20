@@ -63,6 +63,9 @@ function Overview({ s }) {
       ) : (
         <>
           <TyphoonForecast sc={s.level} />
+          <Row k="Roofs expected to go" v={`~${fmtInt(p.expRoofs)}`} accent={p.expRoofs >= 1 ? 'text-orange-300' : undefined} />
+          <Row k="Buildings the wind may flatten" v={`~${fmtInt(p.expFlattened)}`} accent={p.expFlattened >= 1 ? 'text-red-400' : undefined} />
+          <Row k="People in homes at risk of collapse" v={fmtInt(p.windExposed)} accent={p.windExposed > 0 ? 'text-orange-300' : undefined} />
           <Row k="People in low-lying homes" v={fmtInt(p.lowLying)} accent={p.lowLying > 0 ? 'text-orange-300' : undefined} />
           <Row k="Storm drains" v={`${p.drainage} mm/h`} />
           <Row k="Flood walls" v={`${fmtInt(p.leveeM)} m`} />
@@ -75,7 +78,7 @@ function Overview({ s }) {
 }
 
 /** One line for the folded overview: the number that matters most. */
-const overviewSummary = (s) => (s.settings.disaster === 'quake' ? `~${fmtInt(s.prep.expDeaths)} deaths est.` : `${fmtInt(s.prep.lowLying)} in low-lying homes`)
+const overviewSummary = (s) => (s.settings.disaster === 'quake' ? `~${fmtInt(s.prep.expDeaths)} deaths est.` : `~${fmtInt(s.prep.expRoofs)} roofs · ${fmtInt(s.prep.lowLying)} low-lying`)
 
 function Upgrades({ s, game }) {
   const remaining = s.budget - s.spent

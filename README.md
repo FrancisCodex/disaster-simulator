@@ -51,7 +51,13 @@ Pick an intensity tier, reenact one of 12 historical storms (Haiyan/Yolanda, Gon
 - **Storm:** a straight track with the bulletin's heading and forward speed passes the city at a chosen distance and side. Wind follows the Holland (1980/2010) profile, with the radius of maximum wind from Willoughby et al. (2006), pressure from Knaff & Zehr (2007) when none is given, and inland decay after landfall from Kaplan & DeMaria (1995). The storm's motion makes the right side windier in the north (the left in the south), and surface winds spiral inward. If the eye passes over, the wind dies, then returns from the opposite direction. 10-min (PAGASA/JMA) and 1-min (JTWC) winds and 3-s gusts are converted using WMO factors.
 - **Rain:** R-CLIPER (Tuleya et al. 2007) gives the average rain rate around the storm. The model adds a rain-free eye, an eyewall ring and rotating spiral rainbands, so the rain pulses as bands sweep over. The same field falls on the upstream catchment and drives the river's flood wave hours later. Slow storms and monsoon or mountain enhancement rain much more.
 - **Warnings:** PAGASA's Modified Tropical Cyclone Wind Signals (No. 1–5) are raised over the city with their lead times. The early-warning upgrade evacuates low-lying districts at Signal No. 3.
-- Wind damage, storm surge, lightning and tornadoes come in later phases: see [docs/typhoon-physics-research.md](docs/typhoon-physics-research.md).
+- **Wind damage:** every building follows the HAZUS-Hurricane chain. Windows break first, and the wind then pushes the roof up from inside. Roof sheets and tiles peel off, then the whole roof lifts, then the walls go. Each step has a fragility on the 3-s gust at roof height, set by structure type and roof type: sheet or tile on timber, metal sheds, or concrete slabs that never blow off.
+  - Gusts grow with height, are lower behind taller buildings and higher across the river and parks.
+  - Long exposure wears connections loose, and when the back eyewall turns the wind round, a new face of the building takes the load.
+  - Torn-off sheets fly downwind and break windows in their path.
+  - Trees fall more easily once the soil is soaked. Fallen trees block roads and bring down power lines. Poles snap above ~170 km/h and the line feeding the city fails above ~210 km/h. Unpowered pumps stop.
+  - Before the storm, the risk map and the inspect panel show each building's chance of losing its roof or being flattened at the forecast gusts.
+- Storm surge, lightning and tornadoes come in later phases: see [docs/typhoon-physics-research.md](docs/typhoon-physics-research.md).
 
 #### Flooding
 
@@ -101,6 +107,7 @@ src/
     cityGen.js      procedural terrain, river, roads, lots and buildings
     typhoonPhysics.js storm track, wind, pressure, rain and wind signals
     typhoonSim.js   the typhoon passing over the city, hour by hour
+    windDamage.js   roofs, windows, collapses, trees and power in the wind
     floodSim.js     2D flood hydraulics
     floodImpact.js  evacuation, drowning, building failure, damage
     quakeSim.js     ground motion, fragility, aftershocks, fires, rescue
@@ -112,7 +119,7 @@ src/
 
 ## Ideas for the future
 
-- Typhoon phases 2–5: wind damage, storm surge, debris, lightning and tornadoes
+- Typhoon phases 3–5: storm surge, lightning and tornadoes, wind preparations
 - More disasters: tsunami, wildfire, landslide
 - Running the flood solver in a Web Worker so 1 h/s is never CPU-limited
 - Road network evacuation with traffic

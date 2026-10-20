@@ -121,6 +121,7 @@ export class Debris {
     this.cursor = 0
     scene.add(this.mesh)
     this.surfaceAt = () => ({ y: 0, bid: -1 })
+    this.wind = [0, 0] // m/s, world x and z: carries windborne pieces
   }
 
   /**
@@ -159,6 +160,7 @@ export class Debris {
       sleep: false,
       dirty: true,
       fragile: !!opts.fragile,
+      windborne: !!opts.windborne,
       facade: !!opts.facade,
       src: opts.src ?? -1,
       color,
@@ -192,6 +194,21 @@ export class Debris {
       it.age += dt
       for (let s = 0; s < steps && !it.sleep; s++) {
         it.vy -= 9.81 * h
+        if (it.windborne) {
+          // a sheet in the wind: drag toward the wind's speed, and lift while it tumbles
+          // (thin plates fly far: ρ_air·C·A / 2m ≈ 0.06 /m for roof sheeting)
+          const [ux, uz] = this.wind
+          const rx = ux * 1.15 - it.vx
+          const ry = -it.vy
+          const rz = uz * 1.15 - it.vz
+          const U = Math.hypot(rx, ry, rz)
+          const k = 0.06 * U * h
+          it.vx += k * rx
+          it.vy += k * ry + (it.age < 2 ? 0.004 * (ux * ux + uz * uz) * h : 0)
+          it.vz += k * rz
+          it.wx += (Math.random() - 0.5) * U * h
+          it.wz += (Math.random() - 0.5) * U * h
+        }
         it.x += it.vx * h
         it.y += it.vy * h
         it.z += it.vz * h
@@ -230,6 +247,8 @@ export class Debris {
             break
           }
           it.y = g
+          // a sheet that comes down lies flat and snags: the wind no longer carries it
+          it.windborne = false
           if (it.vy < 0) it.vy = -it.vy * 0.25
           it.vx *= 0.55
           it.vz *= 0.55
