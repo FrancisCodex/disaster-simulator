@@ -4,8 +4,9 @@ import * as THREE from 'three'
 import { MapControls } from 'three/addons/controls/MapControls.js'
 import { GRID, CELL, CELL_ROAD, CELL_RIVER, CELL_BANK, CELL_PARK, CELL_POND, CELL_GRASS, BUILDING_TYPES, CITY_TYPES, RIVER_HALF_WIDTH, RIVER_DEPTH } from './config.js'
 import { idx, cellToWorld } from './cityGen.js'
-import { makeNoise2D, clamp, lerp, smoothstep } from './math.js'
+import { makeNoise2D, clamp, lerp, smoothstep, normCdf } from './math.js'
 import { Particles, Debris, Rain } from './effects.js'
+import { StormClouds, WindStreaks } from './weather.js'
 import { makeWaterMaterial, SkyEnvironment } from './materials.js'
 import { BuildingParts } from './buildingMesh.js'
 import { buildProps, finishRect } from './props.js'
@@ -128,6 +129,14 @@ export class World {
     this.debris.onLand = (it, v, bid) => this.debrisLanded(it, v, bid)
     this.debris.onShatter = (it) => this.shatter(it)
     this.rain = new Rain(scene)
+    this.clouds = new StormClouds(scene)
+    this.streaks = new WindStreaks(scene)
+    this.leaves = new Particles(scene, 1500, false)
+    this.spray = new Particles(scene, 1500, false)
+    // wind for swaying trees: (direction x, direction z, sway amplitude m, speed m/s)
+    this.uWind = { value: new THREE.Vector4(1, 0, 0, 0) }
+    this.cloudTint = new THREE.Color(0x5c6470)
+    this.cloudCover = 0
     // collapsing buildings break into rigid pieces once the physics engine has loaded
     // (until then, or if it fails to load, collapses stay scripted)
     this.wreck = new Wreckage(this)
@@ -985,6 +994,7 @@ export class World {
 
   /** Rebuild the water surface from a FloodSim (h, zg, vx, vz arrays). */
   updateWater(sim) {
+    this.waterSim = sim
     const { h, zg } = sim
     const vxA = sim.vx
     const vzA = sim.vz
@@ -1133,6 +1143,9 @@ export class World {
     crowns.count = ci
     cones.count = ki
     trunks.count = n
+    this.swayInWind(crowns.material, true)
+    this.swayInWind(cones.material, false)
+    this.swayInWind(trunks.material, false)
     for (const m of [crowns, cones, trunks]) {
       m.castShadow = true
       m.receiveShadow = true
@@ -2016,6 +2029,15 @@ export class World {
       t.fallen = { ax: Math.cos(ang), az: Math.sin(ang), th: 1.25 + Math.random() * 0.3 }
       this.treesDirty = true
     }
+    // street lights and traffic signals in the way come down too
+    for (const p of this.life.polesNear(x, z, reach + 1)) {
+      const dx = p.x - x
+      const dz = p.z - z
+      const d = Math.hypot(dx, dz)
+      if (d > reach + 0.5) continue
+      const ang = d > 0.1 ? Math.atan2(dz, dx) : Math.random() * Math.PI * 2
+      this.life.knockPole(p, Math.cos(ang), Math.sin(ang))
+    }
     for (const p of this.near(this.propIdx, x, z, reach + 1)) {
       if (p.it.fallen) continue
       const dx = p.it.x - x
@@ -2053,6 +2075,104 @@ export class World {
   }
 
   /** Placement of a prop part, knocked over about its foot if it was struck. */
+  /**
+   * Trees bend downwind and pump in the gusts. The gusts roll through the
+   * canopy as waves travelling with the wind, so you can watch each one cross
+   * the city. Trunks and cones bend more toward the top (local y 0 → 1); a
+   * crown moves as a whole. Fallen trees (not upright) stay still.
+   */
+  swayInWind(mat, crown) {
+    mat.onBeforeCompile = (sh) => {
+      sh.uniforms.uWind = this.uWind
+      sh.uniforms.uTime = this.uTime
+      sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nuniform vec4 uWind;\nuniform float uTime;').replace(
+        '#include <project_vertex>',
+        `vec4 mvPosition = vec4( transformed, 1.0 );
+#ifdef USE_INSTANCING
+  mvPosition = instanceMatrix * mvPosition;
+  float upright = smoothstep(0.6, 0.95, normalize(instanceMatrix[1].xyz).y);
+#else
+  float upright = 1.0;
+#endif
+  float bend = ${crown ? '1.0 + 0.25 * position.y' : 'position.y * position.y'};
+  float ph = uTime * (0.9 + uWind.w * 0.05) - dot(mvPosition.xz, uWind.xy) * 0.025;
+  float gust = 0.55 + 0.3 * sin(ph) + 0.15 * sin(ph * 2.3 + mvPosition.x * 0.07) + 0.06 * sin(uTime * 9.0 + mvPosition.z * 0.4);
+  float d = uWind.z * bend * upright * gust;
+  mvPosition.xz += uWind.xy * d;
+  mvPosition.y -= 0.15 * d;
+  mvPosition = modelViewMatrix * mvPosition;
+  gl_Position = projectionMatrix * mvPosition;`,
+      )
+    }
+    mat.customProgramCacheKey = () => (crown ? 'sway-crown' : 'sway-stem')
+  }
+
+  /** Clouds, wind streaks, leaves stripped from the trees and spray blown off the water. */
+  updateWeather(dt) {
+    const wind = this.windVec ?? [0, 0]
+    const c = this.controls.target
+    this.clouds.update(dt, { cover: this.cloudCover, wind, center: c, camera: this.camera, tint: this.cloudTint })
+    this.streaks.update(dt, wind, c, (x, z) => this.groundAt(x, z), this.nightF ?? 0)
+    const sp = Math.hypot(wind[0], wind[1])
+    if (sp > 14 && this.city) {
+      const k = Math.min(1, (sp - 14) / 30)
+      // leaves and twigs, from trees around the view
+      const trees = this.city.trees
+      for (let n = Math.round(k * 14); n > 0; n--) {
+        const t = trees[Math.floor(Math.random() * trees.length)]
+        if (!t || t.wx === undefined || t.burnt || Math.abs(t.wx - c.x) > 300 || Math.abs(t.wz - c.z) > 300) continue
+        const y = this.groundAt(t.wx, t.wz) + (3 + Math.random() * 5) * t.s
+        const brown = Math.random() < 0.35
+        const col = brown ? [0.42, 0.33, 0.18, 0.95] : [0.25, 0.42, 0.16, 0.95]
+        this.leaves.emit(t.wx + (Math.random() - 0.5) * 3, y, t.wz + (Math.random() - 0.5) * 3, wind[0] * (0.6 + Math.random() * 0.5), 1 + Math.random() * 3, wind[1] * (0.6 + Math.random() * 0.5), 0.7 + Math.random() * 0.6, 0, 2 + Math.random() * 2, col, [col[0], col[1], col[2], 0])
+      }
+      // spindrift: spray torn off the river and flood water
+      const W = this.waterSim
+      if (W && sp > 22) {
+        for (let n = Math.round(k * 10); n > 0; n--) {
+          const i = Math.floor(Math.random() * GRID)
+          const j = Math.floor(Math.random() * GRID)
+          const kk = idx(i, j)
+          if (W.h[kk] < 0.4) continue
+          const x = cellToWorld(i) + (Math.random() - 0.5) * CELL
+          const z = cellToWorld(j) + (Math.random() - 0.5) * CELL
+          if (Math.abs(x - c.x) > 450 || Math.abs(z - c.z) > 450) continue
+          const y = W.zg[kk] + W.h[kk] + 0.5
+          this.spray.emit(x, y, z, wind[0] * 0.8, 0.5 + Math.random(), wind[1] * 0.8, 4, 9, 1.6 + Math.random(), [0.86, 0.9, 0.94, 0.28 * k], [0.9, 0.93, 0.96, 0])
+        }
+      }
+    }
+    this.leaves.update(dt)
+    this.spray.update(dt)
+  }
+
+  /**
+   * Tall props in parks and squares (lamps, goals, hoops, signs) blown over by
+   * a 3-s gust (m/s) blowing toward (wx, wz). Each has its own strength, and
+   * falls once, the first time its fragility draw comes up.
+   */
+  windProps(gust, wx, wz) {
+    if (!this.propIdx) return
+    let changed = 0
+    for (const cell of this.propIdx.values()) {
+      for (const p of cell) {
+        const it = p.it
+        if (it.fallen || it.h < 1.5) continue
+        it.windMed ??= 44 * (0.85 + 0.3 * Math.random())
+        const P = normCdf(Math.log(gust / it.windMed) / 0.2)
+        if (P <= (it.windP ?? 0)) continue
+        const draw = (P - (it.windP ?? 0)) / (1 - (it.windP ?? 0))
+        it.windP = P
+        if (Math.random() >= draw) continue
+        it.fallen = { ax: wx, az: wz, th: 1.3 + Math.random() * 0.25 }
+        p.mesh.setMatrixAt(p.q, this.propMatrix(it))
+        p.mesh.instanceMatrix.needsUpdate = true
+        changed++
+      }
+    }
+    return changed
+  }
+
   propMatrix(it) {
     _m.makeScale(it.w, it.h, it.d)
     if (it.ry) _m.premultiply(_r.makeRotationY(it.ry))
@@ -2157,7 +2277,8 @@ export class World {
     }
   }
 
-  setEnvironment({ hour = 12, rain = 0, haze = 0, wind = [0, 0] }) {
+  setEnvironment({ hour = 12, rain = 0, haze = 0, wind = [0, 0], cloud = 0 }) {
+    this.cloudCover = cloud
     this.windVec = wind
     this.debris.wind = wind
     const h = ((hour % 24) + 24) % 24
@@ -2165,7 +2286,7 @@ export class World {
     const az = ((h - 6) / 12) * Math.PI
     const dayF = clamp(elev * 2.2 + 0.25, 0, 1)
     // a typhoon's cloud deck darkens the sky even between rain bands
-    const overcast = clamp(Math.max(rain / 25, Math.hypot(wind[0], wind[1]) / 30), 0, 1)
+    const overcast = clamp(Math.max(rain / 25, Math.hypot(wind[0], wind[1]) / 30, cloud * 0.85), 0, 1)
     const night = clamp(1 - dayF * 1.3 + overcast * 0.35, 0, 1)
     this.nightF = night
     this.uNight.value = clamp(1 - dayF * 1.4, 0, 1) + overcast * 0.25
@@ -2188,6 +2309,11 @@ export class World {
     this.scene.fog.color.copy(sky)
     this.scene.fog.near = lerp(1400, 260, Math.max(overcast, haze * 0.8))
     this.scene.fog.far = lerp(5600, 1500, Math.max(overcast, haze * 0.6))
+    // the cloud deck: lit grey by day, near-black at night
+    this.cloudTint.set(0x4f5762).multiplyScalar(0.3 + 0.7 * dayF)
+    // how far the trees bend, and how fast the gusts roll through them
+    const sp = Math.hypot(wind[0], wind[1])
+    this.uWind.value.set(sp > 0 ? wind[0] / sp : 1, sp > 0 ? wind[1] / sp : 0, clamp((sp - 4) / 40, 0, 1) * 1.8, sp)
     this.rainIntensity = rain
     this.uRain.value = rain
     if (this.terrainMat) this.terrainMat.emissiveIntensity = night * 0.55
@@ -2336,6 +2462,7 @@ export class World {
     }
     // drops stop on roofs and streets; in cut-away view it only rains over the block
     this.rain.update(dt, this.rainIntensity || 0, this.controls.target, (x, z) => this.surfaceAt(x, z).y, this.subsurface.group.visible ? HALF - 2 : 0, this.windVec)
+    this.updateWeather(dt)
     this.bld.flush()
     this.renderer.render(this.scene, this.camera)
   }

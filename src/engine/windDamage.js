@@ -17,7 +17,7 @@
 // down power lines; poles fail on their own above ~170 km/h, and the line
 // that feeds the whole city above ~210 km/h. Unpowered pumps stop.
 
-import { GRID, CELL_ROAD, CELL_RIVER, CELL_PARK, CELL_POND, CONSTRUCTION, BUILDING_TYPES, WIND, WIND_BETA, roofKind, METAL_ROOF, SLAB_COLLAPSE, TREE_WIND, POLE_WIND, GRID_WIND } from './config.js'
+import { GRID, CELL_ROAD, CELL_RIVER, CELL_PARK, CELL_POND, CONSTRUCTION, BUILDING_TYPES, WIND, WIND_BETA, roofKind, METAL_ROOF, SLAB_COLLAPSE, TREE_WIND, POLE_WIND, GRID_WIND, STREET_POLE_WIND } from './config.js'
 import { idx } from './cityGen.js'
 import { normCdf, clamp, smoothstep } from './math.js'
 import { fieldAt, GUST_LAND } from './typhoonPhysics.js'
@@ -84,7 +84,7 @@ export class WindDamage {
     this.feeders = Array.from({ length: nz * nz }, () => ({ up: true, p: 0, cause: null }))
     this.gridUp = true
     this.gridP = 0
-    this.stats = { glass: 0, cover: 0, roof: 0, collapsed: 0, trees: 0, roads: 0, deathsRoof: 0, deathsCollapse: 0 }
+    this.stats = { glass: 0, cover: 0, roof: 0, collapsed: 0, trees: 0, roads: 0, poles: 0, deathsRoof: 0, deathsCollapse: 0 }
     this.pending = { glass: 0, cover: 0, roof: 0, collapsed: 0, trees: 0, roads: 0 }
     this.flags = {}
     this.lastLog = {}
@@ -204,6 +204,7 @@ export class WindDamage {
       }
     }
     this.updateTrees(V, dir, cumRain)
+    this.updateStreet(V, dir)
     this.updatePower(V)
     return this.flushLogs()
   }
@@ -327,6 +328,47 @@ export class WindDamage {
           break
         }
       }
+    }
+  }
+
+  /** Street lights and traffic signals bend over at the base and fall downwind. */
+  updateStreet(V, dir) {
+    const life = this.life
+    if (!life?.lamps) return
+    if (!this.poles) {
+      const mk = (list, kind, med) => list.map((o, q) => ({ kind, q, x: o.x, z: o.z, med: med * (0.85 + 0.3 * this.rng.next()), k: 1 + 0.08 * this.rng.normal(), p: 0, down: false }))
+      this.poles = [...mk(life.lamps, 'lamp', STREET_POLE_WIND[0]), ...mk(life.signals || [], 'signal', STREET_POLE_WIND[1])]
+    }
+    const g0 = V * GUST_LAND * heightFactor(8)
+    if (g0 < 30) return
+    const wx = dir[0]
+    const wz = -dir[1]
+    let n = 0
+    for (const p of this.poles) {
+      if (p.down) continue
+      const P = pFail(g0 * p.k, p.med)
+      if (P <= p.p) continue
+      const draw = (P - p.p) / (1 - p.p)
+      p.p = P
+      if (!this.rng.chance(draw)) continue
+      p.down = true
+      if (!life.knockPole(p, wx + 0.15 * this.rng.normal(), wz + 0.15 * this.rng.normal())) continue
+      n++
+      this.stats.poles++
+      // a column across the carriageway closes it; some carry the overhead supply
+      const i = clamp(Math.floor((p.x + wx * 4 + 500) / 10), 0, GRID - 1)
+      const j = clamp(Math.floor((p.z + wz * 4 + 500) / 10), 0, GRID - 1)
+      const k = idx(i, j)
+      if (this.city.cellType[k] === CELL_ROAD && !life.blocked[k] && this.rng.chance(0.3)) {
+        life.block(k)
+        this.stats.roads++
+        this.pending.roads++
+      }
+      if (this.rng.chance(0.1)) this.feederFault(i, j, 'poles')
+    }
+    if (n && !this.flags.poles) {
+      this.flags.poles = true
+      this.log('Street lights and traffic signals are coming down. Live wires and falling poles make the streets deadly.', 'warn')
     }
   }
 

@@ -87,7 +87,7 @@ function StormNow({ ty }) {
 
 /** What the wind has done so far: roofs, glass, flattened buildings, trees and power. */
 function WindToll({ w }) {
-  const any = w.glass + w.cover + w.roof + w.collapsed + w.trees > 0 || w.power < 1
+  const any = w.glass + w.cover + w.roof + w.collapsed + w.trees + w.poles > 0 || w.power < 1
   if (!any) return null
   const out = Math.round((1 - w.power) * 100)
   return (
@@ -111,6 +111,9 @@ function WindToll({ w }) {
         </span>
         <span className="text-slate-400">
           Roads blocked <span className={w.roads ? 'text-amber-300' : 'text-slate-200'}>{fmtInt(w.roads)}</span>
+        </span>
+        <span className="text-slate-400">
+          Poles down <span className="text-slate-200">{fmtInt(w.poles)}</span>
         </span>
       </div>
       {out > 0 && (

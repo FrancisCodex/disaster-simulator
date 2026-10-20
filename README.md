@@ -56,7 +56,12 @@ Pick an intensity tier, reenact one of 12 historical storms (Haiyan/Yolanda, Gon
   - Long exposure wears connections loose, and when the back eyewall turns the wind round, a new face of the building takes the load.
   - Torn-off sheets fly downwind and break windows in their path.
   - Trees fall more easily once the soil is soaked. Fallen trees block roads and bring down power lines. Poles snap above ~170 km/h and the line feeding the city fails above ~210 km/h. Unpowered pumps stop.
+  - Street lights, traffic signals and park props bend over and fall downwind, or are knocked down by debris and collapsing buildings, and go dark when their feeder loses power.
   - Before the storm, the risk map and the inspect panel show each building's chance of losing its roof or being flattened at the forecast gusts.
+- **What you see:**
+  - The storm's cloud deck darkens and turns overhead as the typhoon nears, and opens to the sky in the eye. Low scud races past under it.
+  - Trees bend downwind and pump as gusts roll through the canopy.
+  - Wind-driven streaks of rain and spray sweep along the streets, leaves are stripped from the trees, and spindrift blows off the river.
 - Storm surge, lightning and tornadoes come in later phases: see [docs/typhoon-physics-research.md](docs/typhoon-physics-research.md).
 
 #### Flooding
@@ -107,7 +112,8 @@ src/
     cityGen.js      procedural terrain, river, roads, lots and buildings
     typhoonPhysics.js storm track, wind, pressure, rain and wind signals
     typhoonSim.js   the typhoon passing over the city, hour by hour
-    windDamage.js   roofs, windows, collapses, trees and power in the wind
+    windDamage.js   roofs, windows, collapses, trees, poles and power in the wind
+    weather.js      storm cloud deck, scud and visible wind (streaks)
     floodSim.js     2D flood hydraulics
     floodImpact.js  evacuation, drowning, building failure, damage
     quakeSim.js     ground motion, fragility, aftershocks, fires, rescue

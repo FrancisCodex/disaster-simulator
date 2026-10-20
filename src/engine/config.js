@@ -163,6 +163,8 @@ export const TREE_WIND = [42, 46]
 // Distribution poles and lines along a 250 m feeder; the line into the city
 export const POLE_WIND = 47
 export const GRID_WIND = 58
+// Steel street-lighting columns and traffic-signal poles (3-s gust at ~8 m)
+export const STREET_POLE_WIND = [54, 50]
 
 // Casualty fractions of occupants present, by damage state reached.
 // [dead, trapped (alive), critical injured, minor injured]

@@ -39,6 +39,8 @@ const _e = new THREE.Euler()
 const _s = new THREE.Vector3()
 const _p = new THREE.Vector3()
 const _c = new THREE.Color()
+const _r = new THREE.Matrix4()
+const _a = new THREE.Vector3()
 const HALF = (GRID * CELL) / 2
 const LANE = 1.4 // lane centre on a two-way street (2.8 m lanes between the kerbs)
 const WALK = 4.1 // sidewalk path offset from the road centre line
@@ -347,6 +349,7 @@ export class CityLife {
       }
     })
     poleMesh.count = heads.length
+    this.signalPoles = poleMesh
     this.signalLamps.count = heads.length * 3
     poleMesh.castShadow = true
     this.group.add(poleMesh, this.signalLamps)
@@ -360,7 +363,7 @@ export class CityLife {
     const off = [0.18, 0.05, 0.04]
     this.signals.forEach((s, q) => {
       const st = this.signalState(s.k, s.d)
-      const lit = [st === 'R', st === 'Y', st === 'G']
+      const lit = s.dark || s.fallen ? [false, false, false] : [st === 'R', st === 'Y', st === 'G']
       const cols = [
         [1, 0.12, 0.08],
         [1, 0.72, 0.1],
@@ -407,6 +410,13 @@ export class CityLife {
     const arm = new THREE.CylinderGeometry(0.05, 0.05, 1.8, 5).rotateZ(Math.PI / 2).translate(0.9, 7.4, 0)
     const poleMesh = new THREE.InstancedMesh(mergeGeometries([pole, arm]), new THREE.MeshStandardMaterial({ color: 0x3c4046, roughness: 0.5, metalness: 0.6 }), n)
     const headMat = new THREE.MeshStandardMaterial({ color: 0x777777, emissive: 0xffd9a0, emissiveIntensity: 0 })
+    // a lamp whose instance colour is dimmed has lost power (or fallen): no glow
+    headMat.onBeforeCompile = (sh) => {
+      sh.fragmentShader = sh.fragmentShader.replace(
+        '#include <emissivemap_fragment>',
+        '#include <emissivemap_fragment>\n#ifdef USE_INSTANCING_COLOR\n  totalEmissiveRadiance *= step(0.9, vColor.g);\n#endif',
+      )
+    }
     this.lampHeadMat = headMat
     const heads = new THREE.InstancedMesh(new THREE.BoxGeometry(0.75, 0.14, 0.36).translate(1.75, 7.32, 0), headMat, n)
     const glowGeo = new THREE.BufferGeometry()
@@ -423,6 +433,10 @@ export class CityLife {
       gs[q] = 5
     })
     poleMesh.count = heads.count = lamps.length
+    this.lampPoles = poleMesh
+    this.lampHeads = heads
+    for (let q = 0; q < n; q++) heads.setColorAt(q, _c.setRGB(1, 1, 1))
+    this.lampGlowSize = gs
     poleMesh.castShadow = true
     glowGeo.setAttribute('position', new THREE.BufferAttribute(gp, 3))
     glowGeo.setAttribute('aCol', new THREE.BufferAttribute(gc, 3))
@@ -439,6 +453,7 @@ export class CityLife {
     ctx.globalCompositeOperation = 'lighter'
     const s = size / (GRID * CELL)
     for (const l of this.lamps || []) {
+      if (l.fallen || l.dark) continue
       const x = (l.x + l.dx * 1.75 + HALF) * s
       const y = (l.z + l.dz * 1.75 + HALF) * s
       const r = 13 * s
@@ -450,6 +465,75 @@ export class CityLife {
       ctx.fillRect(x - r, y - r, r * 2, r * 2)
     }
     ctx.globalCompositeOperation = 'source-over'
+  }
+
+  /** Pole matrix: standing, or pivoted about its foot to lie the way it fell (ax, az: world x, z). */
+  poleMatrix(x, y, z, yaw, fallen) {
+    _m.makeRotationY(yaw)
+    if (fallen) _m.premultiply(_r.makeRotationAxis(_a.set(fallen.az, 0, -fallen.ax), fallen.th))
+    return _m.setPosition(x, y, z)
+  }
+
+  /** Street light q blown over or struck, falling toward (ax, az). */
+  knockLamp(q, ax, az) {
+    const l = this.lamps?.[q]
+    if (!l || l.fallen) return false
+    l.fallen = { ax, az, th: 1.3 + Math.random() * 0.25 }
+    const m = this.poleMatrix(l.x, l.y, l.z, Math.atan2(-l.dz, l.dx), l.fallen)
+    this.lampPoles.setMatrixAt(q, m)
+    this.lampHeads.setMatrixAt(q, m)
+    this.lampPoles.instanceMatrix.needsUpdate = this.lampHeads.instanceMatrix.needsUpdate = true
+    this.setLampLit(q, false)
+    return true
+  }
+
+  setLampLit(q, lit) {
+    this.lampHeads.setColorAt(q, lit ? _c.setRGB(1, 1, 1) : _c.setRGB(0.4, 0.4, 0.4))
+    this.lampHeads.instanceColor.needsUpdate = true
+    this.lampGlowSize[q] = lit ? 5 : 0
+    this.lampGlow.geometry.attributes.aSize.needsUpdate = true
+    this.lampMapDirty = true
+  }
+
+  /** A traffic signal blown over or struck. */
+  knockSignal(q, ax, az) {
+    const s = this.signals?.[q]
+    if (!s || s.fallen) return false
+    s.fallen = { ax, az, th: 1.3 + Math.random() * 0.25 }
+    this.signalPoles.setMatrixAt(q, this.poleMatrix(s.x, s.y, s.z, s.yaw, s.fallen))
+    this.signalPoles.instanceMatrix.needsUpdate = true
+    // its lamps go with it
+    _m.makeScale(0, 0, 0)
+    for (let l = 0; l < 3; l++) this.signalLamps.setMatrixAt(q * 3 + l, _m)
+    this.signalLamps.instanceMatrix.needsUpdate = true
+    return true
+  }
+
+  /** Lights and signals go dark where the power is cut (powered(x, z) → bool). */
+  setPower(powered) {
+    ;(this.lamps || []).forEach((l, q) => {
+      const dark = !powered(l.x, l.z)
+      if (dark === !!l.dark) return
+      l.dark = dark
+      if (!l.fallen) this.setLampLit(q, !dark)
+    })
+    for (const s of this.signals || []) s.dark = !powered(s.x, s.z)
+  }
+
+  /** Street lights and signals within r of (x, z): { kind, q, x, z }. */
+  polesNear(x, z, r) {
+    const out = []
+    ;(this.lamps || []).forEach((l, q) => {
+      if (!l.fallen && Math.abs(l.x - x) < r && Math.abs(l.z - z) < r) out.push({ kind: 'lamp', q, x: l.x, z: l.z })
+    })
+    ;(this.signals || []).forEach((s, q) => {
+      if (!s.fallen && Math.abs(s.x - x) < r && Math.abs(s.z - z) < r) out.push({ kind: 'signal', q, x: s.x, z: s.z })
+    })
+    return out
+  }
+
+  knockPole(p, ax, az) {
+    return p.kind === 'lamp' ? this.knockLamp(p.q, ax, az) : this.knockSignal(p.q, ax, az)
   }
 
   // ------------------------------------------------------------ escape fields
@@ -713,6 +797,12 @@ export class CityLife {
       a.push(p)
     }
     this.updateSignals(dt)
+    // repaint the pools of light on the ground once lamps have gone dark or fallen (not every frame)
+    if (this.lampMapDirty && this.time - (this.lampMapT ?? -9) > 1) {
+      this.lampMapDirty = false
+      this.lampMapT = this.time
+      this.world.paintLamps()
+    }
     this.updateCars(dt, ctx)
     this.updatePeds(dt, ctx)
     this.carLights.material.uniforms.uNight.value = ctx.night

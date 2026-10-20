@@ -24,7 +24,7 @@ import {
   VARIANT_NAMES,
 } from './config.js'
 import { generateCity, addBuilding, idx, occupancyAt, cityStats } from './cityGen.js'
-import { Rng, clamp } from './math.js'
+import { Rng, clamp, smoothstep } from './math.js'
 import { World, sheddingFacade } from './world.js'
 import { FloodSim } from './floodSim.js'
 import { FloodImpact } from './floodImpact.js'
@@ -919,7 +919,10 @@ export class Game {
       const wind = live ? [this.typhoon.now.dir[0] * this.typhoon.now.wind, -this.typhoon.now.dir[1] * this.typhoon.now.wind] : [0, 0]
       let haze = 0
       if (this.quake?.mainDone) haze = clamp(this.quake.shocks[0].pga * 0.8, 0, 0.45) * Math.exp(-(this.simTime - this.quake.mainTime) / 7200)
-      w.setEnvironment({ hour, rain, haze, wind })
+      // the cloud shield spreads ~500 km from the centre; in the eye it opens to the sky
+      const ty = this.typhoon?.now
+      const cloud = live ? smoothstep(560, 180, ty.dist) * (ty.eye ? 0.25 : 1) : 0
+      w.setEnvironment({ hour, rain, haze, wind, cloud })
     }
     w.setLifeContext(this.lifeContext())
     // paused: freeze every moving thing (traffic, people, debris, fire, water, shaking)
@@ -986,6 +989,9 @@ export class Game {
     if (ticks > 0) {
       this.windAcc -= ticks * 60
       for (let q = ticks - 1; q >= 0; q--) this.windDmg.update(f.time - this.windAcc - q * 60, 1 / 60, { cumRain: f.cumRain })
+      // park lamps, goals and signs stand ~3–5 m up, below the roof-height gust
+      const W = this.windDmg.wind
+      if (W.gust > 30) this.world.windProps(W.gust * 0.92, W.dir[0], -W.dir[1])
       this.syncWind()
     }
     this.acc += done
@@ -1044,6 +1050,8 @@ export class Game {
         if (p.unpowered && !was && p.active) cut++
       }
       if (cut) this.pushLog(this.simTime, `${cut} pump station${cut > 1 ? 's have' : ' has'} lost power and stopped.`, 'bad')
+      // street lights and traffic signals go dark with their feeder
+      world.life.setPower((x, z) => W.powered(clamp(Math.floor((x + 500) / 10), 0, GRID - 1), clamp(Math.floor((z + 500) / 10), 0, GRID - 1)))
       colors = true
     }
     if (colors) {
