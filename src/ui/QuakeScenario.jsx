@@ -75,7 +75,7 @@ const sci = (x) => {
 }
 const g2 = (x) => (x < 0.01 ? x.toFixed(3) : x.toFixed(2))
 
-function Slider({ label, value, min, max, step = 1, unit, onChange, fmt = (v) => v }) {
+export function Slider({ label, value, min, max, step = 1, unit, onChange, fmt = (v) => v }) {
   return (
     <label className="block py-1">
       <div className="flex justify-between text-xs">
@@ -90,7 +90,7 @@ function Slider({ label, value, min, max, step = 1, unit, onChange, fmt = (v) =>
   )
 }
 
-function Toggle({ label, on, onChange, hint }) {
+export function Toggle({ label, on, onChange, hint }) {
   return (
     <button onClick={() => onChange(!on)} title={hint} className={`rounded-md border px-2 py-1 text-[11px] ${on ? 'border-sky-400 bg-sky-500/15 text-sky-100' : 'border-slate-700 text-slate-400'}`}>
       {on ? '✓ ' : ''}

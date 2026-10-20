@@ -12,7 +12,8 @@ import {
   CONSTRUCTION,
   QUAKE_LEVELS,
   HISTORICAL_QUAKES,
-  FLOOD_LEVELS,
+  TYPHOON_LEVELS,
+  HISTORICAL_TYPHOONS,
   COSTS,
   UPGRADES,
   SPEEDS,
@@ -26,6 +27,8 @@ import { Rng, clamp } from './math.js'
 import { World, sheddingFacade } from './world.js'
 import { FloodSim } from './floodSim.js'
 import { FloodImpact } from './floodImpact.js'
+import { TyphoonSim } from './typhoonSim.js'
+import { buildStorm, forecastSummary } from './typhoonPhysics.js'
 import { QuakeSim, demand, mediansFor, damageProbs, collapseProb, cellOfBuilding, soilName, rockPgaAt, withGeometry, quakeAzimuth, shapeOf, dsFromD, compass, groundPeriod, buildingPeriod, resonance, softStoreyOf } from './quakeSim.js'
 import { siteDistances } from './quakePhysics.js'
 
@@ -50,6 +53,26 @@ export function quakeEventFrom(settings) {
   // freq: the ground's shaking frequency (Hz; null: what the earthquake and the soil produce);
   // soil: 'map' keeps the generated ground, or 'rock' / 'stiff' / 'sand' everywhere
   return { mech: 'strike', strike: 90, rupture: 'bilateral', ...ev, mode: q.mode ?? 'tier', bearing: q.bearing ?? null, variability: q.variability !== false, aftershocks: q.aftershocks !== false, freq: q.freq ?? null, soil: q.soil ?? 'map' }
+}
+
+/**
+ * The typhoon a set of menu settings describes. settings.typhoon:
+ *   { mode: 'tier' } uses TYPHOON_LEVELS[settings.level];
+ *   { mode: 'historical', id } a HISTORICAL_TYPHOONS reenactment;
+ *   { mode: 'custom', params } a storm from a bulletin (see buildStorm in typhoonPhysics.js).
+ */
+export const CUSTOM_TYPHOON = { wind: 150, avg: 10, pc: null, windCA: null, leadH: 24, heading: 290, speed: 20, dist: 20, side: 'right', landfall: null, rmax: null, r34: null, lat: 14, rainBoost: 1 }
+
+export function typhoonScenarioFrom(settings) {
+  const t = settings.typhoon ?? { mode: 'tier' }
+  if (t.mode === 'historical') {
+    const h = HISTORICAL_TYPHOONS.find((x) => x.id === t.id) ?? HISTORICAL_TYPHOONS[0]
+    const title = `${h.year} ${h.name}${h.local ? ` (${h.local})` : ''}`
+    return { ...CUSTOM_TYPHOON, ...h, mode: 'historical', title, example: `Reenacted at ${h.city}, ${h.place}.` }
+  }
+  if (t.mode === 'custom') return { ...CUSTOM_TYPHOON, name: 'Custom typhoon', title: 'Custom typhoon', desc: 'Your own storm, from a bulletin or a what-if.', example: '', ...t.params, mode: 'custom' }
+  const L = TYPHOON_LEVELS[clamp(settings.level ?? 4, 0, TYPHOON_LEVELS.length - 1)]
+  return { ...CUSTOM_TYPHOON, ...L, mode: 'tier', title: L.name }
 }
 
 export const TOOLS = [
@@ -215,7 +238,7 @@ export class Game {
     this.overlay = false
     this.log = []
     this.results = null
-    this.flood = this.quake = this.impact = this.shadow = null
+    this.flood = this.quake = this.impact = this.shadow = this.typhoon = null
     this.world.controls.autoRotate = false
     this.world.buildCity(city, this.settings.startHour)
     for (const b of city.buildings) b.openFront = this.world.openFront(b)
@@ -259,7 +282,20 @@ export class Game {
   }
 
   get level() {
-    return this.settings.disaster === 'quake' ? this.quakeEvent() : FLOOD_LEVELS[this.settings.level]
+    return this.settings.disaster === 'quake' ? this.quakeEvent() : this.typhoonScenario()
+  }
+
+  typhoonScenario() {
+    const s = this.settings
+    const key = JSON.stringify([s.typhoon, s.level])
+    if (this.typhoonCache?.key !== key) {
+      const sc = typhoonScenarioFrom(s)
+      // the hourly timeline stays out: the scenario goes into every UI snapshot
+      const forecast = forecastSummary(buildStorm(sc))
+      delete forecast.timeline
+      this.typhoonCache = { key, sc: { ...sc, forecast } }
+    }
+    return this.typhoonCache.sc
   }
 
   notify(text, kind = 'info') {
@@ -801,11 +837,12 @@ export class Game {
     this.rng = new Rng((settings.seed ^ 0x5bd1e995) >>> 0)
     const P = CITY_TYPES[city.type]
     const stats = cityStats(city, settings.startHour)
-    if (settings.disaster === 'flood') {
-      this.flood = new FloodSim(city, { peak: this.level.peak, drainage: P.drainage + 15 * this.upgrades.drainage })
-      this.impact = new FloodImpact(city, this.flood, { warning: this.upgrades.floodWarning, startHour: settings.startHour, levelIndex: settings.level, rng: this.rng })
+    if (settings.disaster === 'typhoon') {
+      this.typhoon = new TyphoonSim(this.level, { place: city.name })
+      this.flood = new FloodSim(city, { storm: this.typhoon, drainage: P.drainage + 15 * this.upgrades.drainage })
+      this.impact = new FloodImpact(city, this.flood, { warning: this.upgrades.floodWarning, startHour: settings.startHour, signal: () => this.typhoon.signal, rng: this.rng })
       this.population = this.impact.population
-      this.pushLog(0, `${this.level.name} begins over ${city.name}. Forecast peak ${this.level.peak} mm/h.`, 'warn')
+      this.drainTyphoonLog()
     } else {
       // the scenario may put the whole district on one kind of ground (the prepared city is restored on retry)
       const SOILS = { rock: 0, stiff: 1, sand: 2 }
@@ -869,10 +906,13 @@ export class Game {
     }
     if (this.phase === 'sim' || this.phase === 'results') {
       const hour = this.settings.startHour + this.simTime / 3600
-      const rain = this.flood && this.phase === 'sim' ? this.flood.rain : this.flood ? 0 : 0
+      const live = this.phase === 'sim' && this.typhoon
+      const rain = live ? this.flood.rain : 0
+      // the storm's wind, in world axes (x east, z south): it slants the rain
+      const wind = live ? [this.typhoon.now.dir[0] * this.typhoon.now.wind, -this.typhoon.now.dir[1] * this.typhoon.now.wind] : [0, 0]
       let haze = 0
       if (this.quake?.mainDone) haze = clamp(this.quake.shocks[0].pga * 0.8, 0, 0.45) * Math.exp(-(this.simTime - this.quake.mainTime) / 7200)
-      w.setEnvironment({ hour, rain, haze })
+      w.setEnvironment({ hour, rain, haze, wind })
     }
     w.setLifeContext(this.lifeContext())
     // paused: freeze every moving thing (traffic, people, debris, fire, water, shaking)
@@ -930,6 +970,8 @@ export class Game {
     const done = f.advance(want, 12)
     this.physicsLimited = done < want * 0.85
     this.simTime = f.time
+    this.typhoon.update(f.time)
+    this.drainTyphoonLog()
     this.acc += done
     let tick = false
     while (this.acc >= 300) {
@@ -944,6 +986,10 @@ export class Game {
       this.world.updateWater(f)
     }
     if (tick) this.syncFlood()
+  }
+
+  drainTyphoonLog() {
+    for (const e of this.typhoon.events.splice(0)) this.pushLog(e.t, e.text, e.level)
   }
 
   syncFlood() {
@@ -1204,7 +1250,7 @@ export class Game {
 
   backToMenu() {
     this.phase = 'menu'
-    this.flood = this.quake = this.impact = this.shadow = null
+    this.flood = this.quake = this.impact = this.shadow = this.typhoon = null
     this.results = null
     this.loadDemo()
     this.emit()
@@ -1287,7 +1333,12 @@ export class Game {
       if (!city.buildings.some((b) => b.type === 'shelter')) lessons.push('There were no evacuation shelters — evacuees had to leave the area on their own, which is slower.')
       const failedP = this.flood.pumps.filter((p) => p.failed).length
       if (failedP) lessons.push(`${failedP} pump station${failedP > 1 ? 's' : ''} flooded and failed. Put pumps on higher ground or protect them with walls.`)
-      if (this.flood.cumRain > 0) lessons.push(`${Math.round(this.flood.cumRain)} mm of rain fell in ${(this.simTime / 3600).toFixed(1)} hours.`)
+      if (this.flood.cumRain > 0) lessons.push(`${Math.round(this.flood.cumRain)} mm of rain fell on the city in ${(this.simTime / 3600).toFixed(1)} hours, and ~${Math.round(this.flood.cumBasin)} mm on the hills upstream. The river peaks hours after the heaviest rain, as runoff from the catchment arrives.`)
+      const P = this.typhoon.peak
+      if (P.kmh10 >= 39)
+        lessons.push(`Peak wind in the city: ${Math.round(P.kmh10)} km/h sustained (10-min) from the ${P.from}, gusting ~${Math.round(P.gust * 3.6)} km/h${P.signal ? `; the highest wind signal raised was No. ${P.signal}` : ''}. Wind damage to roofs, trees and power lines arrives in a later version of the simulation.`)
+      if (this.typhoon.flags.inEye) lessons.push('The eye passed over the city. The calm in the eye is the most dangerous moment to go outside: the back eyewall returns within the hour, from the opposite direction.')
+      if (!this.upgrades.floodWarning && dead > 0) lessons.push('Pre-emptive evacuation tied to the PAGASA wind signals gets people out of low-lying homes before the water rises, rather than after.')
     }
     if (this.relocated > 0) lessons.push(`${this.relocated.toLocaleString()} residents displaced by demolition were never rehoused.`)
     if (!lessons.length) lessons.push('Excellent preparation — the city came through without loss of life.')
@@ -1548,7 +1599,11 @@ export class Game {
       }
       if (this.flood) {
         const f = this.flood
-        s.sim.flood = { rain: f.rain, cumRain: f.cumRain, stage: f.stage, inflow: f.inflow, warned: this.impact.warned, pumpsFailed: f.pumps.filter((p) => p.failed).length }
+        s.sim.flood = { rain: f.rain, cumRain: f.cumRain, basinRain: f.basinRain, stage: f.stage, inflow: f.inflow, warned: this.impact.warned, pumpsFailed: f.pumps.filter((p) => p.failed).length }
+      }
+      if (this.typhoon) {
+        const ty = this.typhoon
+        s.sim.typhoon = { ...ty.now, signal: ty.signal, peak: { ...ty.peak }, passed: !!ty.flags.passed }
       }
       if (this.quake) {
         const q = this.quake

@@ -2146,12 +2146,14 @@ export class World {
     }
   }
 
-  setEnvironment({ hour = 12, rain = 0, haze = 0 }) {
+  setEnvironment({ hour = 12, rain = 0, haze = 0, wind = [0, 0] }) {
+    this.windVec = wind
     const h = ((hour % 24) + 24) % 24
     const elev = Math.sin(((h - 6) / 12) * Math.PI) // -1..1
     const az = ((h - 6) / 12) * Math.PI
     const dayF = clamp(elev * 2.2 + 0.25, 0, 1)
-    const overcast = clamp(rain / 25, 0, 1)
+    // a typhoon's cloud deck darkens the sky even between rain bands
+    const overcast = clamp(Math.max(rain / 25, Math.hypot(wind[0], wind[1]) / 30), 0, 1)
     const night = clamp(1 - dayF * 1.3 + overcast * 0.35, 0, 1)
     this.nightF = night
     this.uNight.value = clamp(1 - dayF * 1.4, 0, 1) + overcast * 0.25
@@ -2321,7 +2323,7 @@ export class World {
       this.buildTrees()
     }
     // drops stop on roofs and streets; in cut-away view it only rains over the block
-    this.rain.update(dt, this.rainIntensity || 0, this.controls.target, (x, z) => this.surfaceAt(x, z).y, this.subsurface.group.visible ? HALF - 2 : 0)
+    this.rain.update(dt, this.rainIntensity || 0, this.controls.target, (x, z) => this.surfaceAt(x, z).y, this.subsurface.group.visible ? HALF - 2 : 0, this.windVec)
     this.bld.flush()
     this.renderer.render(this.scene, this.camera)
   }

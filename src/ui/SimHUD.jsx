@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { Stat, BuildingPanel, Sheet } from './common.jsx'
 import { useIsMobile } from './useIsMobile.js'
 import { fmtInt, fmtMoney } from '../engine/math.js'
+import { SignalChip } from './TyphoonScenario.jsx'
 
 /** How the people outside are reacting: calm → frightened → fleeing → panicking. */
 function PanicBar({ p }) {
@@ -46,11 +47,50 @@ const fmtT = (t) => {
 
 const LOG_TONE = { bad: 'text-red-300', warn: 'text-amber-200', info: 'text-slate-300', good: 'text-emerald-300' }
 
+const hrs = (tau) => {
+  const a = Math.abs(tau)
+  const t = a < 1 ? `${Math.round(a * 60)} min` : `${a.toFixed(a < 10 ? 1 : 0)} h`
+  return tau < 0 ? `closest in ${t}` : `${t} since closest`
+}
+
+/** The typhoon at the city right now: signal, wind, pressure and where the centre is. */
+function StormNow({ ty }) {
+  const kmh = Math.round(ty.kmh10)
+  return (
+    <div className="mb-3">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[11px] tracking-wider text-slate-400 uppercase">Wind signal</span>
+        <SignalChip n={ty.signal} />
+      </div>
+      <div className="mt-2 flex items-baseline justify-between">
+        <span className="text-[11px] tracking-wider text-slate-400 uppercase">Wind</span>
+        <span className={`font-mono ${kmh >= 118 ? 'text-red-400' : kmh >= 62 ? 'text-amber-300' : 'text-slate-200'}`}>
+          {kmh} km/h <span className="text-slate-400">gusts {Math.round(ty.gust * 3.6)}</span>
+        </span>
+      </div>
+      <div className="mt-1 h-1.5 overflow-hidden rounded bg-slate-700">
+        <div className={`h-full transition-all ${kmh >= 118 ? 'bg-red-500' : kmh >= 62 ? 'bg-amber-400' : 'bg-slate-400'}`} style={{ width: `${Math.min(100, (kmh / 250) * 100)}%` }} />
+      </div>
+      <div className="mt-1 text-xs text-slate-400">
+        {ty.eye ? <span className="text-amber-200">In the eye — calm, for now</span> : `From the ${ty.from}`} · {Math.round(ty.p)} hPa
+      </div>
+      <div className="text-xs text-slate-400">
+        {ty.category.name} centre {Math.round(ty.dist)} km {ty.bearing} · {hrs(ty.tau)}
+        {ty.overLand && ' · over land'}
+      </div>
+      <div className="text-[11px] text-slate-500">
+        10-min sustained (PAGASA); peak so far {Math.round(ty.peak.kmh10)} km/h{ty.peak.signal ? `, Signal No. ${ty.peak.signal}` : ''}
+      </div>
+    </div>
+  )
+}
+
 /** What the disaster is doing right now: rain and river, or shocks, fires and ground failure. */
 function Situation({ s }) {
-  const { flood, quake, totals: T } = s.sim
+  const { flood, quake, typhoon: ty, totals: T } = s.sim
   return (
     <>
+    {ty && <StormNow ty={ty} />}
     {flood && (
       <div className="mb-3">
         <div className="flex items-baseline justify-between">
@@ -60,7 +100,7 @@ function Situation({ s }) {
         <div className="mt-1 h-1.5 overflow-hidden rounded bg-slate-700">
           <div className="h-full bg-sky-400 transition-all" style={{ width: `${Math.min(100, (flood.rain / 120) * 100)}%` }} />
         </div>
-        <div className="mt-1 text-xs text-slate-400">Total {flood.cumRain.toFixed(0)} mm · river inflow {fmtInt(flood.inflow)} m³/s</div>
+        <div className="mt-1 text-xs text-slate-400">Total {flood.cumRain.toFixed(0)} mm · upstream {flood.basinRain.toFixed(0)} mm/h · river inflow {fmtInt(flood.inflow)} m³/s</div>
         <div className="mt-2 flex items-baseline justify-between">
           <span className="text-[11px] tracking-wider text-slate-400 uppercase">River level</span>
           <span className={`font-mono ${flood.stage > 0 ? 'text-red-400' : flood.stage > -1 ? 'text-amber-300' : 'text-emerald-300'}`}>

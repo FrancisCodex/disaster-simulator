@@ -1,7 +1,8 @@
 import { useState } from 'react'
-import { CITY_TYPES, QUAKE_LEVELS, FLOOD_LEVELS } from '../engine/config.js'
+import { CITY_TYPES } from '../engine/config.js'
 import { START_TIMES } from '../engine/game.js'
 import { QuakePicker } from './QuakeScenario.jsx'
+import { TyphoonPicker } from './TyphoonScenario.jsx'
 import { GitHubMark } from './RepoCredit.jsx'
 import { REPO_URL } from './links.js'
 
@@ -25,18 +26,16 @@ function Step({ n, title, children }) {
 
 export default function Menu({ onStart }) {
   const [cityType, setCityType] = useState('metropolis')
-  const [disaster, setDisaster] = useState('flood')
-  const [level, setLevel] = useState(3)
+  const [disaster, setDisaster] = useState('typhoon')
+  const [level, setLevel] = useState(4)
   const [startHour, setStartHour] = useState(8)
   const [quake, setQuake] = useState({ mode: 'tier', aftershocks: true, variability: true })
+  const [typhoon, setTyphoon] = useState({ mode: 'historical', id: 'haiyan2013' })
   const [seed, setSeed] = useState(() => Math.floor(Math.random() * 999999))
-
-  const levels = disaster === 'quake' ? QUAKE_LEVELS : FLOOD_LEVELS
-  const lvl = levels[Math.min(level, levels.length - 1)]
 
   const pickDisaster = (d) => {
     setDisaster(d)
-    setLevel(d === 'quake' ? 3 : 3)
+    setLevel(d === 'quake' ? 3 : 4)
   }
 
   return (
@@ -79,7 +78,7 @@ export default function Menu({ onStart }) {
         <Step n="2" title="Disaster">
           <div className="grid grid-cols-2 gap-2">
             {[
-              ['flood', '🌧️', 'Heavy rain & flooding', 'River floods, flash floods, drainage failure'],
+              ['typhoon', '🌀', 'Typhoon / cyclone', 'Wind, rain bands, eye passage, river floods'],
               ['quake', '🌋', 'Earthquake', 'Ground shaking, collapses, fires, aftershocks'],
             ].map(([k, icon, name, sub]) => (
               <button
@@ -95,21 +94,11 @@ export default function Menu({ onStart }) {
           </div>
         </Step>
 
-        <Step n="3" title={disaster === 'quake' ? 'Earthquake' : 'Intensity'}>
+        <Step n="3" title={disaster === 'quake' ? 'Earthquake' : 'Typhoon'}>
           {disaster === 'quake' ? (
             <QuakePicker quake={quake} setQuake={setQuake} level={level} setLevel={setLevel} />
           ) : (
-            <>
-              <input type="range" min={0} max={levels.length - 1} value={level} onChange={(e) => setLevel(+e.target.value)} className="w-full accent-amber-400" />
-              <div className="mt-2 rounded-lg border border-slate-700 bg-slate-800/40 p-3">
-                <div className="flex items-baseline justify-between">
-                  <span className="text-lg font-bold text-white">{lvl.name}</span>
-                  <span className="font-mono text-amber-300">{lvl.peak} mm/h peak</span>
-                </div>
-                <p className="mt-1 text-sm text-slate-300">{lvl.desc}</p>
-                <p className="mt-1 text-xs text-slate-400 italic">e.g. {lvl.example}</p>
-              </div>
-            </>
+            <TyphoonPicker typhoon={typhoon} setTyphoon={setTyphoon} level={level} setLevel={setLevel} />
           )}
         </Step>
 
@@ -143,7 +132,7 @@ export default function Menu({ onStart }) {
         </Step>
 
         <button
-          onClick={() => onStart({ cityType, disaster, level, startHour, seed, quake })}
+          onClick={() => onStart({ cityType, disaster, level, startHour, seed, quake, typhoon })}
           className="mt-auto rounded-lg bg-sky-500 py-3 text-base font-bold text-white shadow-lg shadow-sky-900/40 transition hover:bg-sky-400"
         >
           Generate city →

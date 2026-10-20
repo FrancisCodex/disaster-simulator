@@ -562,16 +562,41 @@ export const HISTORICAL_QUAKES = [
   { id: 'myanmar2025', year: 2025, name: 'Mandalay', place: 'Myanmar', city: 'Mandalay', M: 7.7, depth: 10, dist: 17, mech: 'strike', strike: 10, rupture: 'bilateral', deaths: '~3,800', desc: 'The Sagaing fault ruptured for ~450 km at supershear speed, passing right by Mandalay.' },
 ]
 
-// peak: rainfall rate at the height of the storm (mm/h). The storm ramps up
-// over the first hours, then keeps pulsing near that intensity until you end it.
-export const FLOOD_LEVELS = [
-  { peak: 3, name: 'Light rain', desc: 'Puddles. Storm drains cope easily.', example: 'An ordinary rainy day.' },
-  { peak: 8, name: 'Moderate rain', desc: 'Gutters run full. Low spots pond briefly.', example: 'Typical autumn storm.' },
-  { peak: 18, name: 'Heavy rain', desc: 'Drains near capacity; street flooding in depressions.', example: 'Monsoon downpour.' },
-  { peak: 30, name: 'Very heavy rain', desc: 'Drains overwhelmed, river rising fast toward its banks.', example: 'Tropical storm landfall.' },
-  { peak: 50, name: 'Torrential rain', desc: 'River overtops its banks. Low-lying districts flood metres deep.', example: '2009 Typhoon Ketsana (Ondoy), Manila — 455 mm in 24 h.' },
-  { peak: 80, name: 'Extreme rainfall', desc: 'Flash flooding everywhere. Basements and subways fill within an hour.', example: '2021 Henan, China — 201.9 mm in a single hour.' },
-  { peak: 120, name: 'Catastrophic deluge', desc: 'Beyond almost any recorded sustained rate. Whole valley floor inundated.', example: 'Beyond historical records.' },
+// Typhoons (see typhoonPhysics.js). wind: maximum sustained wind (km/h) as the
+// bulletin gives it, avg: its averaging period (10 min for PAGASA / JMA / HKO,
+// 1 min for JTWC / NHC). heading: direction of motion (° from north), speed:
+// km/h, dist: closest approach to the district (km), side: which side of the
+// track the district is on (the right is the windy side in the north),
+// landfall: hours before (−) or after (+) closest approach, null = stays at sea.
+// rainBoost: extra rain from the monsoon or mountains.
+export const TYPHOON_LEVELS = [
+  { name: 'Monsoon low', wind: 40, avg: 10, heading: 300, speed: 8, dist: 20, side: 'right', landfall: -6, lat: 15, rainBoost: 3.5, desc: 'A weak, slow low-pressure area pulling in the southwest monsoon. Little wind, but rain for a day and a half.', example: 'Habagat rains, as in Metro Manila in August 2012.' },
+  { name: 'Tropical depression', wind: 55, avg: 10, heading: 290, speed: 18, dist: 40, side: 'right', landfall: -4, lat: 14, rainBoost: 1.3, desc: 'Gusty rain bands. Drains near capacity, streets flood in low spots.', example: 'A typical PAGASA "TD" crossing Luzon.' },
+  { name: 'Tropical storm', wind: 85, avg: 10, heading: 290, speed: 20, dist: 35, side: 'right', landfall: -4, lat: 14, rainBoost: 1.3, desc: 'Gale-force winds and hours of heavy rain. The river rises toward its banks.', example: 'Signal No. 2 storms, several a year.' },
+  { name: 'Severe tropical storm', wind: 110, avg: 10, heading: 290, speed: 20, dist: 30, side: 'right', landfall: -3, lat: 14, rainBoost: 1.2, desc: 'Storm-force winds. Light roofs and trees start to fail; heavy rain bands every hour.', example: 'Signal No. 3.' },
+  { name: 'Typhoon', wind: 150, avg: 10, heading: 290, speed: 20, dist: 25, side: 'right', landfall: -2, lat: 14, desc: 'Typhoon-force winds in the eyewall, torrential rain, the river overtops.', example: 'Signal No. 4, a few times a year in the Philippines.' },
+  { name: 'Super typhoon', wind: 230, avg: 10, heading: 285, speed: 22, dist: 15, side: 'right', landfall: -1, lat: 12, desc: 'An intense, compact core. If the eye passes over, the wind dies, then returns from the other side.', example: 'Signal No. 5.' },
+  { name: 'Beyond records', wind: 320, avg: 10, heading: 280, speed: 12, dist: 8, side: 'right', landfall: -0.5, lat: 12, rainBoost: 1.3, desc: 'Stronger and slower than any typhoon on record at landfall.', example: 'Beyond Goni (2020) and Haiyan (2013).' },
+]
+
+// Historical reenactments. Intensity and pressure are the agency values near
+// closest approach (`avg` says whose: 10-min PAGASA/JMA/IMD or 1-min JTWC/NHC).
+// The track is simplified to a straight line at the storm's approximate
+// heading and speed, passing `city` at about `dist` km on the given `side`.
+// These are approximations for the game, not best-track data.
+export const HISTORICAL_TYPHOONS = [
+  { id: 'haiyan2013', year: 2013, name: 'Haiyan', local: 'Yolanda', place: 'Philippines', city: 'Tacloban', wind: 315, avg: 1, pc: 895, heading: 285, speed: 40, dist: 15, side: 'right', landfall: -0.3, lat: 11.2, deaths: '~6,300', desc: 'One of the strongest storms ever to make landfall, moving fast across the Leyte Gulf. Most deaths came from a 4–6 m storm surge funnelled into Tacloban (surge is simulated in a later phase).' },
+  { id: 'goni2020', year: 2020, name: 'Goni', local: 'Rolly', place: 'Philippines', city: 'Virac, Catanduanes', wind: 315, avg: 1, pc: 905, heading: 255, speed: 20, dist: 10, side: 'left', landfall: -0.2, lat: 13.6, rainBoost: 1.2, deaths: '~30', desc: 'The strongest landfall on record by 1-minute wind. A tiny, violent core; mass pre-emptive evacuation kept deaths low.' },
+  { id: 'rai2021', year: 2021, name: 'Rai', local: 'Odette', place: 'Philippines', city: 'Surigao City', wind: 195, avg: 10, pc: 915, heading: 280, speed: 25, dist: 25, side: 'left', landfall: -1, lat: 9.8, deaths: '~410', desc: 'A rare December super typhoon that intensified rapidly just before hitting Siargao, leaving little time to prepare.' },
+  { id: 'ketsana2009', year: 2009, name: 'Ketsana', local: 'Ondoy', place: 'Philippines', city: 'Marikina, Metro Manila', wind: 85, avg: 10, heading: 275, speed: 15, dist: 30, side: 'left', landfall: -3, lat: 14.6, rainBoost: 3.8, deaths: '~460', observed: '455 mm in 24 h at Science Garden, Quezon City', desc: 'Only a tropical storm, but it dragged in the monsoon: a month of rain in a day. The Marikina River rose ~6 m and flooded most of the city.' },
+  { id: 'mangkhut2018', year: 2018, name: 'Mangkhut', local: 'Ompong', place: 'Hong Kong', city: 'Hong Kong', wind: 175, avg: 10, pc: 955, heading: 290, speed: 30, dist: 100, side: 'right', landfall: 5, r34: 350, lat: 22.3, deaths: '0 in Hong Kong (134 overall)', desc: 'A huge storm passing 100 km south of Hong Kong. Heavy damage, but strict codes and warnings meant no deaths in the city.' },
+  { id: 'hagibis2019', year: 2019, name: 'Hagibis', place: 'Japan', city: 'Kawasaki (Tama River)', wind: 165, avg: 10, pc: 955, heading: 20, speed: 35, dist: 30, side: 'right', landfall: -2, r34: 400, lat: 35.5, rainBoost: 1.8, deaths: '~100', desc: 'A large storm with an enormous rain shield; record rain in the mountains (~922 mm in 24 h at Hakone) broke river levees across eastern Japan.' },
+  { id: 'nargis2008', year: 2008, name: 'Nargis', place: 'Myanmar', city: 'Bogale, Irrawaddy delta', wind: 215, avg: 1, pc: 962, heading: 70, speed: 15, dist: 15, side: 'right', landfall: -1, lat: 16.3, rainBoost: 1.2, deaths: '≥138,000', desc: 'Struck a low, densely farmed delta with no shelters and almost no warning. Nearly all deaths came from the 4 m storm surge (simulated in a later phase).' },
+  { id: 'katrina2005', year: 2005, name: 'Katrina', place: 'USA', city: 'New Orleans', wind: 205, avg: 1, pc: 920, heading: 5, speed: 20, dist: 40, side: 'left', landfall: -2, lat: 30.0, deaths: '~1,400', desc: 'The eye passed east of New Orleans. Wind damage was moderate; the storm surge broke the city’s flood walls.' },
+  { id: 'maria2017', year: 2017, name: 'Maria', place: 'Puerto Rico', city: 'San Juan', wind: 250, avg: 1, pc: 917, heading: 300, speed: 15, dist: 25, side: 'right', landfall: -3, lat: 18.4, rainBoost: 1.4, deaths: '~2,975 (excess deaths)', desc: 'A Category 4 crossing the whole island diagonally. The grid collapsed and most deaths came in the months without power.' },
+  { id: 'idai2019', year: 2019, name: 'Idai', place: 'Mozambique', city: 'Beira', wind: 195, avg: 1, pc: 950, heading: 270, speed: 10, dist: 10, side: 'right', landfall: -0.5, lat: -19.8, rainBoost: 1.5, deaths: '~1,300', desc: 'A southern-hemisphere cyclone (winds turn clockwise, the left side is the strong one). Surge, then river floods from rain over the interior.' },
+  { id: 'harvey2017', year: 2017, name: 'Harvey', place: 'USA', city: 'Houston', wind: 215, avg: 1, pc: 938, heading: 0, speed: 4, dist: 130, side: 'right', landfall: -24, lat: 29.8, rainBoost: 3, deaths: '~107', observed: 'Up to ~1,500 mm over four days', desc: 'Weakened over land, then stalled for days. Houston saw modest winds and the heaviest rainfall ever recorded in the USA.' },
+  { id: 'yagi2024', year: 2024, name: 'Yagi', local: 'Enteng', place: 'Vietnam', city: 'Hải Phòng', wind: 185, avg: 1, pc: 955, heading: 280, speed: 15, dist: 15, side: 'left', landfall: -0.5, lat: 20.9, rainBoost: 1.4, deaths: '~300 in Vietnam', desc: 'Crossed Hainan and the Gulf of Tonkin as a super typhoon. Millions of urban trees fell; floods and landslides followed inland.' },
 ]
 
 // ---------------------------------------------------------------- Prep tools
@@ -594,23 +619,23 @@ export const POND_DEPTH = 3.5
 
 export const UPGRADES = {
   floodWarning: {
-    name: 'Flood early-warning system',
-    desc: 'River gauges + sirens. Low-lying districts are evacuated as soon as the forecast turns dangerous.',
+    name: 'Typhoon early warning & pre-emptive evacuation',
+    desc: 'River gauges, sirens and a plan tied to the PAGASA wind signals: low-lying districts are evacuated as soon as Signal No. 3 is raised or the river nears its banks.',
     cost: () => 1.5,
-    disaster: 'flood',
+    disaster: 'typhoon',
   },
   drainage: {
     name: 'Storm-drain upgrade',
     desc: '+15 mm/h drainage capacity city-wide. Drains stop working when the river is above its banks.',
     cost: (city, lvl) => Math.round(city.urbanCells * 0.004 * (1 + lvl * 0.5) * 10) / 10,
     max: 2,
-    disaster: 'flood',
+    disaster: 'typhoon',
   },
   dredge: {
     name: 'River dredging & widening',
     desc: 'Deepens the river channel by 1.5 m, raising how much flow it can carry before overtopping.',
     cost: (city) => (city.type === 'rural' ? 12 : 20),
-    disaster: 'flood',
+    disaster: 'typhoon',
   },
   quakeWarning: {
     name: 'Earthquake early warning',

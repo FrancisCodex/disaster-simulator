@@ -1,26 +1,26 @@
 // 2-D flood hydraulics: the "local inertial" shallow-water scheme used by
 // LISFLOOD-FP (Bates et al., 2010). Mass-conserving, with Manning friction,
 // rainfall, infiltration, storm drains, pumps, an upstream river hydrograph
-// and a free-outflow downstream boundary.
+// and a free-outflow downstream boundary. Rain comes from a TyphoonSim: on the
+// district for the grid, and over the upstream catchment for the river.
 
 import { GRID, CELL, G, CELL_ROAD, CELL_RIVER, CELL_PARK, CELL_POND, PUMP_RATE } from './config.js'
-import { clamp, smoothstep } from './math.js'
+import { clamp } from './math.js'
 
-const CATCHMENT_M2 = 220e6 // upstream catchment draining through the city's river
+const CATCHMENT_M2 = 450e6 // upstream catchment draining through the city's river (Marikina: ~535 km²)
+const UPLAND_RAIN = 1.25 // hills upstream wring more rain out of the storm than the lowland city gets
 const BASE_FLOW = 110 // m³/s — a sizeable lowland river
 const RIVER_SLOPE = 0.001
 
 export class FloodSim {
-  constructor(city, { peak = 0, drainage = 20 } = {}) {
+  constructor(city, { storm = null, drainage = 20 } = {}) {
     const N = GRID
     this.city = city
     this.N = N
     this.dx = CELL
-    this.peak = peak // mm/h
-    // the most extreme storms cover the whole upstream basin
-    this.catchment = CATCHMENT_M2 * (1 + Math.max(0, (peak - 30) / 60))
+    this.storm = storm
+    this.catchment = CATCHMENT_M2
     this.drainage = drainage // mm/h
-    this.phase = Math.random() * 6
     this.zg = new Float32Array(N * N)
     this.h = new Float32Array(N * N)
     this.maxH = new Float32Array(N * N)
@@ -46,6 +46,8 @@ export class FloodSim {
     this.time = 0
     this.rain = 0
     this.cumRain = 0
+    this.basinRain = 0 // mm/h over the upstream catchment
+    this.cumBasin = 0
     this.rainLag = 0
     this.inflow = BASE_FLOW
     this.drainedVol = 0
@@ -72,12 +74,7 @@ export class FloodSim {
   }
 
   rainRate(t) {
-    if (!this.peak) return 0
-    const th = t / 3600
-    // builds over ~8 h, then keeps slowly intensifying (+2 %/h, capped at 130 %)
-    const ramp = (0.12 + 0.88 * smoothstep(0, 8, th)) * Math.min(1.3, 1 + Math.max(0, th - 8) * 0.02)
-    const pulse = 0.78 + 0.16 * Math.sin(th * 1.3 + this.phase) + 0.1 * Math.sin(th * 3.7 + this.phase * 2)
-    return Math.max(0, this.peak * ramp * pulse)
+    return this.storm ? this.storm.rainAt(t) : 0
   }
 
   stableDt() {
@@ -112,10 +109,13 @@ export class FloodSim {
     // storm drains back up when the river is near its banks
     const drainEff = clamp(-this.stage / 1.2, 0, 1)
     const drain = (this.drainage / 3.6e6) * dt * drainEff
-    // upstream hydrograph: lagged catchment runoff
+    // upstream hydrograph: lagged runoff of the rain falling on the catchment
+    const basin = this.raining && this.storm ? this.storm.catchmentAt(this.time) * UPLAND_RAIN : 0
+    this.basinRain = basin
+    this.cumBasin += (basin * dt) / 3600
     const tau = 2.5 * 3600
-    this.rainLag += ((rainMmH - this.rainLag) * dt) / tau
-    const runoffC = 0.25 + 0.55 * (this.cumRain / (this.cumRain + 100))
+    this.rainLag += ((basin - this.rainLag) * dt) / tau
+    const runoffC = 0.25 + 0.55 * (this.cumBasin / (this.cumBasin + 100))
     this.inflow = BASE_FLOW + (this.catchment * runoffC * this.rainLag) / 3.6e6
 
     // ---- momentum: x faces

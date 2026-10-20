@@ -6,9 +6,10 @@ import { useIsMobile } from './useIsMobile.js'
 import { RepoIcon } from './RepoCredit.jsx'
 import { fmtInt, fmtMoney } from '../engine/math.js'
 import { QuakePhysics } from './QuakeScenario.jsx'
+import { TyphoonForecast } from './TyphoonScenario.jsx'
 
 // tool groups shown for each scenario: the other disaster's tools are hidden
-const GROUPS = { flood: ['General', 'Build', 'Flood'], quake: ['General', 'Build', 'Quake'] }
+const GROUPS = { typhoon: ['General', 'Build', 'Flood'], quake: ['General', 'Build', 'Quake'] }
 
 function Swatch({ color, label }) {
   return (
@@ -29,7 +30,7 @@ function Legend() {
   )
 }
 
-const incoming = (s) => (s.settings.disaster === 'quake' ? `M${s.level.M.toFixed(1)} earthquake${s.level.title ? ` · ${s.level.title}` : ''}` : `${s.level.name} (${s.level.peak} mm/h)`)
+const incoming = (s) => (s.settings.disaster === 'quake' ? `M${s.level.M.toFixed(1)} earthquake${s.level.title ? ` · ${s.level.title}` : ''}` : `${s.level.title} · ${Math.round(s.level.forecast.peakKmh10)} km/h at the city`)
 
 /** Upgrades for this scenario only. */
 const upgradesFor = (disaster) => Object.entries(UPGRADES).filter(([, U]) => U.disaster === disaster)
@@ -61,6 +62,7 @@ function Overview({ s }) {
         </>
       ) : (
         <>
+          <TyphoonForecast sc={s.level} />
           <Row k="People in low-lying homes" v={fmtInt(p.lowLying)} accent={p.lowLying > 0 ? 'text-orange-300' : undefined} />
           <Row k="Storm drains" v={`${p.drainage} mm/h`} />
           <Row k="Flood walls" v={`${fmtInt(p.leveeM)} m`} />
