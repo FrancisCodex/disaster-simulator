@@ -230,7 +230,7 @@ function DesktopSim({ s, game }) {
       </div>
 
       {/* right: log + selection */}
-      <div className="pointer-events-auto absolute top-24 right-3 flex max-h-[calc(100vh-7rem)] w-80 flex-col gap-2">
+      <div className="pointer-events-auto absolute top-24 right-3 flex max-h-[calc(100vh-11rem)] w-80 flex-col gap-2">
         <div className="panel flex min-h-0 flex-col p-3">
           <div className="mb-1 text-[11px] tracking-wider text-slate-400 uppercase">Event log</div>
           <EventLog log={sim.log} />

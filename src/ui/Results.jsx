@@ -1,5 +1,7 @@
 import { useState } from 'react'
 import { fmtInt, fmtMoney } from '../engine/math.js'
+import { GitHubMark } from './RepoCredit.jsx'
+import { REPO_URL } from './links.js'
 
 const GRADE_TONE = { 'A+': 'text-emerald-300', A: 'text-emerald-300', B: 'text-lime-300', C: 'text-amber-300', D: 'text-orange-400', F: 'text-red-400' }
 const GRADE_TEXT = {
@@ -100,6 +102,11 @@ export default function Results({ s, game }) {
           Simulated outcome from simplified models — real events can turn out very differently. Not yet validated for real-world safety or planning decisions. · Made by{' '}
           <a href="https://github.com/FrancisCodex" target="_blank" rel="noopener noreferrer" className="text-sky-400 hover:text-sky-300">
             FrancisCodex
+          </a>{' '}
+          ·{' '}
+          <a href={REPO_URL} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-sky-400 hover:text-sky-300">
+            <GitHubMark className="h-3 w-3" />
+            Source on GitHub
           </a>
         </p>
       </div>

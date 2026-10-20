@@ -2,6 +2,8 @@ import { useState } from 'react'
 import { CITY_TYPES, QUAKE_LEVELS, FLOOD_LEVELS } from '../engine/config.js'
 import { START_TIMES } from '../engine/game.js'
 import { QuakePicker } from './QuakeScenario.jsx'
+import { GitHubMark } from './RepoCredit.jsx'
+import { REPO_URL } from './links.js'
 
 const CITY_META = {
   rural: { icon: '🏡', pop: '~1–2 thousand', density: 'Low' },
@@ -156,7 +158,12 @@ export default function Menu({ onStart }) {
           <a href="https://github.com/FrancisCodex" target="_blank" rel="noopener noreferrer" className="font-semibold text-sky-300 hover:text-sky-200">
             FrancisCodex
           </a>{' '}
-          · Open-source · runs entirely in your browser
+          ·{' '}
+          <a href={REPO_URL} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 font-semibold text-sky-300 hover:text-sky-200">
+            <GitHubMark className="h-3 w-3" />
+            Source on GitHub
+          </a>{' '}
+          · runs entirely in your browser
         </p>
       </div>
     </div>

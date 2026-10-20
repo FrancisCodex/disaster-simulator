@@ -3,6 +3,7 @@ import { TOOLS, BUILDING_TOOLS } from '../engine/game.js'
 import { UPGRADES, CONSTRUCTION } from '../engine/config.js'
 import { Row, BuildingPanel, ModelToggle, Section, Sheet } from './common.jsx'
 import { useIsMobile } from './useIsMobile.js'
+import { RepoIcon } from './RepoCredit.jsx'
 import { fmtInt, fmtMoney } from '../engine/math.js'
 import { QuakePhysics } from './QuakeScenario.jsx'
 
@@ -189,7 +190,7 @@ function DesktopPrepare({ s, game }) {
       </div>
 
       {/* right column */}
-      <div className="scroll-thin pointer-events-auto absolute top-24 right-3 flex max-h-[calc(100vh-8rem)] w-80 flex-col gap-2 overflow-y-auto">
+      <div className="scroll-thin pointer-events-auto absolute top-24 right-3 flex max-h-[calc(100vh-13rem)] w-80 flex-col gap-2 overflow-y-auto">
         <Section id="overview" title="City overview" summary={overviewSummary(s)}>
           <Overview s={s} />
         </Section>
@@ -200,8 +201,8 @@ function DesktopPrepare({ s, game }) {
         {!s.selected && s.hoverInfo && <BuildingPanel info={s.hoverInfo} title="Hover" />}
       </div>
 
-      {/* bottom bar */}
-      <div className="pointer-events-none absolute right-3 bottom-3 left-3 flex items-end justify-center gap-3">
+      {/* bottom bar (leaves the corner to the GitHub credit, an icon below 2xl) */}
+      <div className="pointer-events-none absolute right-14 bottom-3 left-3 flex items-end justify-center gap-3 2xl:right-3">
         <div className="panel pointer-events-auto flex items-center gap-3 px-4 py-2.5">
           <ToolStatus s={s} tool={tool} />
           <div className="h-8 w-px bg-slate-700" />
@@ -246,6 +247,7 @@ function MobilePrepare({ s, game }) {
             </div>
           </div>
         </div>
+        <RepoIcon className="h-9 w-9 shrink-0" />
         <button onClick={() => game.backToMenu()} className="panel pointer-events-auto shrink-0 px-3 py-2 text-sm text-slate-300" aria-label="Back to menu">
           ←
         </button>

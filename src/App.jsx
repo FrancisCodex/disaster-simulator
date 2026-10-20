@@ -5,6 +5,7 @@ import PrepareHUD from './ui/PrepareHUD.jsx'
 import SimHUD from './ui/SimHUD.jsx'
 import Results from './ui/Results.jsx'
 import { Notice } from './ui/common.jsx'
+import RepoCredit from './ui/RepoCredit.jsx'
 
 export default function App() {
   const mountRef = useRef(null)
@@ -42,6 +43,7 @@ export default function App() {
           {snap.phase === 'menu' && <Menu onStart={(settings) => game.newGame(settings)} />}
           {snap.phase === 'prepare' && <PrepareHUD s={snap} game={game} />}
           {(snap.phase === 'sim' || snap.phase === 'results') && <SimHUD s={snap} game={game} />}
+          <RepoCredit phase={snap.phase} />
           {snap.phase === 'results' && <Results key={snap.results.dead + snap.results.hours} s={snap} game={game} />}
           <Notice notice={snap.notice} />
         </>
