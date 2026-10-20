@@ -15,7 +15,7 @@ Everything runs client-side (React + Three.js). There is no server, no account a
    - **Metropolis:** ~15–20k people, mid-rise apartments and an office core, $350M.
    - **Megacity:** ~70k residents / 160k by day, dense towers, $1.2B.
 2. **Prepare:** use the tool palette and city-wide upgrades. The *risk map* colours buildings by how vulnerable they are to the chosen scenario. Click any building to see its structure, occupants and estimated damage probability.
-3. **Simulate:** time runs from 1 minute/s up to 1 hour/s. Rain intensifies every hour and the river rises; earthquakes bring aftershocks, fires, trapped victims and overwhelmed hospitals. Press **End disaster** whenever you like.
+3. **Simulate:** time runs from 1 minute/s up to 1 hour/s. Typhoons arrive band by band, wind signals go up and the river rises; earthquakes bring aftershocks, fires, trapped victims and overwhelmed hospitals. Press **End disaster** whenever you like.
 4. **Review:** you get a grade, causes of death, and lessons based on what actually happened in your run. Then **Retry with my preparations** to improve.
 
 Controls: left-drag pans, right-drag rotates, scroll zooms. `Space` pauses, `Esc` returns to the inspect tool.
@@ -44,7 +44,16 @@ The numbers are simplified from real engineering methods. They're meant to build
 - **After the shaking:** post-quake fires (fewer with gas shut-off valves, harder to fight when water mains break), trapped victims whose survival drops over time, search & rescue by fire stations, and hospital surge capacity. Hospitals can be knocked out themselves.
 - At M9.5+ ground failure and isolator displacement limits mean no preparation prevents catastrophe.
 
-### Heavy rain and flooding (3 → 120 mm/h peak)
+### Typhoons and tropical cyclones (monsoon low → beyond records)
+
+Pick an intensity tier, reenact one of 12 historical storms (Haiyan/Yolanda, Goni/Rolly, Rai/Odette, Ketsana/Ondoy, Mangkhut, Hagibis, Nargis, Katrina, Maria, Idai, Harvey, Yagi), or build your own from the numbers in a PAGASA or JTWC bulletin. A bulletin's storm position, plus the city's, gives the track. Before you start, a forecast panel shows the peak wind, gusts, wind signal, pressure and rain the city should expect.
+
+- **Storm:** a straight track with the bulletin's heading and forward speed passes the city at a chosen distance and side. Wind follows the Holland (1980/2010) profile, with the radius of maximum wind from Willoughby et al. (2006), pressure from Knaff & Zehr (2007) when none is given, and inland decay after landfall from Kaplan & DeMaria (1995). The storm's motion makes the right side windier in the north (the left in the south), and surface winds spiral inward. If the eye passes over, the wind dies, then returns from the opposite direction. 10-min (PAGASA/JMA) and 1-min (JTWC) winds and 3-s gusts are converted using WMO factors.
+- **Rain:** R-CLIPER (Tuleya et al. 2007) gives the average rain rate around the storm. The model adds a rain-free eye, an eyewall ring and rotating spiral rainbands, so the rain pulses as bands sweep over. The same field falls on the upstream catchment and drives the river's flood wave hours later. Slow storms and monsoon or mountain enhancement rain much more.
+- **Warnings:** PAGASA's Modified Tropical Cyclone Wind Signals (No. 1–5) are raised over the city with their lead times. The early-warning upgrade evacuates low-lying districts at Signal No. 3.
+- Wind damage, storm surge, lightning and tornadoes come in later phases: see [docs/typhoon-physics-research.md](docs/typhoon-physics-research.md).
+
+#### Flooding
 
 - **Hydraulics:** a 2D shallow-water solver (the *local inertial* scheme from LISFLOOD-FP, Bates et al. 2010) on a 100×100 grid of 10 m cells, with Manning friction. Water really flows downhill, pools in depressions and pours over banks.
 - **Hydrology:** rainfall, soil infiltration that decays as the ground saturates, storm drains that back up when the river is high, and an upstream catchment that sends a lagged flood wave down the river.
@@ -65,7 +74,7 @@ The numbers are simplified from real engineering methods. They're meant to build
 - Roads are real geometry with high-resolution markings, zebra crossings, stop lines, raised kerbs and sidewalks. Bridges span bank to bank on piers, and roads that reach the river without a bridge end at a "ROAD CLOSED" barricade.
 - Sedans, hatchbacks, SUVs, vans, buses and box trucks drive in lanes with car-following, and stop at red and amber signals and for anyone in the road. Pedestrians walk the sidewalks and cross only at crosswalks on a green. Street activity follows the time of day.
 - **Earthquake:** drivers stop, people run from buildings to open ground, and debris crushes cars (some catch fire) and strikes pedestrians. Rubble blocks streets.
-- **Flood:** cars stall, then float away with the current; people shelter in sturdy buildings or head for high ground, and anyone caught in deep, fast water is swept away.
+- **Typhoon floods:** cars stall, then float away with the current; people shelter in sturdy buildings or head for high ground, and anyone caught in deep, fast water is swept away.
 - Outdoor casualties count toward the results.
 
 ## Running locally
@@ -90,6 +99,8 @@ src/
   engine/
     config.js       all tunable data: structures, fragility, levels, costs
     cityGen.js      procedural terrain, river, roads, lots and buildings
+    typhoonPhysics.js storm track, wind, pressure, rain and wind signals
+    typhoonSim.js   the typhoon passing over the city, hour by hour
     floodSim.js     2D flood hydraulics
     floodImpact.js  evacuation, drowning, building failure, damage
     quakeSim.js     ground motion, fragility, aftershocks, fires, rescue
@@ -101,7 +112,8 @@ src/
 
 ## Ideas for the future
 
-- More disasters: tsunami, wildfire, tropical cyclone wind, landslide
+- Typhoon phases 2–5: wind damage, storm surge, debris, lightning and tornadoes
+- More disasters: tsunami, wildfire, landslide
 - Running the flood solver in a Web Worker so 1 h/s is never CPU-limited
 - Road network evacuation with traffic
 - Save/load and share city layouts

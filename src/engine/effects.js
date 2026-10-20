@@ -294,10 +294,12 @@ export class Rain {
     this.lines.frustumCulled = false
     scene.add(this.lines)
     this.count = 0
+    this.slant = [0, 0]
     for (let i = 0; i < max; i++) this.reset(i, 0, 0, true)
   }
 
   reset(i, cx, cz, randomY) {
+    const [sx, sz] = this.slant
     let x = cx + (Math.random() - 0.5) * 700
     let z = cz + (Math.random() - 0.5) * 700
     if (this.bounds) {
@@ -306,25 +308,43 @@ export class Rain {
     }
     const top = (this.ground ? this.ground(x, z) : 0) + 320
     const y = randomY ? top - Math.random() * 320 : top
-    this.pos.set([x, y, z, x + 0.4, y - 4, z], i * 6)
+    this.pos.set([x, y, z, x + 0.4 + sx * 4, y - 4, z + sz * 4], i * 6)
   }
 
-  /** ground(x,z): surface height so drops stop on roofs and roads; bounds: keep rain over the district only (cut-away view). */
-  update(dt, intensity, center, ground = null, bounds = 0) {
+  /**
+   * ground(x,z): surface height so drops stop on roofs and roads; bounds: keep rain over the district only (cut-away view);
+   * wind: [x, z] m/s — drops fall at ~9 m/s, so they slant by wind / 9.
+   */
+  update(dt, intensity, center, ground = null, bounds = 0, wind = [0, 0]) {
     this.ground = ground
     this.bounds = bounds
+    const sp = Math.hypot(wind[0], wind[1])
+    const k = sp > 0 ? Math.min(3, sp / 9) / sp : 0
+    this.slant = [wind[0] * k, wind[1] * k]
     const n = Math.min(this.max, Math.round(intensity * 140))
     this.count = n
     this.geo.setDrawRange(0, n * 2)
     this.lines.visible = n > 0
     if (!n) return
     const fall = 55 * dt
+    const dx = this.slant[0] * fall
+    const dz = this.slant[1] * fall
     const p = this.pos
     for (let i = 0; i < n; i++) {
-      p[i * 6 + 1] -= fall
-      p[i * 6 + 4] -= fall
-      const x = p[i * 6]
-      const z = p[i * 6 + 2]
+      const o = i * 6
+      p[o + 1] -= fall
+      p[o + 4] -= fall
+      // drops blown out of the 700 m box around the view re-enter on the upwind side
+      const wx = p[o] + dx - center.x
+      const wz = p[o + 2] + dz - center.z
+      const ox = dx + (wx > 350 ? -700 : wx < -350 ? 700 : 0)
+      const oz = dz + (wz > 350 ? -700 : wz < -350 ? 700 : 0)
+      p[o] += ox
+      p[o + 3] += ox
+      p[o + 2] += oz
+      p[o + 5] += oz
+      const x = p[o + 3]
+      const z = p[o + 5]
       const floor = ground ? ground(x, z) : center.y - 20
       if (p[i * 6 + 4] < floor) this.reset(i, center.x, center.z, false)
     }

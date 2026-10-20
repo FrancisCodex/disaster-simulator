@@ -32,7 +32,7 @@ export default function Results({ s, game }) {
         <div className="flex items-start justify-between gap-4">
           <div>
             <div className="text-xs tracking-wider text-slate-400 uppercase">Disaster report — {s.city.name}</div>
-            <h2 className="text-xl font-bold text-white sm:text-2xl">{d === 'quake' ? `M${s.level.M.toFixed(1)} earthquake${s.level.title ? ` · ${s.level.title}` : ''}` : s.level.name}</h2>
+            <h2 className="text-xl font-bold text-white sm:text-2xl">{d === 'quake' ? `M${s.level.M.toFixed(1)} earthquake${s.level.title ? ` · ${s.level.title}` : ''}` : s.level.title}</h2>
             <div className="text-sm text-slate-400">
               {s.city.typeName} · {r.hours.toFixed(1)} hours simulated · {fmtInt(r.pop)} people in the district
             </div>

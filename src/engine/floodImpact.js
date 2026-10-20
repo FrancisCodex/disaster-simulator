@@ -8,11 +8,11 @@ import { occupancyAt, idx } from './cityGen.js'
 import { clamp } from './math.js'
 
 export class FloodImpact {
-  constructor(city, sim, { warning = false, startHour = 8, levelIndex = 0, rng }) {
+  constructor(city, sim, { warning = false, startHour = 8, signal = () => 0, rng }) {
     this.city = city
     this.sim = sim
     this.warningSystem = warning
-    this.levelIndex = levelIndex
+    this.signal = signal // PAGASA wind signal in force over the city
     this.rng = rng
     this.warned = false
     this.warnTime = null
@@ -51,7 +51,6 @@ export class FloodImpact {
     const { city, sim, rng } = this
     const h = sim.h
     const zg = sim.zg
-    const hours = sim.time / 3600
 
     // ---------------- official warning
     if (!this.warned) {
@@ -60,13 +59,13 @@ export class FloodImpact {
         const s = this.st.get(b.id)
         if (s && s.dIn > 0.3) flooded++
       }
-      const early = this.warningSystem && ((this.levelIndex >= 2 && hours > 0.5) || sim.stage > -1.8)
+      const early = this.warningSystem && (this.signal() >= 3 || sim.stage > -1.8)
       const late = sim.stage > -0.2 || flooded > city.buildings.length * 0.03
       if (early || late) {
         this.warned = true
         this.warnTime = sim.time
         this.log(
-          early ? 'Flood warning issued by the early-warning system — evacuation of low-lying districts ordered.' : 'Emergency flood warning issued — evacuation ordered (late: flooding already under way).',
+          early ? 'Pre-emptive evacuation ordered under the typhoon plan: low-lying and riverside districts are moving to shelters.' : 'Emergency flood warning issued — evacuation ordered (late: flooding already under way).',
           'warn',
         )
       }
