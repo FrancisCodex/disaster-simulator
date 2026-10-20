@@ -1,6 +1,6 @@
 import { SPEEDS } from '../engine/config.js'
 import { useState } from 'react'
-import { Stat, BuildingPanel, ModelToggle, Sheet } from './common.jsx'
+import { Stat, BuildingPanel, Sheet } from './common.jsx'
 import { useIsMobile } from './useIsMobile.js'
 import { fmtInt, fmtMoney } from '../engine/math.js'
 
@@ -217,7 +217,6 @@ function DesktopSim({ s, game }) {
           <button onClick={() => game.toggleOverlay()} className={`rounded-md px-3 py-1.5 text-sm ${s.overlay ? 'bg-amber-500/25 text-amber-200 ring-1 ring-amber-400' : 'text-slate-300 hover:bg-slate-700/60'}`}>
             {quake ? 'Integrity view' : 'Flood depth view'}
           </button>
-          <ModelToggle s={s} game={game} />
         </div>
       </div>
 

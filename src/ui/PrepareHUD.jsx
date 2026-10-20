@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { TOOLS, BUILDING_TOOLS } from '../engine/game.js'
 import { UPGRADES, CONSTRUCTION } from '../engine/config.js'
-import { Row, BuildingPanel, ModelToggle, Section, Sheet } from './common.jsx'
+import { Row, BuildingPanel, Section, Sheet } from './common.jsx'
 import { useIsMobile } from './useIsMobile.js'
 import { RepoIcon } from './RepoCredit.jsx'
 import { fmtInt, fmtMoney } from '../engine/math.js'
@@ -209,7 +209,6 @@ function DesktopPrepare({ s, game }) {
           <button onClick={() => game.toggleOverlay()} className={`rounded-md px-3 py-1.5 text-sm whitespace-nowrap ${s.overlay ? 'bg-amber-500/25 text-amber-200 ring-1 ring-amber-400' : 'text-slate-300 hover:bg-slate-700/60'}`}>
             {disaster === 'quake' ? 'Seismic risk map' : 'Flood risk map'}
           </button>
-          <ModelToggle s={s} game={game} />
           <button onClick={() => game.newGame({ ...s.settings, seed: Math.floor(Math.random() * 999999) })} className="rounded-md px-3 py-1.5 text-sm whitespace-nowrap text-slate-300 hover:bg-slate-700/60">
             New map
           </button>
@@ -270,7 +269,6 @@ function MobilePrepare({ s, game }) {
         ) : sheet === 'more' ? (
           <Sheet title="More" onClose={() => setSheet(null)}>
             <div className="flex flex-wrap gap-2">
-              <ModelToggle s={s} game={game} />
               <button onClick={() => game.newGame({ ...s.settings, seed: Math.floor(Math.random() * 999999) })} className="rounded-md px-3 py-1.5 text-sm text-slate-300 hover:bg-slate-700/60">
                 New map
               </button>

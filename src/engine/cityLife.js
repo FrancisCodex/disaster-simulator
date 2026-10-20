@@ -18,7 +18,7 @@ import { clamp } from './math.js'
 import { vehicleGeometry, vehicleMaterial, VEHICLE_TYPES, VEHICLE_LENGTH, personGeometry, personMaterial } from './assets.js'
 import { KERB } from './roads.js'
 import { analyzeRoads, AVENUE, JUNCTION, STREET, END, BEND } from './roadNet.js'
-import { vehicleModelMaterial, personModelMaterial } from './quaternius.js'
+import { vehicleModelMaterial } from './quaternius.js'
 import { mmiFromPga } from './quakePhysics.js'
 
 /** Fear (0..1) from felt shaking (surface PGA in g): none at intensity IV (felt outdoors by few), ¼ at V, ½ at VI, ¾ at VII, full at VIII. */
@@ -141,7 +141,7 @@ export class CityLife {
     // ---------------- vehicles
     this.cars = []
     const K = this.models
-    // detailed models (Quaternius)
+    // detailed vehicles (Quaternius)
     const mix = K
       ? city.type === 'rural'
         ? { sedan: 0.32, hatch: 0.24, suv: 0.3, sports: 0.06, police: 0.04, ambulance: 0.02, schoolbus: 0.02 }
@@ -264,39 +264,34 @@ export class CityLife {
         plan: null,
       })
     }
-    // one instanced mesh per character model, each with its own walk attribute
+    // people are always the built-in figures: one instanced mesh with its own walk attribute
     this.pedMeshes = []
-    const models = K ? K.people : [null]
-    models.forEach((model, mIdx) => {
-      const list = this.peds.filter((p, i) => i % models.length === mIdx)
-      if (!list.length) return
-      const n = list.length
-      const pg = model ? model.geometry.clone() : this.personGeo.clone()
+    if (this.peds.length) {
+      const n = this.peds.length
+      const pg = this.personGeo.clone()
       const walk = new THREE.InstancedBufferAttribute(new Float32Array(n * 2), 2).setUsage(THREE.DynamicDrawUsage)
       pg.setAttribute('aWalk', walk)
-      if (!model) {
-        const pants = new Float32Array(n * 3)
-        const skin = new Float32Array(n * 3)
-        const hair = new Float32Array(n * 3)
-        for (let i = 0; i < n; i++) {
-          _c.set(pick(PANTS, rng)).toArray(pants, i * 3)
-          _c.set(pick(SKIN, rng)).toArray(skin, i * 3)
-          _c.set(pick(HAIR, rng)).toArray(hair, i * 3)
-        }
-        pg.setAttribute('aPants', new THREE.InstancedBufferAttribute(pants, 3))
-        pg.setAttribute('aSkin', new THREE.InstancedBufferAttribute(skin, 3))
-        pg.setAttribute('aHair', new THREE.InstancedBufferAttribute(hair, 3))
+      const pants = new Float32Array(n * 3)
+      const skin = new Float32Array(n * 3)
+      const hair = new Float32Array(n * 3)
+      for (let i = 0; i < n; i++) {
+        _c.set(pick(PANTS, rng)).toArray(pants, i * 3)
+        _c.set(pick(SKIN, rng)).toArray(skin, i * 3)
+        _c.set(pick(HAIR, rng)).toArray(hair, i * 3)
       }
-      const mesh = new THREE.InstancedMesh(pg, model ? personModelMaterial() : personMaterial(), n)
+      pg.setAttribute('aPants', new THREE.InstancedBufferAttribute(pants, 3))
+      pg.setAttribute('aSkin', new THREE.InstancedBufferAttribute(skin, 3))
+      pg.setAttribute('aHair', new THREE.InstancedBufferAttribute(hair, 3))
+      const mesh = new THREE.InstancedMesh(pg, personMaterial(), n)
       mesh.castShadow = false // shadows of 1.7 m figures are invisible from city height
-      list.forEach((p, i) => {
-        p.pm = this.pedMeshes.length
+      this.peds.forEach((p, i) => {
+        p.pm = 0
         p.mi = i
-        mesh.setColorAt(i, model ? _c.setScalar(1) : _c.set(p.color))
+        mesh.setColorAt(i, _c.set(p.color))
       })
       this.pedMeshes.push({ mesh, walk })
       this.group.add(mesh)
-    })
+    }
 
     this.buildStreetLights()
     this.buildSignals()

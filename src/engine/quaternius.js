@@ -1,4 +1,4 @@
-// Loads the CC0 Quaternius vehicles and people (https://quaternius.com),
+// Loads the CC0 Quaternius vehicles (https://quaternius.com),
 // pre-converted by scripts/convert-quaternius.mjs into compact binaries.
 import * as THREE from 'three'
 
@@ -23,7 +23,7 @@ async function fetchModel(entry) {
 }
 
 let cache = null
-/** Resolves to { cars: {name: {geometry, length, paint}}, people: [{geometry, name}] }, or null. */
+/** Resolves to { cars: {name: {geometry, length, paint}} }, or null. */
 export function loadModels() {
   if (!cache)
     cache = (async () => {
@@ -36,10 +36,9 @@ export function loadModels() {
           cars[e.name] = { geometry: await fetchModel(e), length: e.length, paint: e.paint }
         }),
       )
-      const people = await Promise.all(manifest.people.map(async (e) => ({ name: e.name, geometry: await fetchModel(e) })))
-      return { cars, people }
+      return { cars }
     })().catch((e) => {
-      console.warn('Detailed models unavailable, using built-in models.', e)
+      console.warn('Detailed vehicles unavailable, using built-in ones.', e)
       return null
     })
   return cache
@@ -58,36 +57,6 @@ export function vehicleModelMaterial(envMap) {
         vColor.rgb = aPaint > 0.5 ? instanceColor.rgb : color.rgb * mix(0.35, 1.0, wreck);
       #endif`,
     )
-  }
-  return m
-}
-
-/** Vertex-coloured people whose legs and arms swing about hip/shoulder pivots (aWalk = phase, stride). */
-export function personModelMaterial() {
-  const m = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.75 })
-  m.onBeforeCompile = (sh) => {
-    sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', '#include <common>\nattribute float aPart;\nattribute vec3 aPivot;\nattribute vec2 aWalk;')
-      .replace(
-        '#include <begin_vertex>',
-        `#include <begin_vertex>
-        {
-          float sw = sin(aWalk.x) * aWalk.y;
-          float ang = aPart == 3.0 ? sw : aPart == 4.0 ? -sw : aPart == 5.0 ? -sw * 0.8 : aPart == 6.0 ? sw * 0.8 : 0.0;
-          if (ang != 0.0) {
-            float c = cos(ang); float s = sin(ang);
-            vec3 p = transformed - aPivot;
-            transformed = vec3(p.x, p.y * c - p.z * s, p.y * s + p.z * c) + aPivot;
-          }
-        }`,
-      )
-      .replace(
-        '#include <color_vertex>',
-        `#include <color_vertex>
-        #ifdef USE_INSTANCING_COLOR
-          vColor.rgb = color.rgb * instanceColor.rgb;
-        #endif`,
-      )
   }
   return m
 }

@@ -143,11 +143,10 @@ export class World {
     this.impactAcc = new Map()
     this.facadeKills = new Map() // building id → people in the street killed by its facade
     this.subsurface = new Subsurface(this)
-    // CC0 Quaternius vehicles and people stream in; built-in models are used until then
+    // CC0 Quaternius vehicles stream in; built-in ones are used until then
     loadModels().then((m) => {
       if (!m) return
-      this.modelAssets = m
-      if (this.useModels !== false) this.life.models = m
+      this.life.models = m
       this.onAssetsLoaded?.()
     })
     // the district is always shown as a cut-away block; the generated landscape

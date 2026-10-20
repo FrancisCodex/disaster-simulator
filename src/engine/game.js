@@ -142,16 +142,11 @@ export class Game {
     this.world.onImpact = (bid, e) => this.buildingHit(bid, e)
     this.world.onStreetHit = (hit) => this.streetHit(hit)
     this.world.onAssetsLoaded = () => {
-      // swap in the detailed models, but never in the middle of a disaster
+      // swap in the detailed vehicles, but never in the middle of a disaster
       if (!this.city || this.phase === 'sim' || this.phase === 'results') return
       this.world.life.build(this.city, this.phase === 'menu' ? 17.5 : this.settings.startHour)
     }
     this.bindInput()
-    try {
-      this.world.useModels = localStorage.getItem('metrorisk.models') !== 'simple'
-    } catch {
-      /* storage unavailable: keep the default */
-    }
     this.loadDemo()
     this.running = true
     const loop = () => {
@@ -251,20 +246,6 @@ export class Game {
       this.quakeEvCache = { key, ev: withGeometry({ ...ev, az }) }
     }
     return this.quakeEvCache.ev
-  }
-
-  /** Vehicles & people: detailed Quaternius models or the built-in procedural ones. */
-  setModelStyle(detailed) {
-    this.world.useModels = detailed
-    this.world.life.models = detailed ? (this.world.modelAssets ?? null) : null
-    try {
-      localStorage.setItem('metrorisk.models', detailed ? 'detailed' : 'simple')
-    } catch {
-      /* not persisted */
-    }
-    if (this.city && this.phase !== 'sim' && this.phase !== 'results') this.world.life.build(this.city, this.phase === 'menu' ? 17.5 : this.settings.startHour)
-    else this.notify('Model style will apply to the next city.')
-    this.emit()
   }
 
   setShowWorld(v) {
@@ -1535,8 +1516,6 @@ export class Game {
       version: this.version,
       notice: this.notice && performance.now() - this.notice.t < 4500 ? this.notice : null,
       showWorld: this.world.showWorld,
-      detailedModels: this.world.useModels !== false,
-      modelsReady: !!this.world.modelAssets,
       tool: this.tool,
       overlay: this.overlay,
     }
