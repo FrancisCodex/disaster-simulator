@@ -4,6 +4,7 @@ import { Stat, BuildingPanel, Sheet } from './common.jsx'
 import { useIsMobile } from './useIsMobile.js'
 import { fmtInt, fmtMoney } from '../engine/math.js'
 import { SignalChip } from './TyphoonScenario.jsx'
+import LensPanel from './LensPanel.jsx'
 
 /** How the people outside are reacting: calm → frightened → fleeing → panicking. */
 function PanicBar({ p }) {
@@ -263,6 +264,11 @@ function DesktopSim({ s, game }) {
   const sim = s.sim
   const quake = sim.quake
   const done = s.phase === 'results'
+  const [lenses, setLenses] = useState(false)
+  const openLenses = () => {
+    if (!lenses && (sim.lens ?? 'city') === 'city') game.setLens('flood')
+    setLenses(!lenses)
+  }
   return (
     <>
       {/* clock & controls */}
@@ -296,11 +302,23 @@ function DesktopSim({ s, game }) {
               </button>
             </>
           )}
-          <button onClick={() => game.toggleOverlay()} className={`rounded-md px-3 py-1.5 text-sm ${s.overlay ? 'bg-amber-500/25 text-amber-200 ring-1 ring-amber-400' : 'text-slate-300 hover:bg-slate-700/60'}`}>
-            {quake ? 'Integrity view' : 'Flood depth view'}
-          </button>
+          {quake ? (
+            <button onClick={() => game.toggleOverlay()} className={`rounded-md px-3 py-1.5 text-sm ${s.overlay ? 'bg-amber-500/25 text-amber-200 ring-1 ring-amber-400' : 'text-slate-300 hover:bg-slate-700/60'}`}>
+              Integrity view
+            </button>
+          ) : (
+            <button onClick={openLenses} className={`rounded-md px-3 py-1.5 text-sm ${lenses || s.overlay ? 'bg-sky-500/25 text-sky-100 ring-1 ring-sky-400' : 'text-slate-300 hover:bg-slate-700/60'}`}>
+              🔍 Lenses
+            </button>
+          )}
         </div>
       </div>
+
+      {lenses && !quake && (
+        <div className="scroll-thin pointer-events-auto absolute top-24 left-[17.5rem] max-h-[calc(100vh-8rem)] w-72 overflow-y-auto">
+          <LensPanel s={s} game={game} onClose={() => setLenses(false)} />
+        </div>
+      )}
 
       {/* left: live stats */}
       <div className="pointer-events-auto absolute top-24 left-3 flex w-64 flex-col gap-2">
@@ -336,7 +354,7 @@ function Mini({ label, value, tone = 'text-white' }) {
 
 /** Phone layout: clock and controls on top, the key numbers under them, details, log and the selected building in sheets. */
 function MobileSim({ s, game }) {
-  const [sheet, setSheet] = useState(null) // 'details' | 'log'
+  const [sheet, setSheet] = useState(null) // 'details' | 'log' | 'lens'
   const sim = s.sim
   const T = sim.totals
   const quake = sim.quake
@@ -391,6 +409,10 @@ function MobileSim({ s, game }) {
           <Sheet title="Event log" onClose={() => setSheet(null)}>
             <EventLog log={sim.log} className="" />
           </Sheet>
+        ) : sheet === 'lens' ? (
+          <div className="scroll-thin pointer-events-auto max-h-[55vh] overflow-y-auto">
+            <LensPanel s={s} game={game} onClose={() => setSheet(null)} />
+          </div>
         ) : null}
         <div className="panel pointer-events-auto flex items-center gap-1 px-2 py-1.5">
           <button onClick={() => open('details')} className={tab('details')}>
@@ -399,8 +421,15 @@ function MobileSim({ s, game }) {
           <button onClick={() => open('log')} className={tab('log')}>
             Log
           </button>
-          <button onClick={() => game.toggleOverlay()} className={`rounded-md px-2.5 py-1.5 text-[13px] whitespace-nowrap ${s.overlay ? 'bg-amber-500/25 text-amber-200 ring-1 ring-amber-400' : 'text-slate-300'}`}>
-            {quake ? 'Integrity' : 'Depth'}
+          <button
+            onClick={() => {
+              if (quake) return game.toggleOverlay()
+              if (sheet !== 'lens' && (sim.lens ?? 'city') === 'city') game.setLens('flood')
+              open('lens')
+            }}
+            className={`rounded-md px-2.5 py-1.5 text-[13px] whitespace-nowrap ${s.overlay ? 'bg-amber-500/25 text-amber-200 ring-1 ring-amber-400' : 'text-slate-300'}`}
+          >
+            {quake ? 'Integrity' : 'Lenses'}
           </button>
           <span className="ml-auto text-[11px] text-slate-500">Tap a building</span>
         </div>

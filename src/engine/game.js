@@ -23,11 +23,11 @@ import {
   DAMAGE_STATES,
   VARIANT_NAMES,
 } from './config.js'
-import { generateCity, addBuilding, idx, occupancyAt, cityStats } from './cityGen.js'
+import { generateCity, addBuilding, idx, occupancyAt, cityStats, cellToWorld } from './cityGen.js'
 import { Rng, clamp, smoothstep } from './math.js'
 import { World, sheddingFacade } from './world.js'
 import { FloodSim, forecastRiverPeak } from './floodSim.js'
-import { floodMap, DEPTH_BANDS, depthBand } from './floodMap.js'
+import { floodMap, depthColor, LENS_GREY } from './floodMap.js'
 import { FloodImpact } from './floodImpact.js'
 import { TyphoonSim } from './typhoonSim.js'
 import { buildStorm, forecastSummary, catchmentRain } from './typhoonPhysics.js'
@@ -240,6 +240,9 @@ export class Game {
     this.selected = null
     this.overlay = false
     this.riskLayer ??= 'flood'
+    this.lens = 'city'
+    this.lensStats = null
+    this.world.setLabels([])
     this.floodLevel = null
     this.log = []
     this.results = null
@@ -323,6 +326,8 @@ export class Game {
   }
 
   toggleOverlay() {
+    // during a typhoon the overlay is the flood depth lens
+    if (this.impact && (this.phase === 'sim' || this.phase === 'results')) return this.setLens(this.lens === 'flood' ? 'city' : 'flood')
     this.overlay = !this.overlay
     this.applyColorMode()
     this.emit()
@@ -773,7 +778,7 @@ export class Game {
     // the land flood map belongs to the typhoon risk map, flood layer, before the storm
     const landMap = this.phase === 'prepare' && this.overlay && settings?.disaster === 'typhoon' && this.riskLayer === 'flood'
     this.floodMapData = landMap ? this.computeFloodMap() : null
-    this.world.setFloodMap(this.floodMapData)
+    if (this.phase === 'prepare') this.world.setFloodMap(this.floodMapData)
     if (this.phase === 'prepare' && BUILDING_TOOLS.includes(this.tool)) {
       const tool = this.tool
       this.world.setColorFn((b) => (this.checkTool(tool, b) === null ? '#22c55e' : hasMeasure(tool, b) ? '#38bdf8' : '#3b4252'))
@@ -790,11 +795,11 @@ export class Game {
           return heat(r.pComplete * 0.6 + r.pCollapse * 3)
         })
       } else if (landMap) {
-        // buildings the water gets into, in the same colours as the land; dry ones keep their own
+        // the city greyed out; buildings the water gets into in the same colours as the land
         const M = this.floodMapData
         this.world.setColorFn((b) => {
-          const d = this.waterInside(b, M)
-          return d > 0.05 ? `rgb(${DEPTH_BANDS[depthBand(d)].color.join(',')})` : null
+          const c = depthColor(this.waterInside(b, M))
+          return c ? `rgb(${c.join(',')})` : LENS_GREY
         })
       } else {
         // wind layer: the roof or structure the forecast gusts can take
@@ -814,13 +819,107 @@ export class Game {
         return heat(Math.max(s.D / 0.9, s.ds >= 3 ? 0.6 : 0))
       })
     } else if (this.impact) {
-      this.world.setColorFn((b) => {
-        const s = this.impact.st.get(b.id)
-        if (!s) return null
-        if (s.collapsed) return '#7f1d1d'
-        return heat(clamp(s.maxIn / 2.5, 0, 1))
-      })
+      const im = this.impact
+      const W = this.windDmg
+      if (this.lens === 'flood') {
+        // grey city; water inside a building in the depth colours
+        this.world.setColorFn((b) => {
+          const s = im.st.get(b.id)
+          if (!s) return LENS_GREY
+          if (s.collapsed) return '#5b1a1a'
+          const c = depthColor(s.dIn)
+          return c ? `rgb(${c.join(',')})` : LENS_GREY
+        })
+      } else if (this.lens === 'power') {
+        this.world.setColorFn((b) => {
+          if (im.st.get(b.id)?.collapsed) return '#5b1a1a'
+          if (b.type === 'hospital' || b.type === 'fire') return '#34d399' // on their own generators
+          return W?.powered(b.x, b.y) ? '#facc15' : '#334155'
+        })
+      } else {
+        // damage: the worse of flood damage and what the wind did
+        this.world.setColorFn((b) => {
+          const s = im.st.get(b.id)
+          if (!s) return null
+          if (s.collapsed) return '#7f1d1d'
+          const w = W?.st.get(b.id)
+          const wind = !w ? 0 : w.roof ? 0.75 : w.cover ? 0.45 : w.glass ? 0.25 : 0
+          return heat(Math.max(clamp(s.maxIn / 2.5, 0, 1), wind))
+        })
+      }
     }
+  }
+
+  /** Lens on the city during a typhoon: 'city' (plain), 'flood' (depth), 'damage', 'power'. */
+  setLens(lens) {
+    this.lens = lens
+    this.overlay = lens !== 'city'
+    this.lensT = -1
+    this.applyColorMode()
+    this.updateLens(0)
+    this.emit()
+  }
+
+  /** Repaint the live depth layer and name tags, and recount the lens numbers (a few times a second). */
+  updateLens(dt) {
+    if (!this.flood || (this.phase !== 'sim' && this.phase !== 'results')) return
+    this.lensT -= dt
+    if (this.lensT > 0) return
+    this.lensT = 0.3
+    const f = this.flood
+    const { city } = this
+    this.world.setFloodMap(this.lens === 'flood' ? { depth: f.h, zg: f.zg } : null)
+    this.world.setLabels(this.lens === 'city' ? [] : this.facilityLabels())
+    let land = 0
+    let wet = 0
+    let deep = 0
+    let roads = 0
+    let roadsCut = 0
+    for (let k = 0; k < GRID * GRID; k++) {
+      if (city.cellType[k] === CELL_RIVER) continue
+      land++
+      const h = f.h[k]
+      if (h > 0.1) wet++
+      if (h > 0.6) deep++
+      if (city.cellType[k] === CELL_ROAD) {
+        roads++
+        if (h > 0.3) roadsCut++
+      }
+    }
+    let cutOff = 0
+    for (const b of city.buildings) {
+      const s = this.impact.st.get(b.id)
+      if (s && !s.collapsed && s.dOut > 0.5) cutOff += s.present
+    }
+    this.lensStats = { flooded: wet / land, deep: deep / land, roadsCut: roads ? roadsCut / roads : 0, cutOff, noPower: 1 - (this.windDmg?.poweredShare() ?? 1) }
+  }
+
+  /** Tags for the places a city needs in a flood, with how they are doing. */
+  facilityLabels() {
+    const KINDS = { hospital: ['Hospital', '#10b981'], fire: ['Fire station', '#f97316'], shelter: ['Shelter', '#14b8a6'], school: ['School', '#3b82f6'], civic: ['City hall', '#8b5cf6'] }
+    const count = {}
+    const out = []
+    for (const b of this.city.buildings) {
+      const K = KINDS[b.type]
+      const s = K && this.impact.st.get(b.id)
+      if (!s) continue
+      const n = (count[b.type] = (count[b.type] || 0) + 1)
+      let badge = 'Dry'
+      let tone = 'good'
+      if (s.collapsed) [badge, tone] = ['Destroyed', 'bad']
+      else if (s.dIn > 0.05) [badge, tone] = [`Flooded ${s.dIn.toFixed(1)} m`, 'bad']
+      else if (s.dOut > 0.1) [badge, tone] = [`Cut off · ${s.dOut.toFixed(1)} m outside`, 'warn']
+      else if (this.windDmg?.st.get(b.id)?.roof) [badge, tone] = ['Roof torn off', 'warn']
+      if (b.type === 'hospital' && s.offline && !s.collapsed) badge += ' · closed'
+      out.push({ key: `b${b.id}`, x: b.cx, y: b.base + b.elevated + b.height + 3, z: b.cz, name: `${K[0]} #${n}`, dot: K[1], badge, tone })
+    }
+    this.flood.pumps.forEach((p, q) => {
+      const x = cellToWorld(p.i)
+      const z = cellToWorld(p.j)
+      const [badge, tone] = p.failed ? ['Flooded · stopped', 'bad'] : p.unpowered ? ['No power · stopped', 'bad'] : ['Pumping', 'good']
+      out.push({ key: `p${q}`, x, y: this.world.groundAt(x, z) + 6, z, name: `Pump station #${q + 1}`, dot: '#0ea5e9', badge, tone })
+    })
+    return out
   }
 
   /** Forecast peak of the river for this scenario (cached until the scenario or the channel changes). */
@@ -982,6 +1081,7 @@ export class Game {
         this.emit()
       }
     }
+    this.updateLens(dt)
     if (this.phase === 'sim' || this.phase === 'results') {
       const hour = this.settings.startHour + this.simTime / 3600
       const live = this.phase === 'sim' && this.typhoon
@@ -1402,6 +1502,8 @@ export class Game {
 
   backToMenu() {
     this.phase = 'menu'
+    this.world.setFloodMap(null)
+    this.world.setLabels([])
     this.flood = this.quake = this.impact = this.shadow = this.typhoon = this.windDmg = null
     this.results = null
     this.loadDemo()
@@ -1818,6 +1920,19 @@ export class Game {
         s.sim.typhoon = { ...ty.now, signal: ty.signal, peak: { ...ty.peak }, passed: !!ty.flags.passed }
         const W = this.windDmg
         s.sim.wind = { ...W.stats, power: W.poweredShare(), gridUp: W.gridUp, pumpsOff: this.flood.pumps.filter((p) => p.unpowered).length }
+        s.sim.lens = this.lens
+        s.sim.lensStats = this.lensStats
+        // the ground under the cursor
+        const h = this.hover && { i: clamp(Math.floor(this.hover.i), 0, GRID - 1), j: clamp(Math.floor(this.hover.j), 0, GRID - 1) }
+        if (h) {
+          const f = this.flood
+          const k = idx(h.i, h.j)
+          const bid = this.city.buildingAt[k]
+          const b = bid >= 0 ? this.city.byId.get(bid) : null
+          const bridge = !!this.city.bridge[k]
+          const kind = bridge ? 'Bridge' : this.city.cellType[k] === CELL_RIVER ? 'River' : b ? (VARIANT_NAMES[b.variant] ?? BUILDING_TYPES[b.type].name) : this.city.cellType[k] === CELL_ROAD ? 'Street' : this.city.cellType[k] === CELL_PARK ? 'Park' : 'Open ground'
+          s.sim.lensCell = { i: h.i, j: h.j, kind, ground: this.city.z[k] - this.city.bankZ[h.j], depth: f.h[k], speed: f.velocityAt(h.i, h.j), powered: b && (b.type === 'hospital' || b.type === 'fire') ? 'Generator' : W.powered(h.i, h.j) ? 'On' : 'Off', inside: b ? this.impact.st.get(b.id)?.dIn ?? 0 : null }
+        }
       }
       if (this.quake) {
         const q = this.quake

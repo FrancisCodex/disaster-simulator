@@ -12,15 +12,18 @@
 
 import { GRID, CELL_RIVER } from './config.js'
 
-// display bands (m): shallow, wading-dangerous, deadly for people, above a storey
+// Display bands (m), by what the water stops: below 0.1 m it is just wet;
+// at 0.3 m cars float off; at 0.6 m an adult can no longer wade (and less in a
+// current); above 1.2 m it is over a child's head and ground floors fill.
+export const DEPTH_MIN = 0.1
 export const DEPTH_BANDS = [
-  { max: 0.3, label: '< 0.3 m', note: 'Streets wet, kerbs covered', color: [125, 211, 252] },
-  { max: 0.8, label: '0.3–0.8 m', note: 'Cars float, wading is dangerous', color: [56, 152, 236] },
-  { max: 1.5, label: '0.8–1.5 m', note: 'Ground floors flooded', color: [30, 90, 200] },
-  { max: 3, label: '1.5–3 m', note: 'Deadly: low-rise homes fill up', color: [76, 40, 170] },
-  { max: Infinity, label: '> 3 m', note: 'Above the first storey', color: [150, 20, 110] },
+  { min: 0.1, max: 0.3, label: '0.1–0.3 m', note: 'Kerbs and pavements under water', color: [242, 206, 88] },
+  { min: 0.3, max: 0.6, label: '0.3–0.6 m', note: 'Cars float off; currents knock people down', color: [238, 145, 60] },
+  { min: 0.6, max: 1.2, label: '0.6–1.2 m', note: 'Wading is deadly; ground floors flood', color: [214, 62, 50] },
+  { min: 1.2, max: Infinity, label: '1.2 m +', note: "Over a child's head; low-rise homes fill", color: [112, 50, 160] },
 ]
-export const depthBand = (d) => DEPTH_BANDS.findIndex((b) => d < b.max)
+/** Band index for a depth, or −1 below DEPTH_MIN. */
+export const depthBand = (d) => (d < DEPTH_MIN ? -1 : DEPTH_BANDS.findIndex((b) => d < b.max))
 
 /** Ground the water has to get over: the terrain plus any flood wall on it. */
 const top = (city, k) => city.z[k] + city.levee[k]
@@ -156,3 +159,11 @@ export function floodMap(city, level, rainMm) {
   }
   return { level, depth, source, areaHa: (cells * 100) / 1e4, maxDepth: max }
 }
+
+/** Band colour [r, g, b] for a depth, or null when it is too shallow to show. */
+export function depthColor(d) {
+  const b = depthBand(d)
+  return b < 0 ? null : DEPTH_BANDS[b].color
+}
+// the greyed-out city under a depth lens
+export const LENS_GREY = '#d3d7dc'

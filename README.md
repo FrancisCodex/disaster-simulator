@@ -62,6 +62,12 @@ Pick an intensity tier, reenact one of 12 historical storms (Haiyan/Yolanda, Gon
   - The river level starts at the forecast peak for the chosen storm. The forecast replays the solver's own upstream hydrograph and converts peak inflow to a level from full solver runs. A slider tries any other level.
   - Water spreads from the river only to low ground it can reach, so flood walls keep it out and gaps in them show. Hollows also fill with rain.
   - Hovering shows the depth and the ground height relative to the riverbank. Totals give flooded area, buildings flooded inside and the people in them.
+- **Lenses during the storm:** grey the city out and paint one measure over it.
+  - **Flood depth:** live standing water on every cell, banded by what it stops: 0.1 m kerbs, 0.3 m cars float, 0.6 m wading turns deadly, 1.2 m+ over a child's head. Buildings show the water inside them.
+  - **Damage:** the worse of flood and wind damage.
+  - **Power:** powered, on a generator, or blacked out.
+  - Hospitals, fire stations, shelters, schools, the city hall and pump stations carry name tags with their status, such as "Flooded 1.3 m", "Cut off", "Roof torn off" or "No power".
+  - City vitals: share of the city flooded, streets impassable, people cut off by water, homes without power. The panel also reads out the ground under the cursor: height, water depth, current and power.
 - **What you see:**
   - The storm's cloud deck darkens and turns overhead as the typhoon nears, and opens to the sky in the eye. Low scud races past under it.
   - Trees bend downwind and pump as gusts roll through the canopy.

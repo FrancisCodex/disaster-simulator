@@ -7,7 +7,7 @@ import { idx, cellToWorld } from './cityGen.js'
 import { makeNoise2D, clamp, lerp, smoothstep, normCdf } from './math.js'
 import { Particles, Debris, Rain } from './effects.js'
 import { StormClouds, WindStreaks } from './weather.js'
-import { DEPTH_BANDS, depthBand } from './floodMap.js'
+import { depthColor } from './floodMap.js'
 import { makeWaterMaterial, SkyEnvironment } from './materials.js'
 import { BuildingParts } from './buildingMesh.js'
 import { buildProps, finishRect } from './props.js'
@@ -207,6 +207,7 @@ export class World {
 
   // ------------------------------------------------------------------ city
   buildCity(city, hour = 12) {
+    this.floodBaseY = null
     this.city = city
     this.clearGround()
     this.burning = [] // fires of the previous city must not follow us onto the new one
@@ -507,6 +508,7 @@ export class World {
   }
 
   updateTerrainHeights() {
+    this.floodBaseY = null
     const g = this.terrainGeo
     const pos = g.attributes.position.array
     const V = GRID + 1
@@ -2109,9 +2111,12 @@ export class World {
   }
 
   /**
-   * Flood-depth map draped over the land (streets included), coloured by
-   * depth band; buildings stand up through it. map: { depth } from
-   * floodMap(), or null to hide it.
+   * Depth lens draped over the land, streets included: dry ground greyed out,
+   * standing water coloured by depth band, one cell per texel so each cell
+   * reads as one depth. Buildings stand up through it.
+   * map: { depth } (per cell, m), with zg (ground per cell) when the water is
+   * live — the layer then rides on the water surface instead of sinking
+   * under it. null hides it.
    */
   setFloodMap(map) {
     if (!map) {
@@ -2119,42 +2124,154 @@ export class World {
       return
     }
     const N = GRID
+    const V = N + 1
     if (!this.floodLayer) {
       const geo = new THREE.PlaneGeometry(N * CELL, N * CELL, N, N).rotateX(-Math.PI / 2)
       this.floodTexData = new Uint8Array(N * N * 4)
       const tex = new THREE.DataTexture(this.floodTexData, N, N, THREE.RGBAFormat)
-      tex.magFilter = THREE.LinearFilter
-      tex.minFilter = THREE.LinearFilter
+      tex.magFilter = THREE.NearestFilter
+      tex.minFilter = THREE.NearestFilter
       tex.colorSpace = THREE.SRGBColorSpace
       this.floodTex = tex
       const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -4, fog: false })
       this.floodLayer = new THREE.Mesh(geo, mat)
-      this.floodLayer.renderOrder = 2
+      // after the water, so the depth colours sit on top of it
+      this.floodLayer.renderOrder = 3
       this.root.add(this.floodLayer)
     }
-    // drape it just above the ground and street surfaces
+    // ground heights at the vertices (cached until the terrain changes)
+    if (!this.floodBaseY) {
+      this.floodBaseY = new Float32Array(V * V)
+      for (let r = 0; r <= N; r++) for (let c = 0; c <= N; c++) this.floodBaseY[r * V + c] = this.vertexHeight(c, r) + 0.6
+    }
+    const { depth, zg } = map
     const pos = this.floodLayer.geometry.attributes.position
-    for (let r = 0; r <= N; r++) for (let c = 0; c <= N; c++) pos.setY(r * (N + 1) + c, this.vertexHeight(c, r) + 0.6)
+    const ct = this.city.cellType
+    for (let r = 0; r <= N; r++)
+      for (let c = 0; c <= N; c++) {
+        let y = this.floodBaseY[r * V + c]
+        if (zg) {
+          // on top of any deep water in the four cells around the vertex
+          for (let dj = -1; dj <= 0; dj++)
+            for (let di = -1; di <= 0; di++) {
+              const i = c + di
+              const j = r + dj
+              if (i < 0 || j < 0 || i >= N || j >= N) continue
+              const k = idx(i, j)
+              if (depth[k] > 0.3 && ct[k] !== CELL_RIVER) y = Math.max(y, zg[k] + depth[k] + 0.15)
+            }
+        }
+        pos.setY(r * V + c, y)
+      }
     pos.needsUpdate = true
     this.floodLayer.geometry.computeBoundingSphere()
     const px = this.floodTexData
+    const grey = [211, 215, 220]
     for (let j = 0; j < N; j++)
       for (let i = 0; i < N; i++) {
         const k = idx(i, j)
         const o = ((N - 1 - j) * N + i) * 4
-        const d = map.depth[k]
-        if (!(d > 0.02)) {
+        if (ct[k] === CELL_RIVER) {
+          // the channel shows through as itself
           px[o + 3] = 0
           continue
         }
-        const c = DEPTH_BANDS[depthBand(d)].color
+        const col = depthColor(depth[k])
+        const c = col ?? grey
         px[o] = c[0]
         px[o + 1] = c[1]
         px[o + 2] = c[2]
-        px[o + 3] = 150 + Math.min(80, d * 30)
+        px[o + 3] = col ? 235 : 190
       }
     this.floodTex.needsUpdate = true
     this.floodLayer.visible = true
+  }
+
+  /**
+   * Name tags pinned over places that matter (hospitals, shelters, pumps…),
+   * each with a status badge, kept over their spot as the camera moves.
+   * list: [{ key, x, y, z, name, dot, badge, tone }] ('bad' | 'warn' | 'good'), or [] to clear.
+   */
+  setLabels(list) {
+    if (!this.labelLayer) {
+      const el = document.createElement('div')
+      el.style.cssText = 'position:absolute;inset:0;pointer-events:none;overflow:hidden;font:600 11px/1.2 system-ui,sans-serif'
+      this.container.appendChild(el)
+      this.labelLayer = el
+      this.labels = new Map()
+    }
+    const keep = new Set()
+    for (const L of list) {
+      keep.add(L.key)
+      let e = this.labels.get(L.key)
+      if (!e) {
+        const div = document.createElement('div')
+        div.style.cssText = 'position:absolute;left:0;top:0;display:flex;align-items:center;gap:6px;padding:3px 8px 3px 6px;border-radius:999px;background:rgba(255,255,255,0.94);color:#1e293b;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,0.35)'
+        div.innerHTML = '<span style="width:9px;height:9px;border-radius:50%;flex:none"></span><span></span><span style="font-weight:700"></span>'
+        this.labelLayer.appendChild(div)
+        e = { div, L: null }
+        this.labels.set(L.key, e)
+      }
+      if (!e.L || e.L.name !== L.name || e.L.badge !== L.badge || e.L.tone !== L.tone || e.L.dot !== L.dot) {
+        const [dot, name, badge] = e.div.children
+        dot.style.background = L.dot
+        name.textContent = L.name
+        badge.textContent = L.badge ?? ''
+        badge.style.color = L.tone === 'bad' ? '#dc2626' : L.tone === 'warn' ? '#d97706' : '#059669'
+      }
+      e.L = L
+    }
+    for (const [k, e] of this.labels)
+      if (!keep.has(k)) {
+        e.div.remove()
+        this.labels.delete(k)
+      }
+  }
+
+  /**
+   * Keep the name tags over their places. Tags that would overlap are
+   * stacked upward, bad news first; one that cannot find room is hidden.
+   */
+  placeLabels() {
+    if (!this.labels?.size) return
+    const w = this.container.clientWidth
+    const h = this.container.clientHeight
+    const RANK = { bad: 0, warn: 1, good: 2 }
+    const items = []
+    for (const e of this.labels.values()) {
+      _v.set(e.L.x, e.L.y, e.L.z).project(this.camera)
+      if (_v.z > 1 || Math.abs(_v.x) > 1.1 || Math.abs(_v.y) > 1.1) {
+        e.div.style.display = 'none'
+        continue
+      }
+      e.div.style.display = 'flex'
+      // measured once per text change (reading layout every frame is slow)
+      if (e.wFor !== e.L.badge + e.L.name) {
+        e.wFor = e.L.badge + e.L.name
+        e.w = e.div.offsetWidth
+        e.h = e.div.offsetHeight
+      }
+      items.push({ e, x: ((_v.x + 1) / 2) * w, y: ((1 - _v.y) / 2) * h, rank: RANK[e.L.tone] ?? 2, depth: _v.z })
+    }
+    items.sort((a, b) => a.rank - b.rank || a.depth - b.depth)
+    const placed = []
+    for (const it of items) {
+      const { e } = it
+      const left = it.x - e.w / 2
+      let top = it.y - e.h * 1.2
+      let tries = 0
+      const hit = () => placed.some((r) => left < r.right && left + e.w > r.left && top < r.bottom && top + e.h > r.top)
+      while (hit() && tries < 4) {
+        top -= e.h + 3
+        tries++
+      }
+      if (hit()) {
+        e.div.style.display = 'none'
+        continue
+      }
+      placed.push({ left, right: left + e.w, top, bottom: top + e.h })
+      e.div.style.transform = `translate(${left}px, ${top}px)`
+    }
   }
 
   /** Clouds, wind streaks, leaves stripped from the trees and spray blown off the water. */
@@ -2396,6 +2513,7 @@ export class World {
     if (frozen) {
       this.controls.update()
       this.bld.flush()
+      this.placeLabels()
       this.renderer.render(this.scene, this.camera)
       return
     }
@@ -2514,6 +2632,7 @@ export class World {
     this.rain.update(dt, this.rainIntensity || 0, this.controls.target, (x, z) => this.surfaceAt(x, z).y, this.subsurface.group.visible ? HALF - 2 : 0, this.windVec)
     this.updateWeather(dt)
     this.bld.flush()
+    this.placeLabels()
     this.renderer.render(this.scene, this.camera)
   }
 
