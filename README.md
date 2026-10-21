@@ -2,6 +2,8 @@
 
 **A 3D city disaster management simulator that runs in your browser.**
 
+> 🚧 **Beta: a work in progress.** Features change often, the models and numbers are still being tuned, and you may run into bugs, odd results or slow performance. If something breaks, please [open an issue](https://github.com/FrancisCodex/disaster-simulator/issues).
+
 Generate a city, choose a natural disaster and how strong it is, then prepare: retrofit weak buildings, build flood walls, hospitals, fire stations and shelters, buy early-warning systems. Then unleash the disaster, watch it unfold hour by hour, and see how many lives your decisions saved.
 
 The goal is to make it easier to see what actually works in disaster preparedness: why unreinforced masonry kills in earthquakes, why early warning matters more than walls in floods, and why some disasters (an M10 earthquake) can't be engineered away.

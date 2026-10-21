@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { fmtInt, fmtMoney } from '../engine/math.js'
 import { GitHubMark } from './RepoCredit.jsx'
-import { REPO_URL } from './links.js'
+import { REPO_URL, ISSUES_URL } from './links.js'
 
 const GRADE_TONE = { 'A+': 'text-emerald-300', A: 'text-emerald-300', B: 'text-lime-300', C: 'text-amber-300', D: 'text-orange-400', F: 'text-red-400' }
 const GRADE_TEXT = {
@@ -99,7 +99,11 @@ export default function Results({ s, game }) {
           </button>
         </div>
         <p className="mt-4 text-center text-[11px] leading-relaxed text-slate-500">
-          Simulated outcome from simplified models — real events can turn out very differently. Not yet validated for real-world safety or planning decisions. · Made by{' '}
+          <span className="font-semibold text-violet-300">Beta:</span> MetroRisk is a work in progress, so the models and numbers are still being tuned and may change, and you may hit bugs (
+          <a href={ISSUES_URL} target="_blank" rel="noopener noreferrer" className="text-sky-400 hover:text-sky-300">
+            report one
+          </a>
+          ). Simulated outcome from simplified models — real events can turn out very differently. Not yet validated for real-world safety or planning decisions. · Made by{' '}
           <a href="https://github.com/FrancisCodex" target="_blank" rel="noopener noreferrer" className="text-sky-400 hover:text-sky-300">
             FrancisCodex
           </a>{' '}

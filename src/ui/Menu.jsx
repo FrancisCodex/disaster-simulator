@@ -4,7 +4,7 @@ import { START_TIMES } from '../engine/game.js'
 import { QuakePicker } from './QuakeScenario.jsx'
 import { TyphoonPicker } from './TyphoonScenario.jsx'
 import { GitHubMark } from './RepoCredit.jsx'
-import { REPO_URL } from './links.js'
+import { REPO_URL, ISSUES_URL } from './links.js'
 
 const CITY_META = {
   rural: { icon: '🏡', pop: '~1–2 thousand', density: 'Low' },
@@ -45,8 +45,13 @@ export default function Menu({ onStart }) {
           <div className="flex items-center gap-3">
             <img src="./favicon.svg" alt="" className="h-10 w-10" />
             <div>
-              <h1 className="text-3xl font-black tracking-tight text-white">
-                Metro<span className="text-sky-400">Risk</span>
+              <h1 className="flex items-center gap-2 text-3xl font-black tracking-tight text-white">
+                <span>
+                  Metro<span className="text-sky-400">Risk</span>
+                </span>
+                <span className="rounded-md border border-violet-400/60 bg-violet-500/20 px-1.5 py-0.5 text-[11px] font-bold tracking-wider text-violet-200" title="Still being built: expect bugs and changes">
+                  BETA
+                </span>
               </h1>
               <p className="text-sm text-slate-400">3D city disaster management simulator</p>
             </div>
@@ -54,6 +59,14 @@ export default function Menu({ onStart }) {
           <p className="mt-4 text-sm leading-relaxed text-slate-300">
             Generate a city, choose a natural disaster, then strengthen, rebuild and protect the city before it strikes. Every life counts.
           </p>
+          <div className="mt-3 rounded-md border border-violet-400/30 bg-violet-500/10 px-3 py-2 text-[12px] leading-relaxed text-violet-100/90">
+            <span className="font-semibold text-violet-200">🚧 Beta: a work in progress.</span> MetroRisk is still being built. Features change often, the numbers are still being tuned, and you may
+            run into bugs, odd results or slow performance, especially on phones and older computers. If something breaks,{' '}
+            <a href={ISSUES_URL} target="_blank" rel="noopener noreferrer" className="font-semibold text-sky-300 underline-offset-2 hover:text-sky-200 hover:underline">
+              please report it on GitHub
+            </a>
+            .
+          </div>
         </div>
 
         <Step n="1" title="City">
