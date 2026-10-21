@@ -26,10 +26,11 @@ import {
 import { generateCity, addBuilding, idx, occupancyAt, cityStats } from './cityGen.js'
 import { Rng, clamp, smoothstep } from './math.js'
 import { World, sheddingFacade } from './world.js'
-import { FloodSim } from './floodSim.js'
+import { FloodSim, forecastRiverPeak } from './floodSim.js'
+import { floodMap, DEPTH_BANDS, depthBand } from './floodMap.js'
 import { FloodImpact } from './floodImpact.js'
 import { TyphoonSim } from './typhoonSim.js'
-import { buildStorm, forecastSummary } from './typhoonPhysics.js'
+import { buildStorm, forecastSummary, catchmentRain } from './typhoonPhysics.js'
 import { WindDamage, windRisk } from './windDamage.js'
 import { QuakeSim, demand, mediansFor, damageProbs, collapseProb, cellOfBuilding, soilName, rockPgaAt, withGeometry, quakeAzimuth, shapeOf, dsFromD, compass, groundPeriod, buildingPeriod, resonance, softStoreyOf } from './quakeSim.js'
 import { siteDistances } from './quakePhysics.js'
@@ -238,9 +239,13 @@ export class Game {
     this.tool = 'inspect'
     this.selected = null
     this.overlay = false
+    this.riskLayer ??= 'flood'
+    this.floodLevel = null
     this.log = []
     this.results = null
     this.flood = this.quake = this.impact = this.shadow = this.typhoon = this.windDmg = null
+    // the old colouring reads the simulation just cleared: drop it before the new city is drawn
+    this.world.colorFn = null
     this.world.controls.autoRotate = false
     this.world.buildCity(city, this.settings.startHour)
     for (const b of city.buildings) b.openFront = this.world.openFront(b)
@@ -612,6 +617,7 @@ export class Game {
         city.levee[k] = 0
         this.world.rebuildStatic()
         this.world.paintTerrain()
+        if (this.overlay) this.applyColorMode()
         this.emit()
         return
       }
@@ -756,12 +762,18 @@ export class Game {
     this.preview = new FloodSim(this.city)
     this.preview.computeFlow()
     this.world.updateWater(this.preview)
+    // where the water can reach has changed
+    if (this.overlay) this.applyColorMode()
   }
 
   // --------------------------------------------------------------- colors
   applyColorMode() {
     const { settings } = this
     // a building tool in hand: show where it can go (green), where it is done (blue), where it can't (grey)
+    // the land flood map belongs to the typhoon risk map, flood layer, before the storm
+    const landMap = this.phase === 'prepare' && this.overlay && settings?.disaster === 'typhoon' && this.riskLayer === 'flood'
+    this.floodMapData = landMap ? this.computeFloodMap() : null
+    this.world.setFloodMap(this.floodMapData)
     if (this.phase === 'prepare' && BUILDING_TOOLS.includes(this.tool)) {
       const tool = this.tool
       this.world.setColorFn((b) => (this.checkTool(tool, b) === null ? '#22c55e' : hasMeasure(tool, b) ? '#38bdf8' : '#3b4252'))
@@ -777,13 +789,19 @@ export class Game {
           const r = this.quakeRisk(b)
           return heat(r.pComplete * 0.6 + r.pCollapse * 3)
         })
+      } else if (landMap) {
+        // buildings the water gets into, in the same colours as the land; dry ones keep their own
+        const M = this.floodMapData
+        this.world.setColorFn((b) => {
+          const d = this.waterInside(b, M)
+          return d > 0.05 ? `rgb(${DEPTH_BANDS[depthBand(d)].color.join(',')})` : null
+        })
       } else {
-        // the worse of the two: low ground by the river, or a roof / structure the forecast gusts can take
+        // wind layer: the roof or structure the forecast gusts can take
         const gust = this.level.forecast.peakGust
         this.world.setColorFn((b) => {
-          const e = b.floorZ + b.elevated - this.city.bankZ[b.y]
           const w = windRisk(b, gust)
-          return heat(Math.max(1 - clamp((e - 0.5) / 4, 0, 1), w.pCollapse, w.pRoof * 0.7, w.pGlass * 0.3))
+          return heat(Math.max(w.pCollapse, w.pRoof * 0.7, w.pGlass * 0.3))
         })
       }
     } else if (this.quake) {
@@ -803,6 +821,58 @@ export class Game {
         return heat(clamp(s.maxIn / 2.5, 0, 1))
       })
     }
+  }
+
+  /** Forecast peak of the river for this scenario (cached until the scenario or the channel changes). */
+  riverForecast() {
+    const key = JSON.stringify([this.settings.typhoon, this.settings.level, !!this.city.dredged])
+    if (this.riverFcCache?.key !== key) {
+      const fc = this.level.forecast
+      const r = forecastRiverPeak(buildStorm(this.level), catchmentRain, fc.startH, fc.endH + 12, { dredged: this.city.dredged })
+      this.riverFcCache = { key, r }
+    }
+    return this.riverFcCache.r
+  }
+
+  /** The land flood map at the chosen river level (the forecast peak unless the player set one). */
+  computeFloodMap() {
+    const fc = this.riverForecast()
+    const level = this.floodLevel ?? Math.round(fc.stage * 10) / 10
+    const M = floodMap(this.city, level, this.level.forecast.rainTotal)
+    let wet = 0
+    let people = 0
+    for (const b of this.city.buildings) {
+      if (b.removed || this.waterInside(b, M) <= 0.05) continue
+      wet++
+      people += occupancyAt(b, this.settings.startHour)
+    }
+    return { ...M, forecast: fc, auto: this.floodLevel == null, buildingsWet: wet, peopleWet: people }
+  }
+
+  /** Water (m) standing above b's ground floor on a flood map. */
+  waterInside(b, M) {
+    let w = -Infinity
+    for (let j = b.y; j < b.y + b.d; j++)
+      for (let i = b.x; i < b.x + b.w; i++) {
+        const k = idx(i, j)
+        if (M.depth[k] > 0) w = Math.max(w, this.city.z[k] + M.depth[k])
+      }
+    return w - (b.floorZ + b.elevated)
+  }
+
+  /** Risk map layer for a typhoon: 'flood' (land and buildings) or 'wind'. */
+  setRiskLayer(layer) {
+    this.riskLayer = layer
+    if (!this.overlay) this.overlay = true
+    this.applyColorMode()
+    this.emit()
+  }
+
+  /** River level for the flood map, m above the banks; null = the forecast peak. */
+  setFloodLevel(level) {
+    this.floodLevel = level
+    this.applyColorMode()
+    this.emit()
   }
 
   quakeRisk(b) {
@@ -900,6 +970,7 @@ export class Game {
       this.leveePaintDirty = false
       w.paintTerrain()
       w.buildTrees()
+      if (this.overlay && this.phase === 'prepare') this.applyColorMode()
     }
     if (this.phase === 'sim' && !this.paused) {
       const want = dt * SPEEDS[this.speedIdx].mult
@@ -1713,6 +1784,17 @@ export class Game {
     s.selected = this.selected != null ? this.buildingInfo(this.selected) : null
     s.hoverInfo = this.hover?.bid != null && this.hover.bid !== this.selected ? this.buildingInfo(this.hover.bid) : null
     if (this.phase === 'prepare') s.prep = this.prepStats()
+    s.riskLayer = this.riskLayer
+    const M = this.floodMapData
+    if (M) {
+      const h = this.hover
+      let cell = null
+      if (h) {
+        const k = idx(h.i, h.j)
+        cell = { depth: M.depth[k], source: M.source[k], aboveBank: this.city.z[k] - this.city.bankZ[h.j], river: this.city.cellType[k] === CELL_RIVER, wall: this.city.levee[k] > 0 }
+      }
+      s.floodMap = { level: M.level, auto: M.auto, forecast: { inflow: M.forecast.inflow, stage: M.forecast.stage, tPeak: M.forecast.tPeak }, areaHa: M.areaHa, maxDepth: M.maxDepth, buildingsWet: M.buildingsWet, peopleWet: M.peopleWet, cell }
+    }
     if (this.phase === 'sim' || this.phase === 'results') {
       const t = this.simTime
       const hour = this.settings.startHour + t / 3600

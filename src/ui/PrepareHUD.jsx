@@ -7,6 +7,7 @@ import { RepoIcon } from './RepoCredit.jsx'
 import { fmtInt, fmtMoney } from '../engine/math.js'
 import { QuakePhysics } from './QuakeScenario.jsx'
 import { TyphoonForecast } from './TyphoonScenario.jsx'
+import RiskMapPanel from './RiskMapPanel.jsx'
 
 // tool groups shown for each scenario: the other disaster's tools are hidden
 const GROUPS = { typhoon: ['General', 'Build', 'Flood'], quake: ['General', 'Build', 'Quake'] }
@@ -196,6 +197,7 @@ function DesktopPrepare({ s, game }) {
 
       {/* right column */}
       <div className="scroll-thin pointer-events-auto absolute top-24 right-3 flex max-h-[calc(100vh-13rem)] w-80 flex-col gap-2 overflow-y-auto">
+        {s.overlay && disaster === 'typhoon' && <RiskMapPanel s={s} game={game} />}
         <Section id="overview" title="City overview" summary={overviewSummary(s)}>
           <Overview s={s} />
         </Section>
@@ -212,7 +214,7 @@ function DesktopPrepare({ s, game }) {
           <ToolStatus s={s} tool={tool} />
           <div className="h-8 w-px bg-slate-700" />
           <button onClick={() => game.toggleOverlay()} className={`rounded-md px-3 py-1.5 text-sm whitespace-nowrap ${s.overlay ? 'bg-amber-500/25 text-amber-200 ring-1 ring-amber-400' : 'text-slate-300 hover:bg-slate-700/60'}`}>
-            {disaster === 'quake' ? 'Seismic risk map' : 'Flood risk map'}
+            {disaster === 'quake' ? 'Seismic risk map' : 'Risk map'}
           </button>
           <button onClick={() => game.newGame({ ...s.settings, seed: Math.floor(Math.random() * 999999) })} className="rounded-md px-3 py-1.5 text-sm whitespace-nowrap text-slate-300 hover:bg-slate-700/60">
             New map
@@ -271,6 +273,10 @@ function MobilePrepare({ s, game }) {
           <Sheet title="City-wide upgrades" onClose={() => setSheet(null)}>
             <Upgrades s={s} game={game} />
           </Sheet>
+        ) : s.overlay && disaster === 'typhoon' && sheet === null ? (
+          <div className="scroll-thin pointer-events-auto max-h-[45vh] overflow-y-auto">
+            <RiskMapPanel s={s} game={game} compact />
+          </div>
         ) : sheet === 'more' ? (
           <Sheet title="More" onClose={() => setSheet(null)}>
             <div className="flex flex-wrap gap-2">

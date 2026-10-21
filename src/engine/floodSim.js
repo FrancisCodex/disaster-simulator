@@ -12,6 +12,58 @@ const UPLAND_RAIN = 1.25 // hills upstream wring more rain out of the storm than
 const BASE_FLOW = 110 // m³/s — a sizeable lowland river
 const RIVER_SLOPE = 0.001
 
+// Peak river level (m above the banks, averaged along the district) against
+// peak inflow (m³/s), from full runs of this solver on generated cities.
+const STAGE_TABLE = [
+  [300, -3.0],
+  [445, -2.6],
+  [640, -1.7],
+  [1060, 0.35],
+  [1470, 1.25],
+  [1920, 2.25],
+  [2460, 2.8],
+  [3820, 3.85],
+  [6000, 5.0],
+]
+
+/**
+ * Forecast of the river's flood wave for a storm (a buildStorm() storm,
+ * with τ0 / τ1 the hours to simulate): the same lagged-runoff hydrograph the
+ * solver uses, so the peak inflow is exact; the level it reaches comes from
+ * STAGE_TABLE (dredging lowers it by about a metre).
+ */
+export function forecastRiverPeak(storm, catchmentRain, tau0, tau1, { dredged = false } = {}) {
+  const dt = 300
+  let lag = 0
+  let cum = 0
+  let peak = BASE_FLOW
+  let tPeak = tau0
+  for (let tau = tau0; tau <= tau1; tau += dt / 3600) {
+    const basin = catchmentRain(storm, tau) * UPLAND_RAIN
+    cum += (basin * dt) / 3600
+    lag += ((basin - lag) * dt) / (2.5 * 3600)
+    const runoffC = 0.25 + 0.55 * (cum / (cum + 100))
+    const q = BASE_FLOW + (CATCHMENT_M2 * runoffC * lag) / 3.6e6
+    if (q > peak) {
+      peak = q
+      tPeak = tau
+    }
+  }
+  return { inflow: peak, tPeak, basinRain: cum, stage: stageFor(peak) - (dredged ? 1 : 0) }
+}
+
+export function stageFor(q) {
+  const T = STAGE_TABLE
+  if (q <= T[0][0]) return T[0][1]
+  for (let n = 1; n < T.length; n++) {
+    if (q > T[n][0]) continue
+    const [q0, s0] = T[n - 1]
+    const [q1, s1] = T[n]
+    return s0 + ((s1 - s0) * Math.log(q / q0)) / Math.log(q1 / q0)
+  }
+  return T[T.length - 1][1]
+}
+
 export class FloodSim {
   constructor(city, { storm = null, drainage = 20 } = {}) {
     const N = GRID

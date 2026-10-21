@@ -57,7 +57,11 @@ Pick an intensity tier, reenact one of 12 historical storms (Haiyan/Yolanda, Gon
   - Torn-off sheets fly downwind and break windows in their path.
   - Trees fall more easily once the soil is soaked. Fallen trees block roads and bring down power lines. Poles snap above ~170 km/h and the line feeding the city fails above ~210 km/h. Unpowered pumps stop.
   - Street lights, traffic signals and park props bend over and fall downwind, or are knocked down by debris and collapsing buildings, and go dark when their feeder loses power.
-  - Before the storm, the risk map and the inspect panel show each building's chance of losing its roof or being flattened at the forecast gusts.
+  - Before the storm, the risk map's wind layer and the inspect panel show each building's chance of losing its roof or being flattened at the forecast gusts.
+- **Flood depth map:** the risk map's flood layer colours the land itself, streets included, by how deep the water would stand. It also shades buildings by the water over their ground floor.
+  - The river level starts at the forecast peak for the chosen storm. The forecast replays the solver's own upstream hydrograph and converts peak inflow to a level from full solver runs. A slider tries any other level.
+  - Water spreads from the river only to low ground it can reach, so flood walls keep it out and gaps in them show. Hollows also fill with rain.
+  - Hovering shows the depth and the ground height relative to the riverbank. Totals give flooded area, buildings flooded inside and the people in them.
 - **What you see:**
   - The storm's cloud deck darkens and turns overhead as the typhoon nears, and opens to the sky in the eye. Low scud races past under it.
   - Trees bend downwind and pump as gusts roll through the canopy.
@@ -114,7 +118,8 @@ src/
     typhoonSim.js   the typhoon passing over the city, hour by hour
     windDamage.js   roofs, windows, collapses, trees, poles and power in the wind
     weather.js      storm cloud deck, scud and visible wind (streaks)
-    floodSim.js     2D flood hydraulics
+    floodSim.js     2D flood hydraulics, river-peak forecast
+    floodMap.js     flood-depth map of the land at a river level (planning view)
     floodImpact.js  evacuation, drowning, building failure, damage
     quakeSim.js     ground motion, fragility, aftershocks, fires, rescue
     world.js        Three.js scene (instanced buildings, terrain, water)

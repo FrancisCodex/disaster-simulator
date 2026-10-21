@@ -7,6 +7,7 @@ import { idx, cellToWorld } from './cityGen.js'
 import { makeNoise2D, clamp, lerp, smoothstep, normCdf } from './math.js'
 import { Particles, Debris, Rain } from './effects.js'
 import { StormClouds, WindStreaks } from './weather.js'
+import { DEPTH_BANDS, depthBand } from './floodMap.js'
 import { makeWaterMaterial, SkyEnvironment } from './materials.js'
 import { BuildingParts } from './buildingMesh.js'
 import { buildProps, finishRect } from './props.js'
@@ -2105,6 +2106,55 @@ export class World {
       )
     }
     mat.customProgramCacheKey = () => (crown ? 'sway-crown' : 'sway-stem')
+  }
+
+  /**
+   * Flood-depth map draped over the land (streets included), coloured by
+   * depth band; buildings stand up through it. map: { depth } from
+   * floodMap(), or null to hide it.
+   */
+  setFloodMap(map) {
+    if (!map) {
+      if (this.floodLayer) this.floodLayer.visible = false
+      return
+    }
+    const N = GRID
+    if (!this.floodLayer) {
+      const geo = new THREE.PlaneGeometry(N * CELL, N * CELL, N, N).rotateX(-Math.PI / 2)
+      this.floodTexData = new Uint8Array(N * N * 4)
+      const tex = new THREE.DataTexture(this.floodTexData, N, N, THREE.RGBAFormat)
+      tex.magFilter = THREE.LinearFilter
+      tex.minFilter = THREE.LinearFilter
+      tex.colorSpace = THREE.SRGBColorSpace
+      this.floodTex = tex
+      const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -4, fog: false })
+      this.floodLayer = new THREE.Mesh(geo, mat)
+      this.floodLayer.renderOrder = 2
+      this.root.add(this.floodLayer)
+    }
+    // drape it just above the ground and street surfaces
+    const pos = this.floodLayer.geometry.attributes.position
+    for (let r = 0; r <= N; r++) for (let c = 0; c <= N; c++) pos.setY(r * (N + 1) + c, this.vertexHeight(c, r) + 0.6)
+    pos.needsUpdate = true
+    this.floodLayer.geometry.computeBoundingSphere()
+    const px = this.floodTexData
+    for (let j = 0; j < N; j++)
+      for (let i = 0; i < N; i++) {
+        const k = idx(i, j)
+        const o = ((N - 1 - j) * N + i) * 4
+        const d = map.depth[k]
+        if (!(d > 0.02)) {
+          px[o + 3] = 0
+          continue
+        }
+        const c = DEPTH_BANDS[depthBand(d)].color
+        px[o] = c[0]
+        px[o + 1] = c[1]
+        px[o + 2] = c[2]
+        px[o + 3] = 150 + Math.min(80, d * 30)
+      }
+    this.floodTex.needsUpdate = true
+    this.floodLayer.visible = true
   }
 
   /** Clouds, wind streaks, leaves stripped from the trees and spray blown off the water. */
