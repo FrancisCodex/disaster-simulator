@@ -393,6 +393,8 @@ export class Game {
     window.addEventListener('keydown', (e) => {
       if (e.target.tagName === 'INPUT') return
       if (e.key === 'Escape') this.setTool('inspect')
+      // L switches the flood depth lens on and off during a typhoon
+      if ((e.key === 'l' || e.key === 'L') && this.impact && (this.phase === 'sim' || this.phase === 'results')) this.toggleOverlay()
       if (e.key === ' ' && this.phase === 'sim') {
         e.preventDefault()
         this.togglePause()

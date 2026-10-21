@@ -46,6 +46,8 @@ const fmtT = (t) => {
   return `T+${h}h ${String(m).padStart(2, '0')}m`
 }
 
+const LENS_NAME = { flood: 'Flood depth', damage: 'Damage', power: 'Power' }
+
 const LOG_TONE = { bad: 'text-red-300', warn: 'text-amber-200', info: 'text-slate-300', good: 'text-emerald-300' }
 
 const hrs = (tau) => {
@@ -265,9 +267,16 @@ function DesktopSim({ s, game }) {
   const quake = sim.quake
   const done = s.phase === 'results'
   const [lenses, setLenses] = useState(false)
-  const openLenses = () => {
-    if (!lenses && (sim.lens ?? 'city') === 'city') game.setLens('flood')
-    setLenses(!lenses)
+  const lensOn = (sim.lens ?? 'city') !== 'city'
+  // the button is the on/off switch: on opens the panel on the flood depth lens, off returns to the plain city
+  const toggleLenses = () => {
+    if (lenses || lensOn) {
+      setLenses(false)
+      game.setLens('city')
+    } else {
+      setLenses(true)
+      game.setLens('flood')
+    }
   }
   return (
     <>
@@ -307,16 +316,23 @@ function DesktopSim({ s, game }) {
               Integrity view
             </button>
           ) : (
-            <button onClick={openLenses} className={`rounded-md px-3 py-1.5 text-sm ${lenses || s.overlay ? 'bg-sky-500/25 text-sky-100 ring-1 ring-sky-400' : 'text-slate-300 hover:bg-slate-700/60'}`}>
-              🔍 Lenses
+            <button onClick={toggleLenses} title="Turn the lenses on or off (L)" className={`rounded-md px-3 py-1.5 text-sm ${lenses || lensOn ? 'bg-sky-500/25 text-sky-100 ring-1 ring-sky-400' : 'text-slate-300 hover:bg-slate-700/60'}`}>
+              🔍 Lenses {lenses || lensOn ? 'on' : 'off'}
             </button>
           )}
         </div>
       </div>
 
-      {lenses && !quake && (
+      {(lenses || lensOn) && !quake && (
         <div className="scroll-thin pointer-events-auto absolute top-24 left-[17.5rem] max-h-[calc(100vh-8rem)] w-72 overflow-y-auto">
-          <LensPanel s={s} game={game} onClose={() => setLenses(false)} />
+          <LensPanel
+            s={s}
+            game={game}
+            onClose={() => {
+              setLenses(false)
+              game.setLens('city')
+            }}
+          />
         </div>
       )}
 
@@ -412,6 +428,17 @@ function MobileSim({ s, game }) {
         ) : sheet === 'lens' ? (
           <div className="scroll-thin pointer-events-auto max-h-[55vh] overflow-y-auto">
             <LensPanel s={s} game={game} onClose={() => setSheet(null)} />
+          </div>
+        ) : (sim.lens ?? 'city') !== 'city' ? (
+          // the lens stays on while its sheet is closed, so the map can be seen; this turns it off
+          <div className="panel pointer-events-auto flex items-center gap-2 px-3 py-1.5 text-[13px]">
+            <span className="text-sky-200">🔍 {LENS_NAME[sim.lens]} lens on</span>
+            <button onClick={() => setSheet('lens')} className="ml-auto rounded-md px-2 py-1 text-slate-300">
+              Change
+            </button>
+            <button onClick={() => game.setLens('city')} className="rounded-md bg-slate-700/70 px-2.5 py-1 font-semibold text-white">
+              Turn off
+            </button>
           </div>
         ) : null}
         <div className="panel pointer-events-auto flex items-center gap-1 px-2 py-1.5">

@@ -62,7 +62,7 @@ Pick an intensity tier, reenact one of 12 historical storms (Haiyan/Yolanda, Gon
   - The river level starts at the forecast peak for the chosen storm. The forecast replays the solver's own upstream hydrograph and converts peak inflow to a level from full solver runs. A slider tries any other level.
   - Water spreads from the river only to low ground it can reach, so flood walls keep it out and gaps in them show. Hollows also fill with rain.
   - Hovering shows the depth and the ground height relative to the riverbank. Totals give flooded area, buildings flooded inside and the people in them.
-- **Lenses during the storm:** grey the city out and paint one measure over it.
+- **Lenses during the storm:** grey the city out and paint one measure over it. The Lenses button, the panel's ✕ or the L key switches back to the normal view.
   - **Flood depth:** live standing water on every cell, banded by what it stops: 0.1 m kerbs, 0.3 m cars float, 0.6 m wading turns deadly, 1.2 m+ over a child's head. Buildings show the water inside them.
   - **Damage:** the worse of flood and wind damage.
   - **Power:** powered, on a generator, or blacked out.
