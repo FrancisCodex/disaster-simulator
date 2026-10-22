@@ -2,6 +2,8 @@
 
 **A 3D city disaster management simulator that runs in your browser.**
 
+![MetroRisk's setup menu: choosing a megacity and the 2013 Haiyan typhoon, beside a 3D view of the generated city and its river](public/images/MetroRisk_Screenshot1.png)
+
 > 🚧 **Beta: a work in progress.** Features change often, the models and numbers are still being tuned, and you may run into bugs, odd results or slow performance. If something breaks, please [open an issue](https://github.com/FrancisCodex/disaster-simulator/issues).
 
 Generate a city, choose a natural disaster and how strong it is, then prepare: retrofit weak buildings, build flood walls, hospitals, fire stations and shelters, buy early-warning systems. Then unleash the disaster, watch it unfold hour by hour, and see how many lives your decisions saved.
@@ -52,7 +54,7 @@ Pick an intensity tier, reenact one of 12 historical storms (Haiyan/Yolanda, Gon
 
 - **Storm:** a straight track with the bulletin's heading and forward speed passes the city at a chosen distance and side. Wind follows the Holland (1980/2010) profile, with the radius of maximum wind from Willoughby et al. (2006), pressure from Knaff & Zehr (2007) when none is given, and inland decay after landfall from Kaplan & DeMaria (1995). The storm's motion makes the right side windier in the north (the left in the south), and surface winds spiral inward. If the eye passes over, the wind dies, then returns from the opposite direction. 10-min (PAGASA/JMA) and 1-min (JTWC) winds and 3-s gusts are converted using WMO factors.
 - **Rain:** R-CLIPER (Tuleya et al. 2007) gives the average rain rate around the storm. The model adds a rain-free eye, an eyewall ring and rotating spiral rainbands, so the rain pulses as bands sweep over. The same field falls on the upstream catchment and drives the river's flood wave hours later. Slow storms and monsoon or mountain enhancement rain much more.
-- **Warnings:** PAGASA's Modified Tropical Cyclone Wind Signals (No. 1–5) are raised over the city with their lead times. The early-warning upgrade evacuates low-lying districts at Signal No. 3.
+- **Warnings:** PAGASA's Modified Tropical Cyclone Wind Signals (No. 1–5) are raised over the city with their lead times, along with storm surge warnings in PAGASA's colour bands and river alarm levels at the gauge.
 - **Wind damage:** every building follows the HAZUS-Hurricane chain. Windows break first, and the wind then pushes the roof up from inside. Roof sheets and tiles peel off, then the whole roof lifts, then the walls go. Each step has a fragility on the 3-s gust at roof height, set by structure type and roof type: sheet or tile on timber, metal sheds, or concrete slabs that never blow off.
   - Gusts grow with height, are lower behind taller buildings and higher across the river and parks.
   - Long exposure wears connections loose, and when the back eyewall turns the wind round, a new face of the building takes the load.
@@ -74,7 +76,16 @@ Pick an intensity tier, reenact one of 12 historical storms (Haiyan/Yolanda, Gon
   - The storm's cloud deck darkens and turns overhead as the typhoon nears, and opens to the sky in the eye. Low scud races past under it.
   - Trees bend downwind and pump as gusts roll through the canopy.
   - Wind-driven streaks of rain and spray sweep along the streets, leaves are stripped from the trees, and spindrift blows off the river.
-- Storm surge, lightning and tornadoes come in later phases: see [docs/typhoon-physics-research.md](docs/typhoon-physics-research.md).
+- **Storm surge (coastal cities):** any city can be put on the coast (open coast, wide shallow shelf or funnel bay). The sea rises with the falling pressure, the wind piling water over the shelf, breaking waves and the tide. The flood solver holds the open sea at that level, so the surge comes ashore up the streets and the river, and drains stop once the sea covers their outfalls. Seawater is traced through the flow, and waves riding on the surge batter the beachfront.
+- **Thunderstorms:** lightning follows the rainbands' convection and strikes the tallest roofs, trees and poles (rolling-sphere model), starting fires the rain usually puts out and blowing transformers. Tornadoes form in the front-right quadrant with honest odds, or you can send a what-if EF1/EF2 through the city.
+- **Windborne debris:** torn-off roof sheets and tiles take off at a real speed, fly with plate aerodynamics and break windows downwind with the energy they carry.
+- **Preparing:**
+  - **Evacuation plan:** tie each action (close schools, close shutters, evacuate the coast, the riverside or light-material homes, forced evacuation, pre-position boats) to a trigger: hours ahead, a wind signal, a surge warning or a river alarm. Earlier orders give people time to move; warnings people understand and drills raise how many go.
+  - **Wind:** roof straps, sheet fixings, storm shutters, lightning rods, a roof code, tree care, and concrete poles or buried lines.
+  - **Water:** flood walls of 2–4 m, outfall flap gates, pump generators, large pumps and an upstream floodway.
+  - **Coast:** a sea wall, a storm-surge barrier on the river, mangroves, raised cyclone shelters and danger-zone relocation.
+- **After-action report:** the same storm, with the same random draws, runs in the background on the city as it was generated, so the results show what your preparations changed: lives saved and damage avoided by pillar (plan and warnings, rain and river, coast, wind, power), hours of warning before each hazard, who had left each zone in time, the order the flood defences failed in, and recovery estimates (power restoration, people without a home, debris, blocked roads, leptospirosis).
+- The research behind it: [docs/typhoon-physics-research.md](docs/typhoon-physics-research.md) and [docs/typhoon-prep-research.md](docs/typhoon-prep-research.md).
 
 #### Flooding
 
@@ -124,6 +135,12 @@ src/
     cityGen.js      procedural terrain, river, roads, lots and buildings
     typhoonPhysics.js storm track, wind, pressure, rain and wind signals
     typhoonSim.js   the typhoon passing over the city, hour by hour
+    stormRun.js     one typhoon on one city: water, wind, thunderstorms, the plan
+    stormHazards.js lightning and tornadoes
+    debrisFlight.js windborne roof sheets and tiles
+    evacPlan.js     the evacuation plan's actions and triggers
+    stormReport.js  the typhoon's after-action report
+    stormWorker.js  the report's comparison runs, off the main thread
     windDamage.js   roofs, windows, collapses, trees, poles and power in the wind
     weather.js      storm cloud deck, scud and visible wind (streaks)
     floodSim.js     2D flood hydraulics, river-peak forecast
@@ -138,7 +155,7 @@ src/
 
 ## Ideas for the future
 
-- Typhoon phases 3–5: storm surge, lightning and tornadoes, wind preparations
+- Post-disaster operations: rescue crews, shelter supplies, power and road restoration
 - More disasters: tsunami, wildfire, landslide
 - Running the flood solver in a Web Worker so 1 h/s is never CPU-limited
 - Road network evacuation with traffic
