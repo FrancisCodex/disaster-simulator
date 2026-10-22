@@ -1,8 +1,9 @@
 import { useMemo, useState } from 'react'
 import { TYPHOON_LEVELS, HISTORICAL_TYPHOONS } from '../engine/config.js'
-import { typhoonScenarioFrom, CUSTOM_TYPHOON } from '../engine/game.js'
-import { buildStorm, forecastSummary, bulletinGeometry, pagasaCat, tenMinKmh, msToKmh, SIGNALS, TEN_TO_ONE, GUST_LAND, SITE_EXPOSURE, KDM, KT } from '../engine/typhoonPhysics.js'
+import { typhoonScenarioFrom, CUSTOM_TYPHOON, stormCityCoast } from '../engine/game.js'
+import { buildStorm, forecastSummary, bulletinGeometry, pagasaCat, tenMinKmh, msToKmh, SIGNALS, TEN_TO_ONE, GUST_LAND, SITE_EXPOSURE, KDM, KT, TIDE_PHASES, M2_PERIOD } from '../engine/typhoonPhysics.js'
 import { Slider, Toggle } from './QuakeScenario.jsx'
+import { hazardForecast, EF } from '../engine/stormHazards.js'
 
 const HEADINGS = [
   ['N', 0], ['NNE', 22.5], ['NE', 45], ['ENE', 67.5], ['E', 90], ['ESE', 112.5], ['SE', 135], ['SSE', 157.5],
@@ -46,17 +47,27 @@ export function SignalChip({ n, className = '' }) {
   return <span className={`rounded px-1.5 py-0.5 text-[11px] font-bold ${SIGNAL_TONE[n]} ${className}`}>{n ? `Signal No. ${n}` : 'No signal'}</span>
 }
 
+const when = (tau) => (Math.abs(tau) < 0.5 ? 'at closest approach' : tau > 0 ? `${Math.round(tau)} h after` : `${Math.round(-tau)} h before`)
+
 const avgName = (avg) => (avg === 10 ? '10-min (PAGASA / JMA)' : '1-min (JTWC)')
 
-/** Typhoon scenario chooser for the menu: intensity tiers, historical storms, or a custom storm from a bulletin. */
-export function TyphoonPicker({ typhoon, setTyphoon, level, setLevel }) {
+/**
+ * Typhoon scenario chooser for the menu: intensity tiers, historical storms, or a custom storm from a bulletin.
+ * coast: the city's coastline ({ on, shelf }, chosen with the city); picking a storm that struck a coast puts the city on that kind of coast.
+ */
+export function TyphoonPicker({ typhoon, setTyphoon, level, setLevel, coast, setCityCoast }) {
   const mode = typhoon.mode ?? 'tier'
   const set = (patch) => setTyphoon({ ...typhoon, ...patch })
-  const sc = typhoonScenarioFrom({ typhoon, level })
+  const sc = typhoonScenarioFrom({ typhoon, level, coast })
+  const pickStorm = (id) => {
+    set({ id, coast: undefined })
+    const c = stormCityCoast(id)
+    if (c) setCityCoast(c)
+  }
   const hist = mode === 'historical' ? sc : null
   const customise = () => {
     const { wind, avg, pc, heading, speed, dist, side, landfall, rmax, r34, lat, rainBoost } = sc
-    set({ mode: 'custom', params: { ...CUSTOM_TYPHOON, wind, avg, pc: pc ?? null, heading, speed, dist, side, landfall: landfall ?? null, rmax: rmax ?? null, r34: r34 ?? null, lat, rainBoost: rainBoost ?? 1 } })
+    set({ mode: 'custom', coast: sc.coast, params: { ...CUSTOM_TYPHOON, wind, avg, pc: pc ?? null, heading, speed, dist, side, landfall: landfall ?? null, rmax: rmax ?? null, r34: r34 ?? null, lat, rainBoost: rainBoost ?? 1 } })
   }
   return (
     <div>
@@ -91,7 +102,7 @@ export function TyphoonPicker({ typhoon, setTyphoon, level, setLevel }) {
 
       {mode === 'historical' && (
         <>
-          <select value={hist.id} onChange={(e) => set({ id: e.target.value })} className="w-full rounded-md border border-slate-700 bg-slate-900/80 px-2 py-1.5 text-sm text-white outline-none focus:border-amber-400">
+          <select value={hist.id} onChange={(e) => pickStorm(e.target.value)} className="w-full rounded-md border border-slate-700 bg-slate-900/80 px-2 py-1.5 text-sm text-white outline-none focus:border-amber-400">
             {HISTORICAL_TYPHOONS.map((h) => (
               <option key={h.id} value={h.id}>
                 {h.year} · {h.name}
@@ -118,7 +129,77 @@ export function TyphoonPicker({ typhoon, setTyphoon, level, setLevel }) {
 
       {mode === 'custom' && <CustomStorm params={{ ...CUSTOM_TYPHOON, ...typhoon.params }} setParams={(params) => set({ params })} />}
 
+      <CoastOptions sc={sc} historical={mode === 'historical'} setCoast={(patch) => set({ coast: { ...typhoon.coast, ...patch } })} />
+
+      <TornadoOption value={sc.tornado} setValue={(tornado) => set({ tornado })} />
+
       <TyphoonForecast sc={sc} defaultOpen />
+    </div>
+  )
+}
+
+const FACINGS = HEADINGS.filter((_, i) => i % 2 === 0)
+
+/** For a coastal city (chosen with the city): which way the sea lies, and the tide. */
+function CoastOptions({ sc, historical, setCoast }) {
+  const c = sc.coast
+  const facing = FACINGS.reduce((a, b) => (Math.abs(((b[1] - c.facing + 540) % 360) - 180) < Math.abs(((a[1] - c.facing + 540) % 360) - 180) ? b : a))
+  return (
+    <div className="mt-2 space-y-1 rounded-lg border border-slate-700 bg-slate-800/40 p-3 text-xs">
+      <div className="font-semibold text-slate-200">🌊 Storm surge</div>
+      {!c.on ? (
+        <p className="text-[11px] text-slate-500">The city is inland: no storm surge. Choose a coastal city in step 1 to put it on the sea.</p>
+      ) : (
+        <>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-slate-400">The sea lies to the</span>
+            {historical ? (
+              <span className="font-mono text-slate-200">{facing[0]}</span>
+            ) : (
+              <select value={facing[0]} onChange={(e) => setCoast({ facing: FACINGS.find((h) => h[0] === e.target.value)[1] })} className="rounded border border-slate-700 bg-slate-900/80 px-1.5 py-1 text-white">
+                {FACINGS.map(([n]) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+          <p className="text-[11px] text-slate-500">Onshore winds pile the sea up against the coast. A storm coming in from the sea, with the city on its {sc.lat >= 0 ? 'right' : 'left'} side, drives the highest surge.</p>
+          <Slider label="Tide: high water above mean sea level" value={c.tide} min={0} max={2.5} step={0.1} unit=" m" onChange={(tide) => setCoast({ tide })} />
+          <div className="text-slate-400">Tide at closest approach</div>
+          <div className="grid grid-cols-4 gap-1">
+            {Object.values(TIDE_PHASES).map((t) => (
+              <button key={t.key} onClick={() => setCoast({ tidePhase: t.key })} className={`rounded-md border px-1 py-1 text-[11px] ${c.tidePhase === t.key ? 'border-amber-400 bg-amber-500/15 text-white' : 'border-slate-700 text-slate-300 hover:border-slate-500'}`}>
+                {t.name}
+              </button>
+            ))}
+          </div>
+          <p className="text-[11px] text-slate-500">The same surge at high tide instead of low puts the sea {(2 * c.tide).toFixed(1)} m higher. The tide here is the main lunar tide (M2, {M2_PERIOD} h).</p>
+        </>
+      )}
+    </div>
+  )
+}
+
+/** Tornado: the climatology's (tiny) odds, or a what-if one through the city. */
+function TornadoOption({ value, setValue }) {
+  const opts = [
+    ['natural', 'Natural odds', 'Tornadoes form in the outer rainbands, mostly ahead and to the right of the storm around landfall. One crossing a 1 km district is very rare.'],
+    ['ef1', `What-if: ${EF[1].name}`, `A tornado with ${EF[1].kmh} km/h winds crosses the city when the rainbands make one most likely.`],
+    ['ef2', `What-if: ${EF[2].name}`, `A strong tornado, ${EF[2].kmh} km/h, crosses the city.`],
+  ]
+  return (
+    <div className="mt-2 space-y-1 rounded-lg border border-slate-700 bg-slate-800/40 p-3 text-xs">
+      <div className="font-semibold text-slate-200">🌪️ Tornado</div>
+      <div className="grid grid-cols-3 gap-1">
+        {opts.map(([k, l, d]) => (
+          <button key={k} onClick={() => setValue(k)} title={d} className={`rounded-md border px-1 py-1 text-[11px] ${value === k ? 'border-amber-400 bg-amber-500/15 text-white' : 'border-slate-700 text-slate-300 hover:border-slate-500'}`}>
+            {l}
+          </button>
+        ))}
+      </div>
+      <p className="text-[11px] text-slate-500">{(opts.find((o) => o[0] === value) ?? opts[0])[2]}</p>
     </div>
   )
 }
@@ -275,7 +356,11 @@ function BulletinTrack({ p, setP }) {
 export function TyphoonForecast({ sc, defaultOpen = false }) {
   const [open, setOpen] = useState(defaultOpen)
   const [eq, setEq] = useState(false)
-  const fc = useMemo(() => forecastSummary(buildStorm(sc)), [sc])
+  const [fc, hz] = useMemo(() => {
+    const storm = buildStorm(sc)
+    const f = forecastSummary(storm)
+    return [f, hazardForecast(storm, f.startH, f.endH)]
+  }, [sc])
   const kmh = (ms) => Math.round(msToKmh(ms))
   return (
     <div className="mt-2 rounded-lg border border-slate-700/70 bg-slate-900/40 text-xs">
@@ -297,6 +382,20 @@ export function TyphoonForecast({ sc, defaultOpen = false }) {
             <R k="Eye passes over" v={fc.eyeH > 0 ? `yes, ~${Math.max(10, Math.round((fc.eyeH * 60) / 10) * 10)} min of calm` : 'no'} accent={fc.eyeH > 0 ? 'text-red-300' : undefined} />
             <R k="Simulation starts" v={`${Math.round(-fc.startH)} h before closest approach`} />
           </Sec>
+          <Sec title="Thunderstorms">
+            <R k="Lightning strikes in the city" v={`~${hz.cg < 1 ? hz.cg.toFixed(1) : Math.round(hz.cg)}`} />
+            <R k="Flashes within ~10 km" v={`~${Math.round(hz.flashes).toLocaleString()}`} />
+            <R k="Tornadoes within 50 km" v={`~${hz.tornadoNear.toFixed(hz.tornadoNear < 1 ? 2 : 1)}`} />
+            <R k="Chance one crosses the city" v={sc.tornado === 'natural' ? (hz.tornadoHit < 0.001 ? '< 0.1%' : `${(hz.tornadoHit * 100).toFixed(1)}%`) : `what-if: an ${sc.tornado.toUpperCase()}`} accent={sc.tornado === 'natural' ? undefined : 'text-red-300'} />
+          </Sec>
+          {fc.sea && (
+            <Sec title="The sea at the coast">
+              <R k="Peak sea level (above normal)" v={`${fc.sea.peak.toFixed(1)} m · ${when(fc.sea.peakTau)}`} accent={fc.sea.peak >= 2 ? 'text-red-300' : 'text-sky-300'} />
+              <R k="Storm surge at the peak" v={`${fc.sea.surgeAtPeak.toFixed(1)} m`} />
+              <R k="· low pressure / wind / waves" v={`${fc.sea.parts.pressure.toFixed(1)} / ${fc.sea.parts.wind.toFixed(1)} / ${fc.sea.parts.wave.toFixed(1)} m`} />
+              <R k="Tide at the peak" v={`${fc.sea.tideAtPeak >= 0 ? '+' : '−'}${Math.abs(fc.sea.tideAtPeak).toFixed(1)} m`} />
+            </Sec>
+          )}
           <Sec title="The storm at closest approach">
             <R k={`Category (PAGASA)${fc.ss ? ' · Saffir–Simpson' : ''}`} v={`${fc.category.name}${fc.ss ? ` · Cat ${fc.ss}` : ''}`} />
             <R k="Max sustained near the centre" v={`${Math.round(tenMinKmh(fc.vmaxCA))} km/h 10-min · ${kmh(fc.vmaxCA)} 1-min`} />
@@ -305,7 +404,7 @@ export function TyphoonForecast({ sc, defaultOpen = false }) {
             <R k="Holland B · outer exponent" v={`${fc.B.toFixed(2)} · ${fc.xn.toFixed(2)}`} />
           </Sec>
           <p className="text-[10px] text-slate-500">
-            City winds are for open ground at the coast (×{SITE_EXPOSURE} of the marine wind). Wind damage to buildings, trees and power, and storm surge, come in later versions; rain and river floods are simulated now.
+            City winds are for open ground at the coast (×{SITE_EXPOSURE} of the marine wind). Buildings feel more at roof height and in the open, less behind taller neighbours.{fc.sea ? ' Sea levels are a bulk estimate at the coast, not a full surge model; wave runup comes on top.' : ''}
           </p>
           <button onClick={() => setEq(!eq)} className="text-sky-300 hover:text-sky-200">
             {eq ? 'Hide' : 'Show'} equations
@@ -331,6 +430,11 @@ function Timeline({ fc }) {
   const line = pts.map((e, i) => `${i ? 'L' : 'M'}${x(e.tau).toFixed(1)},${yW(e.kmh10).toFixed(1)}`).join('')
   const bands = []
   for (const g of SIGNALS) if (g.kmh < maxW) bands.push(g)
+  // sea level at the coast (m above normal), on its own scale
+  const sea = fc.sea?.timeline.filter((e) => e.tau >= from && e.tau <= to)
+  const maxS = sea ? Math.max(2, ...sea.map((e) => e.level)) * 1.1 : 1
+  const yS = (v) => H - ((v + 1) / (maxS + 1)) * (H - 6)
+  const seaLine = sea?.map((e, i) => `${i ? 'L' : 'M'}${x(e.tau).toFixed(1)},${yS(e.level).toFixed(1)}`).join('')
   return (
     <div>
       <svg viewBox={`0 0 ${W} ${H + 12}`} className="w-full" role="img" aria-label="Wind and rain at the city over time">
@@ -340,6 +444,7 @@ function Timeline({ fc }) {
         {pts.map((e) => (
           <rect key={e.tau} x={x(e.tau)} width={W / pts.length + 0.3} y={H - (e.rain / maxR) * (H * 0.6)} height={(e.rain / maxR) * (H * 0.6)} fill="#38bdf8" opacity={0.45} />
         ))}
+        {seaLine && <path d={seaLine} fill="none" stroke="#22d3ee" strokeWidth={1.4} strokeDasharray="4 2" />}
         <path d={line} fill="none" stroke="#fbbf24" strokeWidth={1.6} />
         <line x1={x(0)} x2={x(0)} y1={0} y2={H} stroke="#94a3b8" strokeDasharray="2 2" strokeWidth={0.8} />
         <text x={x(0) + 2} y={9} fontSize={8} fill="#94a3b8">
@@ -356,6 +461,11 @@ function Timeline({ fc }) {
         <span>
           <span className="text-amber-300">━</span> wind {Math.round(maxW / 1.1)} km/h max
         </span>
+        {sea && (
+          <span>
+            <span className="text-cyan-400">┅</span> sea +{(maxS / 1.1).toFixed(1)} m max
+          </span>
+        )}
         <span>
           <span className="text-sky-400">▮</span> rain {Math.round(maxR / 1.1)} mm/h max
         </span>
@@ -394,6 +504,11 @@ function Equations() {
     ['Averaging and gusts (WMO 2010)', `10-min = ${TEN_TO_ONE} × 1-min;  3-s gust ≈ ${GUST_LAND} × 1-min over land`],
     ['Rain (R-CLIPER, Tuleya 2007)', 'R = T₀ + (Tm − T₀)·r/rm inside rm,  Tm·e^(−(r−rm)/re) outside; + eye, eyewall and spiral rainbands'],
     ['Wind signals (PAGASA 2022)', 'No. 1–5 at 39 / 62 / 89 / 118 / 185 km/h, raised 36 / 24 / 18 / 12 / 12 h ahead'],
+    ['Windborne debris (Wills 2002; Tachikawa 1983)', 'take-off U_f = √(2·ρm·t·g·I / (ρa·C_F));  K = ρa·U²·A / (2·m·g);  plate: drag ½ρa·C_D·A·|Vr|·Vr + lift C_L;  glass breaks at ~35 J'],
+    ['Lightning', 'flash rate ∝ rainband convection, quiet inside ~1.5 Rmax;  25% to ground;  rolling sphere R = 45 m picks the strike point'],
+    ['TC tornadoes (Schultz & Cecil 2009)', 'front-right quadrant 340°–120°, 200–400 km out, peaking after landfall;  Rankine vortex V = Vr·r/Rc inside, Vr·Rc/r outside'],
+    ['Storm surge (bulk model)', 'η = Δp/(ρw·g) + k·ρa·Cd·|U|·Uₙ·L/(ρw·g·h) + 0.15·Hs,  Hs ≈ 0.2·U;  Cd: Large & Pond (1981), ≤ 2.5×10⁻³'],
+    ['Surge build-up and tide', 'wind setup relaxes over L/√(g·h);  tide = A·cos(2π(t − t_high)/12.42 h)'],
   ]
   return (
     <div className="space-y-1 rounded bg-slate-950/50 p-2">

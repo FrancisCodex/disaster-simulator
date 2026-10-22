@@ -121,6 +121,7 @@ export class Debris {
     this.cursor = 0
     scene.add(this.mesh)
     this.surfaceAt = () => ({ y: 0, bid: -1 })
+    this.wind = [0, 0] // m/s, world x and z: carries windborne pieces
   }
 
   /**
@@ -159,6 +160,7 @@ export class Debris {
       sleep: false,
       dirty: true,
       fragile: !!opts.fragile,
+      windborne: !!opts.windborne,
       facade: !!opts.facade,
       src: opts.src ?? -1,
       color,
@@ -192,6 +194,25 @@ export class Debris {
       it.age += dt
       for (let s = 0; s < steps && !it.sleep; s++) {
         it.vy -= 9.81 * h
+        if (it.windborne) {
+          // a tumbling plate (see debrisFlight.js): drag along the relative wind and,
+          // while it autorotates, a lift across it. ρa·A / 2m ≈ 0.19 /m for roof sheeting.
+          // The wind is the local one: a tornado's vortex and updraught when one is near.
+          const w = this.windAt ? this.windAt(it.x, it.z) : this.wind
+          const ux = w[0] * 1.15
+          const uz = w[1] * 1.15
+          const rx = ux - it.vx
+          const ry = (w[2] ?? 0) - it.vy
+          const rz = uz - it.vz
+          const R = Math.hypot(rx, ry, rz)
+          const Rh = Math.hypot(rx, rz)
+          const k = 0.19 * R * h
+          it.vx += k * 1.17 * rx
+          it.vy += k * (1.17 * ry + 0.3 * Rh)
+          it.vz += k * 1.17 * rz
+          it.wx += (Math.random() - 0.5) * R * h
+          it.wz += (Math.random() - 0.5) * R * h
+        }
         it.x += it.vx * h
         it.y += it.vy * h
         it.z += it.vz * h
@@ -230,6 +251,8 @@ export class Debris {
             break
           }
           it.y = g
+          // a sheet that comes down lies flat and snags: the wind no longer carries it
+          it.windborne = false
           if (it.vy < 0) it.vy = -it.vy * 0.25
           it.vx *= 0.55
           it.vz *= 0.55

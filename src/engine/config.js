@@ -130,6 +130,42 @@ export const CONSTRUCTION = {
 
 export const DAMAGE_STATES = ['None', 'Slight', 'Moderate', 'Extensive', 'Complete']
 
+// ------------------------------------------------------------------ Wind
+// Wind resistance as the 3-s gust (m/s) at roof height that gives a 50%
+// chance of failure (lognormal, β = WIND_BETA), for the HAZUS-Hurricane chain
+// of components: windows and doors breached → roof cover peeled off → roof
+// structure lifted off → walls / whole building fail. Tuned to the pattern
+// of post-Haiyan (2013) surveys: light timber and hollow-block homes lost
+// roofs at gusts of ~150–200 km/h and were flattened above ~250 km/h, while
+// engineered concrete kept its frame and lost glass and cladding.
+export const WIND_BETA = 0.2
+export const WIND = {
+  wood_old: { glass: 42, cover: 36, roof: 46, collapse: 62 },
+  wood_mod: { glass: 48, cover: 48, roof: 60, collapse: 80 },
+  urm: { glass: 45, cover: 39, roof: 50, collapse: 68 },
+  rc_low: { glass: 48, cover: 42, roof: 55, collapse: 115 },
+  rc_mod: { glass: 52, cover: 46, roof: 60, collapse: 140 },
+  rc_high: { glass: 56, cover: 50, roof: 64, collapse: 160 },
+  steel: { glass: 56, cover: 48, roof: 62, collapse: 155 },
+  isolated: { glass: 56, cover: 50, roof: 64, collapse: 160 },
+}
+// masonry under a concrete roof slab is tied together: far harder to flatten than under a light roof
+export const SLAB_COLLAPSE = 1.5
+// Roof by building type: 'light' = sheet or tile on timber, 'metal' = metal
+// sheet on steel purlins (sheds, stands), 'slab' = concrete roof slab (it
+// never blows off; only rooftop plant and cladding go).
+export const ROOF_KIND = { house: 'light', school: 'light', shelter: 'light', worship: 'light', museum: 'light', industrial: 'metal', stadium: 'metal' }
+export const roofKind = (type) => ROOF_KIND[type] ?? 'slab'
+// metal sheds: cladding fails early, the steel frame holds
+export const METAL_ROOF = { cover: 42, roof: 55 }
+// Trees: windthrow or stem breakage (broadleaf / conifer), 3-s gust at crown height
+export const TREE_WIND = [42, 46]
+// Distribution poles and lines along a 250 m feeder; the line into the city
+export const POLE_WIND = 47
+export const GRID_WIND = 58
+// Steel street-lighting columns and traffic-signal poles (3-s gust at ~8 m)
+export const STREET_POLE_WIND = [54, 50]
+
 // Casualty fractions of occupants present, by damage state reached.
 // [dead, trapped (alive), critical injured, minor injured]
 export const QUAKE_CASUALTY = [
@@ -569,6 +605,11 @@ export const HISTORICAL_QUAKES = [
 // track the district is on (the right is the windy side in the north),
 // landfall: hours before (−) or after (+) closest approach, null = stays at sea.
 // rainBoost: extra rain from the monsoon or mountains.
+// coast: the city is on the coast and gets the storm surge (SHELVES and
+// TIDE_PHASES in typhoonPhysics.js): shelf type, facing (the direction the
+// sea lies in, ° from north; null = toward where the storm comes from), tide
+// amplitude (m) and the state of the tide at closest approach. The shelves
+// and tides of the reenactments are approximations.
 export const TYPHOON_LEVELS = [
   { name: 'Monsoon low', wind: 40, avg: 10, heading: 300, speed: 8, dist: 20, side: 'right', landfall: -6, lat: 15, rainBoost: 3.5, desc: 'A weak, slow low-pressure area pulling in the southwest monsoon. Little wind, but rain for a day and a half.', example: 'Habagat rains, as in Metro Manila in August 2012.' },
   { name: 'Tropical depression', wind: 55, avg: 10, heading: 290, speed: 18, dist: 40, side: 'right', landfall: -4, lat: 14, rainBoost: 1.3, desc: 'Gusty rain bands. Drains near capacity, streets flood in low spots.', example: 'A typical PAGASA "TD" crossing Luzon.' },
@@ -585,16 +626,16 @@ export const TYPHOON_LEVELS = [
 // heading and speed, passing `city` at about `dist` km on the given `side`.
 // These are approximations for the game, not best-track data.
 export const HISTORICAL_TYPHOONS = [
-  { id: 'haiyan2013', year: 2013, name: 'Haiyan', local: 'Yolanda', place: 'Philippines', city: 'Tacloban', wind: 315, avg: 1, pc: 895, heading: 285, speed: 40, dist: 15, side: 'right', landfall: -0.3, lat: 11.2, deaths: '~6,300', desc: 'One of the strongest storms ever to make landfall, moving fast across the Leyte Gulf. Most deaths came from a 4–6 m storm surge funnelled into Tacloban (surge is simulated in a later phase).' },
+  { id: 'haiyan2013', year: 2013, name: 'Haiyan', local: 'Yolanda', place: 'Philippines', city: 'Tacloban', wind: 315, avg: 1, pc: 895, heading: 285, speed: 40, dist: 15, side: 'right', landfall: -0.3, lat: 11.2, coast: { on: true, shelf: 'bay', facing: 135, tide: 0.5, tidePhase: 'rising' }, deaths: '~6,300', observed: 'Surge of ~4–6 m at Tacloban', desc: 'One of the strongest storms ever to make landfall, moving fast across the Leyte Gulf. Most deaths came from a 4–6 m storm surge funnelled up San Pedro Bay into Tacloban. Many residents had never heard the term "storm surge".' },
   { id: 'goni2020', year: 2020, name: 'Goni', local: 'Rolly', place: 'Philippines', city: 'Virac, Catanduanes', wind: 315, avg: 1, pc: 905, heading: 255, speed: 20, dist: 10, side: 'left', landfall: -0.2, lat: 13.6, rainBoost: 1.2, deaths: '~30', desc: 'The strongest landfall on record by 1-minute wind. A tiny, violent core; mass pre-emptive evacuation kept deaths low.' },
   { id: 'rai2021', year: 2021, name: 'Rai', local: 'Odette', place: 'Philippines', city: 'Surigao City', wind: 195, avg: 10, pc: 915, heading: 280, speed: 25, dist: 25, side: 'left', landfall: -1, lat: 9.8, deaths: '~410', desc: 'A rare December super typhoon that intensified rapidly just before hitting Siargao, leaving little time to prepare.' },
   { id: 'ketsana2009', year: 2009, name: 'Ketsana', local: 'Ondoy', place: 'Philippines', city: 'Marikina, Metro Manila', wind: 85, avg: 10, heading: 275, speed: 15, dist: 30, side: 'left', landfall: -3, lat: 14.6, rainBoost: 3.8, deaths: '~460', observed: '455 mm in 24 h at Science Garden, Quezon City', desc: 'Only a tropical storm, but it dragged in the monsoon: a month of rain in a day. The Marikina River rose ~6 m and flooded most of the city.' },
-  { id: 'mangkhut2018', year: 2018, name: 'Mangkhut', local: 'Ompong', place: 'Hong Kong', city: 'Hong Kong', wind: 175, avg: 10, pc: 955, heading: 290, speed: 30, dist: 100, side: 'right', landfall: 5, r34: 350, lat: 22.3, deaths: '0 in Hong Kong (134 overall)', desc: 'A huge storm passing 100 km south of Hong Kong. Heavy damage, but strict codes and warnings meant no deaths in the city.' },
+  { id: 'mangkhut2018', year: 2018, name: 'Mangkhut', local: 'Ompong', place: 'Hong Kong', city: 'Hong Kong', wind: 175, avg: 10, pc: 955, heading: 290, speed: 30, dist: 100, side: 'right', landfall: 5, r34: 350, lat: 22.3, coast: { on: true, shelf: 'shelf', facing: 135, tide: 0.6, tidePhase: 'rising' }, deaths: '0 in Hong Kong (134 overall)', observed: 'Surge of 2.35 m at Quarry Bay, Victoria Harbour', desc: 'A huge storm passing 100 km south of Hong Kong. Heavy damage, but strict codes and warnings meant no deaths in the city.' },
   { id: 'hagibis2019', year: 2019, name: 'Hagibis', place: 'Japan', city: 'Kawasaki (Tama River)', wind: 165, avg: 10, pc: 955, heading: 20, speed: 35, dist: 30, side: 'right', landfall: -2, r34: 400, lat: 35.5, rainBoost: 1.8, deaths: '~100', desc: 'A large storm with an enormous rain shield; record rain in the mountains (~922 mm in 24 h at Hakone) broke river levees across eastern Japan.' },
-  { id: 'nargis2008', year: 2008, name: 'Nargis', place: 'Myanmar', city: 'Bogale, Irrawaddy delta', wind: 215, avg: 1, pc: 962, heading: 70, speed: 15, dist: 15, side: 'right', landfall: -1, lat: 16.3, rainBoost: 1.2, deaths: '≥138,000', desc: 'Struck a low, densely farmed delta with no shelters and almost no warning. Nearly all deaths came from the 4 m storm surge (simulated in a later phase).' },
-  { id: 'katrina2005', year: 2005, name: 'Katrina', place: 'USA', city: 'New Orleans', wind: 205, avg: 1, pc: 920, heading: 5, speed: 20, dist: 40, side: 'left', landfall: -2, lat: 30.0, deaths: '~1,400', desc: 'The eye passed east of New Orleans. Wind damage was moderate; the storm surge broke the city’s flood walls.' },
+  { id: 'nargis2008', year: 2008, name: 'Nargis', place: 'Myanmar', city: 'Bogale, Irrawaddy delta', wind: 215, avg: 1, pc: 962, heading: 70, speed: 15, dist: 15, side: 'right', landfall: -1, lat: 16.3, rainBoost: 1.2, coast: { on: true, shelf: 'shelf', facing: 180, tide: 1.2, tidePhase: 'rising' }, deaths: '≥138,000', observed: 'Surge of ≥4 m (~12 ft at Bogale), up to ~40 km inland', desc: 'Struck a low, densely farmed delta with no shelters and almost no warning. Nearly all deaths came from the 4 m storm surge, which ran tens of kilometres inland across the rice fields.' },
+  { id: 'katrina2005', year: 2005, name: 'Katrina', place: 'USA', city: 'New Orleans', wind: 205, avg: 1, pc: 920, heading: 5, speed: 20, dist: 40, side: 'left', landfall: -2, lat: 30.0, coast: { on: true, shelf: 'shelf', facing: 110, tide: 0.25, tidePhase: 'rising' }, deaths: '~1,400', observed: '~8.5 m surge on the Mississippi coast; 4–5 m against the east-side walls of New Orleans', desc: 'The eye passed east of New Orleans. Wind damage was moderate; the surge pushed in from Lake Borgne and broke the city’s flood walls.' },
   { id: 'maria2017', year: 2017, name: 'Maria', place: 'Puerto Rico', city: 'San Juan', wind: 250, avg: 1, pc: 917, heading: 300, speed: 15, dist: 25, side: 'right', landfall: -3, lat: 18.4, rainBoost: 1.4, deaths: '~2,975 (excess deaths)', desc: 'A Category 4 crossing the whole island diagonally. The grid collapsed and most deaths came in the months without power.' },
-  { id: 'idai2019', year: 2019, name: 'Idai', place: 'Mozambique', city: 'Beira', wind: 195, avg: 1, pc: 950, heading: 270, speed: 10, dist: 10, side: 'right', landfall: -0.5, lat: -19.8, rainBoost: 1.5, deaths: '~1,300', desc: 'A southern-hemisphere cyclone (winds turn clockwise, the left side is the strong one). Surge, then river floods from rain over the interior.' },
+  { id: 'idai2019', year: 2019, name: 'Idai', place: 'Mozambique', city: 'Beira', wind: 195, avg: 1, pc: 950, heading: 270, speed: 10, dist: 10, side: 'left', landfall: -0.5, lat: -19.8, rainBoost: 1.5, coast: { on: true, shelf: 'shelf', facing: 160, tide: 1.5, tidePhase: 'rising' }, deaths: '~1,300', desc: 'A southern-hemisphere cyclone (winds turn clockwise, the left side is the strong one). The eye came ashore just north of Beira: surge first, then river floods from rain over the interior.' },
   { id: 'harvey2017', year: 2017, name: 'Harvey', place: 'USA', city: 'Houston', wind: 215, avg: 1, pc: 938, heading: 0, speed: 4, dist: 130, side: 'right', landfall: -24, lat: 29.8, rainBoost: 3, deaths: '~107', observed: 'Up to ~1,500 mm over four days', desc: 'Weakened over land, then stalled for days. Houston saw modest winds and the heaviest rainfall ever recorded in the USA.' },
   { id: 'yagi2024', year: 2024, name: 'Yagi', local: 'Enteng', place: 'Vietnam', city: 'Hải Phòng', wind: 185, avg: 1, pc: 955, heading: 280, speed: 15, dist: 15, side: 'left', landfall: -0.5, lat: 20.9, rainBoost: 1.4, deaths: '~300 in Vietnam', desc: 'Crossed Hainan and the Gulf of Tonkin as a super typhoon. Millions of urban trees fell; floods and landslides followed inland.' },
 ]
@@ -607,22 +648,63 @@ export const COSTS = {
   softStoreyM2: 300, // $/m² footprint: steel frames / shear walls in the ground floor only
   anchorM2: 60, // $/m² facade: ties, parapet bracing, glazing film
   elevateM2: 1400, // $/m² footprint
-  leveeCell: 0.3, // $M per 10 m of 3 m flood wall
+  leveeCell: 0.3, // $M per 10 m of 3 m flood wall (scales with height)
   pump: 6,
+  bigPump: 13, // 25 m³/s
   pond: 1.5,
   park: 0.25,
+  // typhoon wind measures, per building
+  strapsM2: 35, // $/m² footprint: hurricane ties on every rafter or truss
+  fixingsM2: 25, // $/m² footprint: screws at every purlin, edge strips
+  shuttersM2: 40, // $/m² facade (a third of it glazed)
+  rod: 0.02, // $M per lightning protection system
+  // coast
+  seawallCell: 0.45, // $M per 10 m of 4 m sea wall with flap gates
+  mangroveCell: 0.015, // $M per 10 × 10 m planted (and grown)
+  riverGate: 9,
+  relocateHousehold: 0.012, // $M per household: land, compensation, moving
 }
 
 export const LEVEE_HEIGHT = 3
+export const LEVEE_HEIGHTS = [2, 3, 4]
+export const SEAWALL_HEIGHT = 4 // m above the ground it stands on
 export const PUMP_RATE = 10 // m³/s
+export const BIG_PUMP_RATE = 25
 export const POND_DEPTH = 3.5
+// Wind hardening, as multipliers on the 50%-failure gusts of WIND (see windMedians):
+// hurricane straps hold the roof structure and tie the walls together,
+// better fixings keep the sheets on, closed shutters stop the glass going
+// (and with it the internal pressure) and take ~20× the impact energy.
+export const WIND_MEASURES = {
+  straps: { roof: 1.3, collapse: 1.1 },
+  fixings: { cover: 1.25 },
+  shutters: { glass: 1.15, impact: 20 },
+}
+// River level alarms (m relative to the banks), after Marikina's gauge: warning, prepare, forced evacuation
+export const RIVER_ALARMS = [-2.5, -1.5, -0.5]
 
 export const UPGRADES = {
   floodWarning: {
-    name: 'Typhoon early warning & pre-emptive evacuation',
-    desc: 'River gauges, sirens and a plan tied to the PAGASA wind signals: low-lying districts are evacuated as soon as Signal No. 3 is raised or the river nears its banks.',
+    name: 'River gauges, sirens & warning network',
+    desc: 'Gauges with alarm levels on the river, sirens and barangay radios: the evacuation plan\'s orders reach every street within the hour, and the plan can act on river alarms.',
     cost: () => 1.5,
     disaster: 'typhoon',
+    group: 'People',
+  },
+  surgeWarning: {
+    name: 'Plain-language storm surge warnings',
+    desc: 'Surge warnings in colour bands with what they mean ("water over the roofs of one-storey houses"), as PAGASA adopted after Haiyan. Far more coastal residents leave when told.',
+    cost: () => 0.8,
+    disaster: 'typhoon',
+    group: 'People',
+    coastal: true,
+  },
+  drills: {
+    name: 'Community drills & volunteers',
+    desc: 'Trained barangay volunteers and yearly drills, as in Bangladesh\'s Cyclone Preparedness Programme: people know where to go and leave faster when ordered.',
+    cost: (city) => Math.round(city.buildings.length * 0.003 * 10) / 10 + 0.5,
+    disaster: 'typhoon',
+    group: 'People',
   },
   drainage: {
     name: 'Storm-drain upgrade',
@@ -630,12 +712,71 @@ export const UPGRADES = {
     cost: (city, lvl) => Math.round(city.urbanCells * 0.004 * (1 + lvl * 0.5) * 10) / 10,
     max: 2,
     disaster: 'typhoon',
+    group: 'Water',
+  },
+  tideGates: {
+    name: 'Flap gates on drain outfalls',
+    desc: 'One-way gates where the drains empty: a high river or sea can no longer push back up them, so drains keep working longer in a high tide or surge.',
+    cost: (city) => Math.round(city.urbanCells * 0.0015 * 10) / 10 + 1,
+    disaster: 'typhoon',
+    group: 'Water',
+  },
+  pumpGenerators: {
+    name: 'Backup generators at pump stations',
+    desc: 'Every pump station (built now or later) keeps running in a blackout. Without them, pumps stop exactly when the storm cuts the power.',
+    cost: (city) => 1 + city.pumps.length * 0.8,
+    disaster: 'typhoon',
+    group: 'Water',
   },
   dredge: {
     name: 'River dredging & widening',
     desc: 'Deepens the river channel by 1.5 m, raising how much flow it can carry before overtopping.',
     cost: (city) => (city.type === 'rural' ? 12 : 20),
     disaster: 'typhoon',
+    group: 'Water',
+  },
+  floodway: {
+    name: 'Upstream floodway',
+    desc: 'A diversion channel upstream takes the river\'s flow above 400 m³/s, up to 1,000 m³/s more, away to a lake or the sea (as the Manggahan Floodway does for the Marikina). Above its capacity, the river floods anyway.',
+    cost: (city) => (city.type === 'rural' ? 25 : 60),
+    disaster: 'typhoon',
+    group: 'Water',
+  },
+  windCodeProgram: {
+    name: 'Wind-resistant roof code',
+    desc: 'Every light or metal roof gets hurricane straps and proper sheet fixings, enforced through permits (the NSCP wind provisions, done properly). Owners share the cost: the city pays 50%.',
+    program: { tools: ['straps', 'fixings'], share: 0.5 },
+    disaster: 'typhoon',
+    group: 'Wind',
+  },
+  criticalWindProgram: {
+    name: 'Storm-proof hospitals, schools & shelters',
+    desc: 'Shutters, straps and fixings on every hospital, school, fire station and shelter, so they come through the storm usable. Full cost.',
+    program: { tools: ['shutters', 'straps', 'fixings'], share: 1, types: ['hospital', 'school', 'fire', 'shelter'] },
+    disaster: 'typhoon',
+    group: 'Wind',
+  },
+  treeCare: {
+    name: 'Tree pruning & line clearance',
+    desc: 'Street and park trees thinned, deadwood removed, and branches cut back from power lines: trees stand up to stronger gusts and fewer of them bring the lines down.',
+    cost: (city) => Math.round(city.trees.length * 0.0015 * 10) / 10 + 0.3,
+    disaster: 'typhoon',
+    group: 'Wind',
+  },
+  poles: {
+    name: 'Hardened power distribution',
+    desc: 'Level 1: concrete and steel poles instead of wood (Meralco\'s programme). Level 2: lines buried underground — about 80% fewer outages in Florida after Irma, at ~10× the cost, but a flooded transformer still fails.',
+    cost: (city, lvl) => Math.round(city.urbanCells * (lvl ? 0.03 : 0.006) * 10) / 10,
+    max: 2,
+    disaster: 'typhoon',
+    group: 'Wind',
+  },
+  relocation: {
+    name: 'Danger-zone relocation',
+    desc: 'Homes the forecast puts under more than 1 m of river or sea water are demolished and their families resettled. It saves lives — but they must be rehoused, and resettlement far from work costs them their livelihood.',
+    action: true,
+    disaster: 'typhoon',
+    group: 'Land',
   },
   quakeWarning: {
     name: 'Earthquake early warning',

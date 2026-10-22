@@ -37,7 +37,9 @@ function RepoCard({ className = '' }) {
     >
       <GitHubMark className="h-5 w-5 shrink-0 text-slate-300 group-hover:text-white" />
       <span className="leading-tight">
-        <span className="block text-[10px] tracking-wide text-slate-400 uppercase">Open source · made by FrancisCodex</span>
+        <span className="block text-[10px] tracking-wide text-slate-400 uppercase">
+          <span className="text-violet-300">Beta</span> · open source · made by FrancisCodex
+        </span>
         <span className="block text-[12px] font-semibold text-slate-200 group-hover:text-white">
           disaster-simulator <span className="text-slate-400 group-hover:text-sky-300">↗</span>
         </span>

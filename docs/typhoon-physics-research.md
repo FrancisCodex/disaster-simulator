@@ -150,6 +150,13 @@ Published climatology:
 * When a tornado spawns, run a **Rankine vortex** across the grid (core radius 20–60 m, EF0–EF2, path 1–5 km at the band's motion), added on top of the TC wind. Damage uses the same wind fragility (§6), so its narrow track of destruction emerges by itself.
 * Show it rarely and dramatically, together with a "tornado warning" log line.
 
+### 4.3 As implemented (phase 4)
+* **Lightning** (`stormHazards.js`): the flash rate (all flashes, per km² per hour) follows the convective rain of the rainbands, damped inside ~1.5 Rmax, plus an eyewall burst while the peak wind is rising. A quarter of flashes reach the ground. A strike in the district attaches where the electrogeometric model puts it: the highest `top + √(R² − d²)` over roofs, trees and street-light poles, with R = 45 m. Strikes can set a building alight (timber ~30%, masonry ~12%, concrete ~4%), set a tree burning (much less likely in heavy rain) or split it, and blow transformers. The quake's `FireSim` burns the fires, with rain putting them out fast. Expected per storm: 0.2–1.6 ground strikes in the 1 km² city, and hundreds to ~2,000 flashes within 10 km.
+* **TC tornadoes:** genesis density = quadrant (−20° to 120° from the motion, mirrored in the south) × distance (peak ~280 km, a smaller one near the core) × landfall (×3 just after landfall, ×0.3 at sea) × intensity, scaled to ~10 tornadoes over a strong landfalling storm's region. Honest odds of one crossing the district are ~0.005% per storm, so the menu has a **what-if** (EF1 or EF2) that sends one through the city. It comes while a rainband is overhead before landfall, and only when its winds stand out above the typhoon's. Nearby tornadoes are reported in the log. The vortex is Rankine (core radius 20 / 35 / 50 m for EF0–2) carried with the low-level flow at 12–18 m/s, its gusts loading buildings and trees through the same fragility chain. The clock drops to 1 min/s so the player can watch.
+
+### 6.3.1 Windborne debris as implemented (phase 4)
+`debrisFlight.js` uses Wills et al. for take-off speed (a loose sheet lifts at ~9 m/s, a tile at ~28 m/s), and integrates a 2-D tumbling-plate trajectory (C_D 1.17, autorotation C_L 0.3). In typhoon winds a sheet flies 100–300 m at nearly the wind's speed (several kJ on impact); tiles fall within 30–140 m. When a roof fails, its pieces fly downwind. A building in their path is hit by the pieces still airborne below its roofline, and a hit breaks glass with a lognormal fragility on impact energy (E50 = 35 J). The renderer's flying sheets use the same aerodynamics, in the local wind including a tornado's vortex and updraught. Rapier stays reserved for structural wreckage: the analytic flight model gives the damage chain thousands of missiles per storm at negligible cost.
+
 ---
 
 ## 5. Storm surge (coastal cities)
@@ -170,6 +177,15 @@ Cheap bulk model (not SLOSH, but its main terms):
 * Add **tide** as a sinusoid (M2, 12.42 h) with user-set amplitude and phase. Surge at high tide versus low tide is a major real-world swing factor and a good teaching point.
 * **Implementation:** the downstream boundary of FloodSim becomes a time-varying water level. Where that level exceeds ground or sea-wall height, inflow enters through the existing local-inertial momentum equations. Water then propagates realistically through streets and up the river.
 * Calibration targets: Haiyan in Tacloban ~4–6 m, Nargis ≥ 4 m (12 ft at Bogale), Katrina ~8.5 m (Mississippi coast), Mangkhut in Victoria Harbour, where HKO forecast ≥ 3.5 m total sea level.
+
+### 5.1 As implemented (phase 3)
+* **Coastal city** (`cityGen.js`, `opts.coast`): the sea fills the south edge of the grid (open-water cells typed `CELL_RIVER`, flagged in `city.sea`), behind a sandy beach and a low coastal plain about 2–4 m above mean sea level for the first ~300 m. The river's banks fall toward the sea and its mouth silts into a bar. A bay shelf curves the shoreline inland. Being coastal is a property of the **city**, chosen in the menu's City step with its shelf type, for any disaster (an earthquake city can be coastal too, ready for tsunamis later). The typhoon's **Storm surge** panel then sets the direction the sea lies in, the tide amplitude and the tide at closest approach. Picking a historical surge storm (Haiyan, Nargis, Katrina, Idai, Mangkhut) puts the city on that storm's kind of coast.
+* **Frame:** the storm is rotated so that the sea's real direction maps onto the grid's south (`buildStorm`, `s.rot`); `toGeo` / `geoCompass` turn directions back for the compass in the log.
+* **Surge** (`typhoonPhysics.js`): the bulk model above, evaluated every 5 minutes (`surgeTimeline`). The onshore stress is averaged at 15 / 50 / 85 % of the shelf width, Cd follows Large & Pond (1981) capped at 2.5×10⁻³, Hs ≈ 0.2·U at the shelf edge, and the wind setup relaxes over the shelf's seiche time L/√(g·h). Shelves: open coast (L 12 km, h 30 m), wide shallow shelf (80 km, 11 m), funnel bay (30 km, 18 m, ×2.1). Tide: M2 cosine.
+* **Calibration** (peak surge, before tide): Haiyan 4.7 m, Katrina 4.8 m, Idai 4.6 m, Mangkhut 2.6 m (observed 2.35 m), Nargis 3.2 m (below the ≥ 4 m target; a dedicated delta shelf could close the gap).
+* **FloodSim:** open-sea cells (the grid edge, and everything more than 30 m off the beach) are held at mean sea level + tide + surge; only a near-shore band is solved, so the sea costs about the same per simulated hour as an inland river. The surge runs up the streets and the river through the existing momentum equations. Storm drains stop as the sea covers their outfalls.
+* **Impact:** people drowned by seawater count as **storm-surge deaths**. Breaking waves on the surge add ½√(g·d) to the flow velocity within ~80 m of the beach, which is what smashes beachfront homes. Survivors in a wind-flattened home have no upper floor to climb to. The early-warning plan evacuates everything below the forecast sea level + 1 m; without it, only the beachfront leaves, and only once the sea is visibly rising.
+* **Before the storm:** the risk map's flood layer adds the sea at its forecast peak (a connected bathtub from the sea, with a slider), and the forecast panel gives the peak sea level and its parts. **During:** a sea-level gauge in the HUD; a surge warning, drawdown, coming-ashore and peak lines in the log; a lesson on the tide in the results.
 
 ---
 
@@ -300,7 +316,9 @@ src/engine/typhoonSim.js       orchestrator: advances the storm along its track;
                                wind (speed, dir, gust field), rain, catchment rain, sea level and
                                lightning/tornado events; owns component damage state.
 src/engine/windDamage.js       component fragility chain (§6.1), trees, poles.
-src/engine/debrisFlight.js     Rapier aerodynamics for windborne debris (§6.3).
+src/engine/debrisFlight.js     windborne debris: take-off, plate trajectories, impact energy (§6.3).
+src/engine/stormHazards.js     lightning (rolling sphere) and TC tornadoes (Rankine vortex), §4.
+src/engine/stormFx.js          bolts, flashes, the tornado funnel.
 src/engine/floodSim.js         + rain source hook, wind stress, time-varying downstream sea level.
 src/engine/config.js           TYPHOON_LEVELS, HISTORICAL_TYPHOONS (best-track points),
                                per-construction wind resistances, TCWS table.
@@ -308,11 +326,11 @@ src/ui/TyphoonScenario.jsx     Tier / Historical / Custom (bulletin) picker + fo
 ```
 
 Suggested phases, each one shippable:
-1. **Storm core + rain into FloodSim:** tracks, Holland wind (HUD readout only), R-CLIPER with rainbands, catchment inflow, the three-mode picker, TCWS signals. *Replaces the flood mode with nothing lost.*
-2. **Wind damage:** component fragility, trees, power, reversal fatigue, roof loss visuals, slanted rain.
-3. **Storm surge:** coastal city variant, tide, downstream boundary, Haiyan and Nargis presets.
-4. **Debris, lightning and tornadoes:** Rapier debris flight, rolling-sphere strikes, TC-tornado vortex.
-5. **Prep tools and after-action report:** shutters, roof straps, tree trimming, buried lines, generators at pumps, sea wall, mangrove belt, signal-triggered evacuation plans.
+1. ✅ **Storm core + rain into FloodSim:** tracks, Holland wind (HUD readout only), R-CLIPER with rainbands, catchment inflow, the three-mode picker, TCWS signals. *Replaces the flood mode with nothing lost.*
+2. ✅ **Wind damage:** component fragility, trees, power, reversal fatigue, roof loss visuals, slanted rain. Torn-off roof sheets already fly downwind with a simple drag model; phase 4 adds full plate aerodynamics and impact damage.
+3. ✅ **Storm surge:** coastal city variant, tide, downstream boundary, Haiyan and Nargis presets. See §5.1 for what was built.
+4. ✅ **Debris, lightning and tornadoes:** debris flight, rolling-sphere strikes, TC-tornado vortex. See §4.3 and §6.3.1 for what was built.
+5. ✅ **Prep tools and after-action report:** (5a, the preparation tools, ✅; 5b, the after-action report, ✅) shutters, roof straps, tree trimming, buried lines, generators at pumps, sea wall, mangrove belt, signal-triggered evacuation plans. Researched in detail, with each measure mapped onto the engine, in `typhoon-prep-research.md`.
 
 ---
 

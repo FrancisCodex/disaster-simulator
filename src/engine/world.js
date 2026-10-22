@@ -4,8 +4,12 @@ import * as THREE from 'three'
 import { MapControls } from 'three/addons/controls/MapControls.js'
 import { GRID, CELL, CELL_ROAD, CELL_RIVER, CELL_BANK, CELL_PARK, CELL_POND, CELL_GRASS, BUILDING_TYPES, CITY_TYPES, RIVER_HALF_WIDTH, RIVER_DEPTH } from './config.js'
 import { idx, cellToWorld } from './cityGen.js'
-import { makeNoise2D, clamp, lerp, smoothstep } from './math.js'
+import { makeNoise2D, clamp, lerp, smoothstep, normCdf } from './math.js'
 import { Particles, Debris, Rain } from './effects.js'
+import { StormClouds, WindStreaks } from './weather.js'
+import { StormFx } from './stormFx.js'
+import { vortexWind } from './stormHazards.js'
+import { depthColor } from './floodMap.js'
 import { makeWaterMaterial, SkyEnvironment } from './materials.js'
 import { BuildingParts } from './buildingMesh.js'
 import { buildProps, finishRect } from './props.js'
@@ -128,6 +132,15 @@ export class World {
     this.debris.onLand = (it, v, bid) => this.debrisLanded(it, v, bid)
     this.debris.onShatter = (it) => this.shatter(it)
     this.rain = new Rain(scene)
+    this.clouds = new StormClouds(scene)
+    this.streaks = new WindStreaks(scene)
+    this.leaves = new Particles(scene, 1500, false)
+    this.spray = new Particles(scene, 1500, false)
+    this.stormFx = new StormFx(scene, this.dust)
+    // wind for swaying trees: (direction x, direction z, sway amplitude m, speed m/s)
+    this.uWind = { value: new THREE.Vector4(1, 0, 0, 0) }
+    this.cloudTint = new THREE.Color(0x5c6470)
+    this.cloudCover = 0
     // collapsing buildings break into rigid pieces once the physics engine has loaded
     // (until then, or if it fails to load, collapses stay scripted)
     this.wreck = new Wreckage(this)
@@ -197,6 +210,8 @@ export class World {
 
   // ------------------------------------------------------------------ city
   buildCity(city, hour = 12) {
+    this.floodBaseY = null
+    if (this.tornado) this.setTornado(null)
     this.city = city
     this.clearGround()
     this.burning = [] // fires of the previous city must not follow us onto the new one
@@ -497,6 +512,7 @@ export class World {
   }
 
   updateTerrainHeights() {
+    this.floodBaseY = null
     const g = this.terrainGeo
     const pos = g.attributes.position.array
     const V = GRID + 1
@@ -552,6 +568,13 @@ export class World {
     const ez = clamp(z, -HALF, HALF)
     const edgeH = this.vertexHeight(Math.round((ex + HALF) / CELL), Math.round((ez + HALF) / CELL))
     const dist = Math.hypot(x - ex, z - ez)
+    const C = city.coast
+    if (C) {
+      // the coastline runs on east and west; offshore the seabed shelves away
+      const zs = (C.shoreMean + 0.5) * CELL - HALF
+      const off = z - zs
+      if (off > 0) return lerp(edgeH, C.msl - Math.min(25, 0.8 + off * 0.03), smoothstep(0, 250, dist))
+    }
     // the river keeps flowing north–south beyond the district
     const rx = (z < 0 ? city.riverCenter[0] : city.riverCenter[GRID - 1]) * CELL - HALF
     const bank = 20 - (z + HALF) * 0.0015
@@ -568,6 +591,11 @@ export class World {
       const far = smoothstep(500, 3200, Math.hypot(x, z))
       const mountains = ridged * 420 * far * valley
       natural = bank + 0.5 + Math.max(0, dr - hw) * 0.012 + Math.max(0, hills) + mountains
+    }
+    if (C) {
+      // a low coastal plain behind the beach, rising slowly inland
+      const inland = (C.shoreMean + 0.5) * CELL - HALF - z
+      natural = lerp(C.msl + 1.2 + inland * 0.004, natural, smoothstep(150, 1400, inland))
     }
     const w = smoothstep(0, 350, dist)
     return lerp(edgeH, natural, w)
@@ -622,18 +650,26 @@ export class World {
       const y = pos[k * 3 + 1]
       const slope = 1 - nor[k * 3 + 1]
       const f = noise.fbm(x * 0.004, z * 0.004, 3)
-      const above = y - (20 - (z + HALF) * 0.0015)
+      const above = y - this.outerBase(z)
       // meadow → forest → rock → snow
       _c.setRGB(0.36 + f * 0.05, 0.47 + f * 0.06, 0.25)
       if (f > 0.05 || above > 40) _c.lerp(new THREE.Color(0.17, 0.27, 0.15), smoothstep(0.0, 0.25, f) * 0.85 + smoothstep(40, 90, above) * 0.3)
       _c.lerp(new THREE.Color(0.45, 0.42, 0.38), smoothstep(0.25, 0.55, slope) + smoothstep(220, 330, above))
       _c.lerp(new THREE.Color(0.93, 0.94, 0.96), smoothstep(360, 430, above) * (1 - smoothstep(0.5, 0.8, slope)))
       if (above < 0.5) _c.setRGB(0.38, 0.33, 0.24)
+      // beaches along the coast, sand and silt under the sea
+      if (this.city.coast && y < this.city.coast.msl + 1.4) _c.setRGB(0.66, 0.6, 0.45).lerp(new THREE.Color(0.3, 0.3, 0.26), smoothstep(0, 8, this.city.coast.msl - y))
       col.set([_c.r, _c.g, _c.b], k * 3)
     }
     g.attributes.position.needsUpdate = true
     g.attributes.color.needsUpdate = true
     g.computeBoundingSphere()
+  }
+
+  /** Height the surrounding land's colours and forest are measured from: the river's banks, or on the coast the sea. */
+  outerBase(z) {
+    const bank = 20 - (z + HALF) * 0.0015
+    return this.city.coast ? Math.min(bank, this.city.coast.msl + 1.6) : bank
   }
 
   buildOuterForest() {
@@ -651,7 +687,7 @@ export class World {
       const f = noise.fbm(x * 0.004, z * 0.004, 3)
       if (f < 0.04) continue
       const y = this.outerHeight(x, z)
-      const above = y - (20 - (z + HALF) * 0.0015)
+      const above = y - this.outerBase(z)
       if (above < 1.5 || above > 300) continue
       const s = 6 + Math.random() * 7
       _m.makeScale(s * 0.38, s * 1.6, s * 0.38).setPosition(x, y - 0.5, z)
@@ -678,7 +714,11 @@ export class World {
         const n = noise.fbm(i * 0.2, j * 0.2, 2)
         let col
         if (t === CELL_ROAD) col = '#3b3e44'
-        else if (t === CELL_RIVER) col = '#4a4030'
+        else if (city.sea[k]) {
+          // sand under the shallows, darker silt further out
+          const dz = city.coast.msl - city.z[k]
+          col = `hsl(${42 - smoothstep(0, 6, dz) * 8}, ${32 - smoothstep(0, 6, dz) * 12}%, ${58 - smoothstep(0, 7, dz) * 26 + n * 3}%)`
+        } else if (t === CELL_RIVER) col = '#4a4030'
         else if (t === CELL_BANK) col = '#b5a477'
         else if (t === CELL_PARK) col = `hsl(105, 42%, ${33 + n * 6}%)`
         else if (t === CELL_POND) col = '#58613f'
@@ -721,7 +761,7 @@ export class World {
         const j = Math.floor(py / PX)
         if (i < 0 || i >= GRID) continue
         const t = city.cellType[idx(i, j)]
-        if (t === CELL_ROAD || city.buildingAt[idx(i, j)] >= 0) continue
+        if (t === CELL_ROAD || city.buildingAt[idx(i, j)] >= 0 || city.sea[idx(i, j)]) continue
         const d = Math.abs(px + 0.5 - c)
         if (d < hw) ctx.fillStyle = d < hw * 0.7 ? '#3f382b' : (px * 3 + py * 5) % 7 < 1 ? '#6e6250' : '#5d4f38'
         else if (d < bank) ctx.fillStyle = (px * 7 + py * 13) % 11 < 1 ? '#a8966a' : '#b5a477'
@@ -813,11 +853,21 @@ export class World {
           ctx.fillRect(x + Math.random() * PX, y + Math.random() * PX, 2, 1.2)
         }
       }
-    for (let k = 0; k < GRID * GRID; k++)
+    for (let k = 0; k < GRID * GRID; k++) {
       if (city.levee[k] > 0) {
-        ctx.fillStyle = '#6d6047'
+        ctx.fillStyle = city.seawall?.[k] ? '#8d8a82' : '#6d6047'
         ctx.fillRect((k % GRID) * PX, Math.floor(k / GRID) * PX, PX, PX)
       }
+      // a mangrove belt: dark tangled roots on the mud
+      if (city.mangrove?.[k]) {
+        const x = (k % GRID) * PX
+        const y = Math.floor(k / GRID) * PX
+        ctx.fillStyle = '#3d4a2c'
+        ctx.fillRect(x, y, PX, PX)
+        ctx.fillStyle = 'rgba(28,38,22,0.8)'
+        for (let q = 0; q < 6; q++) ctx.fillRect(x + ((k * 7 + q * 5) % PX), y + ((k * 3 + q * 11) % PX), 3, 3)
+      }
+    }
     if (this.groundFx) this.paintGroundFx(ctx)
     this.terrainTex.needsUpdate = true
   }
@@ -964,9 +1014,12 @@ export class World {
     this.root.add(mesh)
     this.wetVert = new Uint8Array(V * V)
     this.vh = new Float32Array(V * V)
-    // the river continues beyond the district to the north and south
+    // the river continues beyond the district to the north and south (on the coast, only north: the sea is south)
     this.outerRivers = []
-    for (const s of [-1, 1]) {
+    this.outerSea = null
+    this.outerSouth = null
+    if (this.city.coast) this.buildOuterSea()
+    for (const s of this.city.coast ? [-1] : [-1, 1]) {
       const len = OUTER - HALF
       const w = RIVER_HALF_WIDTH * CELL * 2.2
       const geo = new THREE.PlaneGeometry(w, len, 1, 20).rotateX(-Math.PI / 2)
@@ -978,6 +1031,33 @@ export class World {
       const rx = (s < 0 ? this.city.riverCenter[0] : this.city.riverCenter[GRID - 1]) * CELL - HALF
       m.position.set(rx, 0, s * (HALF + len / 2))
       m.renderOrder = 2
+      if (s < 0) this.outerNorth = m
+      else this.outerSouth = m
+      this.outerRivers.push(m)
+      this.root.add(m)
+    }
+  }
+
+  /** Open sea beyond a coastal district: south of it, and east and west along the coast. */
+  buildOuterSea() {
+    const C = this.city.coast
+    const zs = (C.shoreMean + 0.5) * CELL - HALF
+    const parts = [
+      [-OUTER, OUTER, HALF, OUTER],
+      [-OUTER, -HALF, zs, HALF],
+      [HALF, OUTER, zs, HALF],
+    ]
+    this.outerSea = []
+    for (const [x0, x1, z0, z1] of parts) {
+      const geo = new THREE.PlaneGeometry(x1 - x0, z1 - z0, 8, 8).rotateX(-Math.PI / 2)
+      const n = geo.attributes.position.count
+      const aw = new Float32Array(n * 4)
+      for (let q = 0; q < n; q++) aw.set([12, 0, 0, 0], q * 4)
+      geo.setAttribute('aWater', new THREE.BufferAttribute(aw, 4))
+      const m = new THREE.Mesh(geo, this.waterMat)
+      m.position.set((x0 + x1) / 2, C.msl, (z0 + z1) / 2)
+      m.renderOrder = 2
+      this.outerSea.push(m)
       this.outerRivers.push(m)
       this.root.add(m)
     }
@@ -985,6 +1065,7 @@ export class World {
 
   /** Rebuild the water surface from a FloodSim (h, zg, vx, vz arrays). */
   updateWater(sim) {
+    this.waterSim = sim
     const { h, zg } = sim
     const vxA = sim.vx
     const vzA = sim.vz
@@ -1051,11 +1132,14 @@ export class World {
     g.attributes.aWater.needsUpdate = true
     g.computeVertexNormals()
     g.computeBoundingSphere()
+    // the open sea stands at the level the sim holds its edge at
+    if (this.outerSea && sim.coast) for (const m of this.outerSea) m.position.y = sim.seaZ
     // outer river level follows the edge rows
     for (const [m, j] of [
-      [this.outerRivers[0], 0],
-      [this.outerRivers[1], GRID - 1],
+      [this.outerNorth, 0],
+      [this.outerSouth, GRID - 1],
     ]) {
+      if (!m) continue
       let s = 0
       let n = 0
       for (let i = 0; i < GRID; i++) {
@@ -1133,6 +1217,9 @@ export class World {
     crowns.count = ci
     cones.count = ki
     trunks.count = n
+    this.swayInWind(crowns.material, true)
+    this.swayInWind(cones.material, false)
+    this.swayInWind(trunks.material, false)
     for (const m of [crowns, cones, trunks]) {
       m.castShadow = true
       m.receiveShadow = true
@@ -1282,6 +1369,17 @@ export class World {
       detail[1] = body[1]
       detail[2] = body[2]
       detail[3] = c ? 0.9 : t
+      // roofs (the detail parts of pitched-roof buildings) stripped by the wind: bare, dark timber
+      if (!c && (a?.roofLost || a?.roofCover) && !a.rubble) {
+        const k = a.roofLost ? 0.85 : 0.45
+        detail[0] = detail[0] * detail[3] * (1 - k) + 0.2 * k
+        detail[1] = detail[1] * detail[3] * (1 - k) + 0.16 * k
+        detail[2] = detail[2] * detail[3] * (1 - k) + 0.12 * k
+        detail[3] = 1 - (1 - detail[3]) * (1 - k)
+        detail[0] /= detail[3]
+        detail[1] /= detail[3]
+        detail[2] /= detail[3]
+      }
       this.bld.setTint(i, body, detail)
       this.updateBuilding(b)
     })
@@ -1300,8 +1398,22 @@ export class World {
       const i = k % GRID
       const j = Math.floor(k / GRID)
       if (city.levee[k] > 0) {
-        items.push({ x: cellToWorld(i), z: cellToWorld(j), y: city.z[k] - 0.5, sx: CELL, sz: CELL, sy: city.levee[k] + 0.5, c: 0x8a8273 })
+        // sea walls are pale concrete; river walls earth-coloured
+        items.push({ x: cellToWorld(i), z: cellToWorld(j), y: city.z[k] - 0.5, sx: CELL, sz: CELL, sy: city.levee[k] + 0.5, c: city.seawall?.[k] ? 0xa7a49c : 0x8a8273 })
       }
+    }
+    // the river gate: piers across the mouth, the gate leaf raised while it is open
+    const RG = city.riverGate
+    if (RG) {
+      const shut = !!this.gateShut
+      for (const k of RG.cells) {
+        const x = cellToWorld(k % GRID)
+        const z = cellToWorld(Math.floor(k / GRID))
+        items.push({ x, z, y: shut ? city.z[k] : RG.crest, sx: CELL, sz: 3, sy: shut ? RG.crest - city.z[k] : 2.5, c: 0x5d6b78 })
+        items.push({ x: x - CELL / 2, z, y: city.z[k] - 1, sx: 1.6, sz: 4, sy: RG.crest + 3 - city.z[k], c: 0x9a9a92 })
+      }
+      const k = RG.cells[RG.cells.length - 1]
+      items.push({ x: cellToWorld(k % GRID) + CELL / 2, z: cellToWorld(Math.floor(k / GRID)), y: city.z[k] - 1, sx: 1.6, sz: 4, sy: RG.crest + 3 - city.z[k], c: 0x9a9a92 })
     }
     // bridges: an arched deck from road to road, railings, piers and abutments
     for (const sp of city.bridgeSpans || []) {
@@ -1741,7 +1853,7 @@ export class World {
       // either way it no longer stands in the way of falling pieces (a sheared-off top leaves its stub)
       if (c.kind !== 'partial') this.wreck.removeBuilding(b)
       // a building coming down terrifies everyone who can see and hear it
-      this.life.alarm(b.cx, b.cz, Math.max(25, b.height * 0.8), c.style === 'flood' ? 0.45 : 0.7, 0.97)
+      this.life.alarm(b.cx, b.cz, Math.max(25, b.height * 0.8), c.style === 'flood' || c.style === 'wind' ? 0.45 : 0.7, 0.97)
       if (c.kind === 'topple') {
         // rigid rotation about the base edge, like a falling column: gravity, acting
         // through the leaning centre of mass, takes it over slowly at first
@@ -1839,11 +1951,11 @@ export class World {
     const want = Math.floor(target * Math.min(1, p * 1.3))
     for (; c.spawned < want; c.spawned++) this.spawnDebris(b, Math.min(a.hScale, 0.25))
     // dust and debris burst out of the crush zone at street level
-    const k = c.style === 'flood' ? 0.3 : 1
+    const k = c.style === 'flood' || c.style === 'wind' ? 0.3 : 1
     for (let q = 0; q < (p > 0.02 ? 3 : 0); q++) this.spawnDust(b, k * 1.2, b.base + Math.random() * 3)
     if (p >= 1) {
       this.becomeRubble(b, a)
-      for (let q = 0; q < 25; q++) this.spawnDust(b, c.style === 'flood' ? 0.3 : 1.5)
+      for (let q = 0; q < 25; q++) this.spawnDust(b, c.style === 'flood' || c.style === 'wind' ? 0.3 : 1.5)
     }
     return true
   }
@@ -1879,11 +1991,11 @@ export class World {
     const target = Math.min(40, Math.round(b.area / 300) + 6)
     const want = Math.floor(target * Math.min(1, p * 1.3))
     for (; c.spawned < want; c.spawned++) this.spawnDebris(b, Math.max(0.1, 1 - p))
-    const k = c.style === 'flood' ? 0.3 : 1
+    const k = c.style === 'flood' || c.style === 'wind' ? 0.3 : 1
     for (let q = 0; q < (p > 0.02 ? 3 : 0); q++) this.spawnDust(b, k * 1.2, b.base + Math.random() * 3)
     if (p >= 1) {
       this.becomeRubble(b, a)
-      for (let q = 0; q < 25; q++) this.spawnDust(b, c.style === 'flood' ? 0.3 : 1.5)
+      for (let q = 0; q < 25; q++) this.spawnDust(b, c.style === 'flood' || c.style === 'wind' ? 0.3 : 1.5)
     }
     return true
   }
@@ -2005,6 +2117,15 @@ export class World {
       t.fallen = { ax: Math.cos(ang), az: Math.sin(ang), th: 1.25 + Math.random() * 0.3 }
       this.treesDirty = true
     }
+    // street lights and traffic signals in the way come down too
+    for (const p of this.life.polesNear(x, z, reach + 1)) {
+      const dx = p.x - x
+      const dz = p.z - z
+      const d = Math.hypot(dx, dz)
+      if (d > reach + 0.5) continue
+      const ang = d > 0.1 ? Math.atan2(dz, dx) : Math.random() * Math.PI * 2
+      this.life.knockPole(p, Math.cos(ang), Math.sin(ang))
+    }
     for (const p of this.near(this.propIdx, x, z, reach + 1)) {
       if (p.it.fallen) continue
       const dx = p.it.x - x
@@ -2042,6 +2163,311 @@ export class World {
   }
 
   /** Placement of a prop part, knocked over about its foot if it was struck. */
+  /**
+   * Trees bend downwind and pump in the gusts. The gusts roll through the
+   * canopy as waves travelling with the wind, so you can watch each one cross
+   * the city. Trunks and cones bend more toward the top (local y 0 → 1); a
+   * crown moves as a whole. Fallen trees (not upright) stay still.
+   */
+  swayInWind(mat, crown) {
+    mat.onBeforeCompile = (sh) => {
+      sh.uniforms.uWind = this.uWind
+      sh.uniforms.uTime = this.uTime
+      sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nuniform vec4 uWind;\nuniform float uTime;').replace(
+        '#include <project_vertex>',
+        `vec4 mvPosition = vec4( transformed, 1.0 );
+#ifdef USE_INSTANCING
+  mvPosition = instanceMatrix * mvPosition;
+  float upright = smoothstep(0.6, 0.95, normalize(instanceMatrix[1].xyz).y);
+#else
+  float upright = 1.0;
+#endif
+  float bend = ${crown ? '1.0 + 0.25 * position.y' : 'position.y * position.y'};
+  float ph = uTime * (0.9 + uWind.w * 0.05) - dot(mvPosition.xz, uWind.xy) * 0.025;
+  float gust = 0.55 + 0.3 * sin(ph) + 0.15 * sin(ph * 2.3 + mvPosition.x * 0.07) + 0.06 * sin(uTime * 9.0 + mvPosition.z * 0.4);
+  float d = uWind.z * bend * upright * gust;
+  mvPosition.xz += uWind.xy * d;
+  mvPosition.y -= 0.15 * d;
+  mvPosition = modelViewMatrix * mvPosition;
+  gl_Position = projectionMatrix * mvPosition;`,
+      )
+    }
+    mat.customProgramCacheKey = () => (crown ? 'sway-crown' : 'sway-stem')
+  }
+
+  /**
+   * Depth lens draped over the land, streets included: dry ground greyed out,
+   * standing water coloured by depth band, one cell per texel so each cell
+   * reads as one depth. Buildings stand up through it.
+   * map: { depth } (per cell, m), with zg (ground per cell) when the water is
+   * live — the layer then rides on the water surface instead of sinking
+   * under it. null hides it.
+   */
+  setFloodMap(map) {
+    if (!map) {
+      if (this.floodLayer) this.floodLayer.visible = false
+      return
+    }
+    const N = GRID
+    const V = N + 1
+    if (!this.floodLayer) {
+      const geo = new THREE.PlaneGeometry(N * CELL, N * CELL, N, N).rotateX(-Math.PI / 2)
+      this.floodTexData = new Uint8Array(N * N * 4)
+      const tex = new THREE.DataTexture(this.floodTexData, N, N, THREE.RGBAFormat)
+      tex.magFilter = THREE.NearestFilter
+      tex.minFilter = THREE.NearestFilter
+      tex.colorSpace = THREE.SRGBColorSpace
+      this.floodTex = tex
+      const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -4, fog: false })
+      this.floodLayer = new THREE.Mesh(geo, mat)
+      // after the water, so the depth colours sit on top of it
+      this.floodLayer.renderOrder = 3
+      this.root.add(this.floodLayer)
+    }
+    // ground heights at the vertices (cached until the terrain changes)
+    if (!this.floodBaseY) {
+      this.floodBaseY = new Float32Array(V * V)
+      for (let r = 0; r <= N; r++) for (let c = 0; c <= N; c++) this.floodBaseY[r * V + c] = this.vertexHeight(c, r) + 0.6
+    }
+    const { depth, zg } = map
+    const pos = this.floodLayer.geometry.attributes.position
+    const ct = this.city.cellType
+    for (let r = 0; r <= N; r++)
+      for (let c = 0; c <= N; c++) {
+        let y = this.floodBaseY[r * V + c]
+        if (zg) {
+          // on top of any deep water in the four cells around the vertex
+          for (let dj = -1; dj <= 0; dj++)
+            for (let di = -1; di <= 0; di++) {
+              const i = c + di
+              const j = r + dj
+              if (i < 0 || j < 0 || i >= N || j >= N) continue
+              const k = idx(i, j)
+              if (depth[k] > 0.3 && ct[k] !== CELL_RIVER) y = Math.max(y, zg[k] + depth[k] + 0.15)
+            }
+        }
+        pos.setY(r * V + c, y)
+      }
+    pos.needsUpdate = true
+    this.floodLayer.geometry.computeBoundingSphere()
+    const px = this.floodTexData
+    const grey = [211, 215, 220]
+    for (let j = 0; j < N; j++)
+      for (let i = 0; i < N; i++) {
+        const k = idx(i, j)
+        const o = ((N - 1 - j) * N + i) * 4
+        if (ct[k] === CELL_RIVER) {
+          // the channel shows through as itself
+          px[o + 3] = 0
+          continue
+        }
+        const col = depthColor(depth[k])
+        const c = col ?? grey
+        px[o] = c[0]
+        px[o + 1] = c[1]
+        px[o + 2] = c[2]
+        px[o + 3] = col ? 235 : 190
+      }
+    this.floodTex.needsUpdate = true
+    this.floodLayer.visible = true
+  }
+
+  /**
+   * Name tags pinned over places that matter (hospitals, shelters, pumps…),
+   * each with a status badge, kept over their spot as the camera moves.
+   * list: [{ key, x, y, z, name, dot, badge, tone }] ('bad' | 'warn' | 'good'), or [] to clear.
+   */
+  setLabels(list) {
+    if (!this.labelLayer) {
+      const el = document.createElement('div')
+      el.style.cssText = 'position:absolute;inset:0;pointer-events:none;overflow:hidden;font:600 11px/1.2 system-ui,sans-serif'
+      this.container.appendChild(el)
+      this.labelLayer = el
+      this.labels = new Map()
+    }
+    const keep = new Set()
+    for (const L of list) {
+      keep.add(L.key)
+      let e = this.labels.get(L.key)
+      if (!e) {
+        const div = document.createElement('div')
+        div.style.cssText = 'position:absolute;left:0;top:0;display:flex;align-items:center;gap:6px;padding:3px 8px 3px 6px;border-radius:999px;background:rgba(255,255,255,0.94);color:#1e293b;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,0.35)'
+        div.innerHTML = '<span style="width:9px;height:9px;border-radius:50%;flex:none"></span><span></span><span style="font-weight:700"></span>'
+        this.labelLayer.appendChild(div)
+        e = { div, L: null }
+        this.labels.set(L.key, e)
+      }
+      if (!e.L || e.L.name !== L.name || e.L.badge !== L.badge || e.L.tone !== L.tone || e.L.dot !== L.dot) {
+        const [dot, name, badge] = e.div.children
+        dot.style.background = L.dot
+        name.textContent = L.name
+        badge.textContent = L.badge ?? ''
+        badge.style.color = L.tone === 'bad' ? '#dc2626' : L.tone === 'warn' ? '#d97706' : '#059669'
+      }
+      e.L = L
+    }
+    for (const [k, e] of this.labels)
+      if (!keep.has(k)) {
+        e.div.remove()
+        this.labels.delete(k)
+      }
+  }
+
+  /**
+   * Keep the name tags over their places. Tags that would overlap are
+   * stacked upward, bad news first; one that cannot find room is hidden.
+   */
+  placeLabels() {
+    if (!this.labels?.size) return
+    const w = this.container.clientWidth
+    const h = this.container.clientHeight
+    const RANK = { bad: 0, warn: 1, good: 2 }
+    const items = []
+    for (const e of this.labels.values()) {
+      _v.set(e.L.x, e.L.y, e.L.z).project(this.camera)
+      if (_v.z > 1 || Math.abs(_v.x) > 1.1 || Math.abs(_v.y) > 1.1) {
+        e.div.style.display = 'none'
+        continue
+      }
+      e.div.style.display = 'flex'
+      // measured once per text change (reading layout every frame is slow)
+      if (e.wFor !== e.L.badge + e.L.name) {
+        e.wFor = e.L.badge + e.L.name
+        e.w = e.div.offsetWidth
+        e.h = e.div.offsetHeight
+      }
+      items.push({ e, x: ((_v.x + 1) / 2) * w, y: ((1 - _v.y) / 2) * h, rank: RANK[e.L.tone] ?? 2, depth: _v.z })
+    }
+    items.sort((a, b) => a.rank - b.rank || a.depth - b.depth)
+    const placed = []
+    for (const it of items) {
+      const { e } = it
+      const left = it.x - e.w / 2
+      let top = it.y - e.h * 1.2
+      let tries = 0
+      const hit = () => placed.some((r) => left < r.right && left + e.w > r.left && top < r.bottom && top + e.h > r.top)
+      while (hit() && tries < 4) {
+        top -= e.h + 3
+        tries++
+      }
+      if (hit()) {
+        e.div.style.display = 'none'
+        continue
+      }
+      placed.push({ left, right: left + e.w, top, bottom: top + e.h })
+      e.div.style.transform = `translate(${left}px, ${top}px)`
+    }
+  }
+
+  /** A cloud-to-ground strike at (x, y, z) — or, with no point, a flash inside the clouds. */
+  lightning(x, y, z) {
+    if (x == null) return this.stormFx.cloudFlash(0.25 + Math.random() * 0.45)
+    this.stormFx.strike(x, y, z)
+    this.dustBurst(x, y, z, 6, 3)
+  }
+
+  /**
+   * The tornado on the ground: { T (the vortex, see stormHazards.js), x, z } or null.
+   * Windborne debris is sucked into it, and what stands in its core is knocked down.
+   */
+  setTornado(tor) {
+    this.tornado = tor
+    this.stormFx.setTornado(tor && { x: tor.x, z: tor.z, y: this.groundAt(tor.x, tor.z), rc: tor.T.rc, hemi: tor.T.hemi, mx: tor.T.mx, mz: tor.T.mz })
+    this.debris.windAt = tor
+      ? (x, z) => {
+          const [wx, wz] = this.windVec ?? [0, 0]
+          const d = Math.hypot(x - tor.x, z - tor.z)
+          if (d > tor.T.rc * 8) return [wx, wz, 0]
+          const v = vortexWind(tor.T, x, z, tor.x, tor.z)
+          // the updraught in and around the core lofts what it picks up
+          return [wx + v.vx - tor.T.mx, wz + v.vz - tor.T.mz, 30 * Math.exp(-((d / (tor.T.rc * 1.5)) ** 2))]
+        }
+      : null
+  }
+
+  /** Each frame the tornado is down: loose debris near it takes off, and it hits people, cars and poles in its core. */
+  updateTornado() {
+    const tor = this.tornado
+    if (!tor) return
+    const R = tor.T.rc * 1.6
+    for (const it of this.debris.items) {
+      if (it.dead || Math.abs(it.x - tor.x) > R || Math.abs(it.z - tor.z) > R) continue
+      it.windborne = true
+      it.sleep = false
+      it.surf = null
+    }
+    this.tornadoHitT = (this.tornadoHitT ?? 0) - this.frameDt
+    if (this.tornadoHitT > 0) return
+    this.tornadoHitT = 0.25
+    this.strikeAt(tor.x, tor.z, tor.T.rc * 0.7, 3e4)
+  }
+
+  /** Clouds, wind streaks, leaves stripped from the trees and spray blown off the water. */
+  updateWeather(dt) {
+    const wind = this.windVec ?? [0, 0]
+    const c = this.controls.target
+    this.clouds.update(dt, { cover: this.cloudCover, wind, center: c, camera: this.camera, tint: this.cloudTint })
+    this.streaks.update(dt, wind, c, (x, z) => this.groundAt(x, z), this.nightF ?? 0)
+    const sp = Math.hypot(wind[0], wind[1])
+    if (sp > 14 && this.city) {
+      const k = Math.min(1, (sp - 14) / 30)
+      // leaves and twigs, from trees around the view
+      const trees = this.city.trees
+      for (let n = Math.round(k * 14); n > 0; n--) {
+        const t = trees[Math.floor(Math.random() * trees.length)]
+        if (!t || t.wx === undefined || t.burnt || Math.abs(t.wx - c.x) > 300 || Math.abs(t.wz - c.z) > 300) continue
+        const y = this.groundAt(t.wx, t.wz) + (3 + Math.random() * 5) * t.s
+        const brown = Math.random() < 0.35
+        const col = brown ? [0.42, 0.33, 0.18, 0.95] : [0.25, 0.42, 0.16, 0.95]
+        this.leaves.emit(t.wx + (Math.random() - 0.5) * 3, y, t.wz + (Math.random() - 0.5) * 3, wind[0] * (0.6 + Math.random() * 0.5), 1 + Math.random() * 3, wind[1] * (0.6 + Math.random() * 0.5), 0.7 + Math.random() * 0.6, 0, 2 + Math.random() * 2, col, [col[0], col[1], col[2], 0])
+      }
+      // spindrift: spray torn off the river and flood water
+      const W = this.waterSim
+      if (W && sp > 22) {
+        for (let n = Math.round(k * 10); n > 0; n--) {
+          const i = Math.floor(Math.random() * GRID)
+          const j = Math.floor(Math.random() * GRID)
+          const kk = idx(i, j)
+          if (W.h[kk] < 0.4) continue
+          const x = cellToWorld(i) + (Math.random() - 0.5) * CELL
+          const z = cellToWorld(j) + (Math.random() - 0.5) * CELL
+          if (Math.abs(x - c.x) > 450 || Math.abs(z - c.z) > 450) continue
+          const y = W.zg[kk] + W.h[kk] + 0.5
+          this.spray.emit(x, y, z, wind[0] * 0.8, 0.5 + Math.random(), wind[1] * 0.8, 4, 9, 1.6 + Math.random(), [0.86, 0.9, 0.94, 0.28 * k], [0.9, 0.93, 0.96, 0])
+        }
+      }
+    }
+    this.leaves.update(dt)
+    this.spray.update(dt)
+  }
+
+  /**
+   * Tall props in parks and squares (lamps, goals, hoops, signs) blown over by
+   * a 3-s gust (m/s) blowing toward (wx, wz). Each has its own strength, and
+   * falls once, the first time its fragility draw comes up.
+   */
+  windProps(gust, wx, wz) {
+    if (!this.propIdx) return
+    let changed = 0
+    for (const cell of this.propIdx.values()) {
+      for (const p of cell) {
+        const it = p.it
+        if (it.fallen || it.h < 1.5) continue
+        it.windMed ??= 44 * (0.85 + 0.3 * Math.random())
+        const P = normCdf(Math.log(gust / it.windMed) / 0.2)
+        if (P <= (it.windP ?? 0)) continue
+        const draw = (P - (it.windP ?? 0)) / (1 - (it.windP ?? 0))
+        it.windP = P
+        if (Math.random() >= draw) continue
+        it.fallen = { ax: wx, az: wz, th: 1.3 + Math.random() * 0.25 }
+        p.mesh.setMatrixAt(p.q, this.propMatrix(it))
+        p.mesh.instanceMatrix.needsUpdate = true
+        changed++
+      }
+    }
+    return changed
+  }
+
   propMatrix(it) {
     _m.makeScale(it.w, it.h, it.d)
     if (it.ry) _m.premultiply(_r.makeRotationY(it.ry))
@@ -2146,14 +2572,16 @@ export class World {
     }
   }
 
-  setEnvironment({ hour = 12, rain = 0, haze = 0, wind = [0, 0] }) {
+  setEnvironment({ hour = 12, rain = 0, haze = 0, wind = [0, 0], cloud = 0 }) {
+    this.cloudCover = cloud
     this.windVec = wind
+    this.debris.wind = wind
     const h = ((hour % 24) + 24) % 24
     const elev = Math.sin(((h - 6) / 12) * Math.PI) // -1..1
     const az = ((h - 6) / 12) * Math.PI
     const dayF = clamp(elev * 2.2 + 0.25, 0, 1)
     // a typhoon's cloud deck darkens the sky even between rain bands
-    const overcast = clamp(Math.max(rain / 25, Math.hypot(wind[0], wind[1]) / 30), 0, 1)
+    const overcast = clamp(Math.max(rain / 25, Math.hypot(wind[0], wind[1]) / 30, cloud * 0.85), 0, 1)
     const night = clamp(1 - dayF * 1.3 + overcast * 0.35, 0, 1)
     this.nightF = night
     this.uNight.value = clamp(1 - dayF * 1.4, 0, 1) + overcast * 0.25
@@ -2176,6 +2604,11 @@ export class World {
     this.scene.fog.color.copy(sky)
     this.scene.fog.near = lerp(1400, 260, Math.max(overcast, haze * 0.8))
     this.scene.fog.far = lerp(5600, 1500, Math.max(overcast, haze * 0.6))
+    // the cloud deck: lit grey by day, near-black at night
+    this.cloudTint.set(0x4f5762).multiplyScalar(0.3 + 0.7 * dayF)
+    // how far the trees bend, and how fast the gusts roll through them
+    const sp = Math.hypot(wind[0], wind[1])
+    this.uWind.value.set(sp > 0 ? wind[0] / sp : 1, sp > 0 ? wind[1] / sp : 0, clamp((sp - 4) / 40, 0, 1) * 1.8, sp)
     this.rainIntensity = rain
     this.uRain.value = rain
     if (this.terrainMat) this.terrainMat.emissiveIntensity = night * 0.55
@@ -2208,6 +2641,7 @@ export class World {
     if (frozen) {
       this.controls.update()
       this.bld.flush()
+      this.placeLabels()
       this.renderer.render(this.scene, this.camera)
       return
     }
@@ -2316,7 +2750,9 @@ export class World {
     this.fire.update(dt)
     this.smoke.update(dt, 3)
     this.dust.update(dt, 1)
+    this.updateTornado()
     this.debris.update(dt)
+    this.stormFx.update(dt, this.nightF ?? 0)
     this.wreck.update(dt)
     if (this.treesDirty && this.realTime - (this.treesT ?? -1) > 0.4) {
       this.treesT = this.realTime
@@ -2324,7 +2760,9 @@ export class World {
     }
     // drops stop on roofs and streets; in cut-away view it only rains over the block
     this.rain.update(dt, this.rainIntensity || 0, this.controls.target, (x, z) => this.surfaceAt(x, z).y, this.subsurface.group.visible ? HALF - 2 : 0, this.windVec)
+    this.updateWeather(dt)
     this.bld.flush()
+    this.placeLabels()
     this.renderer.render(this.scene, this.camera)
   }
 

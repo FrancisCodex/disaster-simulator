@@ -133,7 +133,19 @@ export function makeBuilding(city, rng, { type, x, y, w, d, floors, construction
   return b
 }
 
-export function generateCity(typeKey, seed) {
+// Seabed slope (m per cell) offshore of a coastal city, by shelf type
+const SEABED = { open: 0.7, shelf: 0.22, bay: 0.4 }
+// height of the river banks at the coast (m above mean sea level): deltas on a wide shelf are the lowest
+const LOWLAND = { open: 1.8, shelf: 1.0, bay: 1.6 }
+// the sand runs 2.5 cells up from the waterline; streets keep 4 cells (40 m) back from it
+const BEACH_SETBACK = 4
+
+/**
+ * opts.coast: { shelf } for a coastal city: the sea along the south edge of
+ * the district, with the river running out into it. The coastal plain is low
+ * and flat (a few metres above mean sea level), behind a sandy beach.
+ */
+export function generateCity(typeKey, seed, opts = {}) {
   const rng = new Rng(seed)
   const nz = makeNoise2D(seed * 7 + 3)
   const P = CITY_TYPES[typeKey]
@@ -157,18 +169,50 @@ export function generateCity(typeKey, seed) {
     riverCenter[j] = baseX + amp * Math.sin((j / N) * Math.PI * 2 * f1 + ph) + nz.fbm(j * 0.05, 11.3, 2) * 4
     bankZ[j] = 20 - j * CELL * 0.0015
   }
-  // The town grows on the wide side of the river, close to it (as towns do).
+  // a coastal city: the shoreline (row of the first sea cell, per column) and mean sea level
+  const sea = new Uint8Array(N * N)
+  let coast = null
+  if (opts.coast) {
+    const shelf = opts.coast.shelf ?? 'open'
+    const shore = new Float32Array(N)
+    let mean = 0
+    for (let i = 0; i < N; i++) {
+      const x = (i - N / 2) / (N / 2)
+      // a bay curves inland; open coasts and deltas run nearly straight
+      shore[i] = 88 + nz.fbm(i * 0.035, 77.7, 3) * 3.5 - (shelf === 'bay' ? 5 * (1 - x * x) : 0)
+      mean += shore[i] / N
+    }
+    // the river's natural level at the coast sits half a metre above the sea
+    const msl = bankZ[Math.round(mean)] - 5.1
+    coast = { shelf, msl, shore, shoreMean: mean }
+    // banks fall to 1–2 m above the sea over the last 600 m of the river
+    for (let j = 0; j < N; j++) bankZ[j] += (msl + LOWLAND[shelf] - bankZ[j]) * smoothstep(mean - 60, mean - 2, j)
+  }
+  // The town grows on the wide side of the river, close to it (as towns do); on the coast, out to the beach.
   const cx = clamp(N / 2 - side * rng.float(6, 12), 25, 75)
-  const cy = clamp(N / 2 + rng.float(-8, 8), 30, 70)
+  const cy = clamp(N / 2 + rng.float(-8, 8) + (coast ? 8 : 0), 30, coast ? coast.shoreMean - P.radius * 0.5 : 70)
 
   for (let j = 0; j < N; j++) {
     for (let i = 0; i < N; i++) {
       const k = idx(i, j)
       const d = Math.abs(i + 0.5 - riverCenter[j])
+      // cells inland of the shoreline (negative: out at sea)
+      const ds = coast ? coast.shore[i] - (j + 0.5) : Infinity
+      if (ds < 0) {
+        // the seabed shelves away from the beach (kept shallow on the grid: deep water forces
+        // short time steps on the solver, and the surge doesn't need it)
+        z[k] = coast.msl - Math.min(3.5, 0.6 + -ds * SEABED[coast.shelf]) + nz.fbm(i * 0.2, j * 0.2, 2) * 0.3
+        cellType[k] = CELL_RIVER
+        sea[k] = 1
+        soil[k] = 2
+        continue
+      }
       if (d < RIVER_HALF_WIDTH) {
         // U-shaped channel: flat-ish bed, steep banks
         const t = d / RIVER_HALF_WIDTH
         z[k] = bankZ[j] - RIVER_DEPTH * (1 - Math.pow(t, 3.2)) + nz.fbm(i * 0.3, j * 0.3, 2) * 0.4
+        // toward the sea the channel silts up into a sandbar at the mouth
+        if (coast) z[k] = Math.max(z[k], coast.msl - 3.2 + nz.fbm(i * 0.3, j * 0.3, 2) * 0.4)
         cellType[k] = CELL_RIVER
         soil[k] = 2
         continue
@@ -182,10 +226,17 @@ export function generateCity(typeKey, seed) {
       const edge = Math.max(Math.abs(i - N / 2), Math.abs(j - N / 2)) / (N / 2)
       const ridges = ridged * 22 * smoothstep(0.62, 1.0, edge) * smoothstep(20, 45, dd)
       const micro = nz.fbm(i * 0.14 + 50, j * 0.14 + 50, 2) * 0.7 * smoothstep(1, 5, dd)
-      z[k] = Math.max(bankZ[j] + 0.25, bankZ[j] + 0.45 + floodplain + terrace + Math.max(-2, hills) + ridges + micro)
+      // the coastal plain is flattened toward the beach
+      const plain = coast ? 1 - 0.85 * smoothstep(-50, -3, -ds) : 1
+      z[k] = Math.max(bankZ[j] + 0.25, bankZ[j] + 0.45 + (floodplain + terrace + Math.max(-2, hills) + ridges + micro) * plain)
       if (dd < 1.3) cellType[k] = CELL_BANK
+      if (ds < 8) {
+        // a sandy beach rising from the waterline
+        z[k] = Math.min(z[k], coast.msl + 0.4 + ds * 0.5)
+        if (ds < 2.5) cellType[k] = CELL_BANK
+      }
       const above = z[k] - bankZ[j]
-      soil[k] = dd < 18 && above < 2.5 ? 2 : above > 14 ? 0 : 1
+      soil[k] = (dd < 18 && above < 2.5) || ds < 12 ? 2 : above > 14 ? 0 : 1
     }
   }
 
@@ -203,6 +254,9 @@ export function generateCity(typeKey, seed) {
     roadAxis,
     riverCenter,
     bankZ,
+    // coastal cities: sea cells (open water, typed CELL_RIVER) and { shelf, msl, shore, shoreMean }
+    sea,
+    coast,
     center: { i: cx, j: cy },
     buildings: [],
     trees: [],
@@ -234,6 +288,8 @@ export function generateCity(typeKey, seed) {
       const main = (rx && (isMain(i, ox) || isMain(i - 1, ox))) || (ry && (isMain(j, oy) || isMain(j - 1, oy)))
       const inCity = dist < P.radius
       if (!(inCity || (main && dist < P.radius * 2.2))) continue
+      // no streets on the beach: they stop on the grass behind it
+      if (coast && coast.shore[i] - (j + 0.5) < BEACH_SETBACK) continue
       if (cellType[k] === CELL_RIVER) {
         if (ry && !rx && (main || inCity)) {
           bridge[k] = 1

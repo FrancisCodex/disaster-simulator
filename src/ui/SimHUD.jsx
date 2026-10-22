@@ -4,6 +4,7 @@ import { Stat, BuildingPanel, Sheet } from './common.jsx'
 import { useIsMobile } from './useIsMobile.js'
 import { fmtInt, fmtMoney } from '../engine/math.js'
 import { SignalChip } from './TyphoonScenario.jsx'
+import LensPanel from './LensPanel.jsx'
 
 /** How the people outside are reacting: calm → frightened → fleeing → panicking. */
 function PanicBar({ p }) {
@@ -45,6 +46,8 @@ const fmtT = (t) => {
   return `T+${h}h ${String(m).padStart(2, '0')}m`
 }
 
+const LENS_NAME = { flood: 'Flood depth', damage: 'Damage', power: 'Power' }
+
 const LOG_TONE = { bad: 'text-red-300', warn: 'text-amber-200', info: 'text-slate-300', good: 'text-emerald-300' }
 
 const hrs = (tau) => {
@@ -85,12 +88,107 @@ function StormNow({ ty }) {
   )
 }
 
+/** What the wind has done so far: roofs, glass, flattened buildings, trees and power. */
+function WindToll({ w }) {
+  const any = w.glass + w.cover + w.roof + w.collapsed + w.trees + w.poles > 0 || w.power < 1
+  if (!any) return null
+  const out = Math.round((1 - w.power) * 100)
+  return (
+    <div className="mb-3">
+      <div className="text-[11px] tracking-wider text-slate-400 uppercase">Wind damage</div>
+      <div className="mt-1 grid grid-cols-2 gap-x-3 text-xs">
+        <span className="text-slate-400">
+          Roofs lost <span className={w.roof ? 'text-orange-300' : 'text-slate-200'}>{fmtInt(w.roof)}</span>
+        </span>
+        <span className="text-slate-400">
+          Sheets / tiles <span className="text-slate-200">{fmtInt(w.cover)}</span>
+        </span>
+        <span className="text-slate-400">
+          Flattened <span className={w.collapsed ? 'text-red-300' : 'text-slate-200'}>{fmtInt(w.collapsed)}</span>
+        </span>
+        <span className="text-slate-400">
+          Windows <span className="text-slate-200">{fmtInt(w.glass)}</span>
+        </span>
+        <span className="text-slate-400">
+          Trees down <span className="text-slate-200">{fmtInt(w.trees)}</span>
+        </span>
+        <span className="text-slate-400">
+          Roads blocked <span className={w.roads ? 'text-amber-300' : 'text-slate-200'}>{fmtInt(w.roads)}</span>
+        </span>
+        <span className="text-slate-400">
+          Poles down <span className="text-slate-200">{fmtInt(w.poles)}</span>
+        </span>
+      </div>
+      {out > 0 && (
+        <div className="mt-1 text-xs text-amber-300">
+          ⚡ {w.gridUp ? `${out}% of the city without power` : 'Citywide blackout'}
+          {w.pumpsOff > 0 && <span className="text-red-300"> · {w.pumpsOff} pump{w.pumpsOff > 1 ? 's' : ''} stopped</span>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Thunderstorms: lightning over and in the city, and a tornado on the ground. */
+function StormsNow({ st }) {
+  const T = st.tornado
+  const every = st.flashRate > 0.05 ? 3600 / (st.flashRate * 314) : null
+  if (!T && !st.strikes && !every && !st.tornadoes && !st.nearTornadoes) return null
+  return (
+    <div className="mb-3">
+      {T && (
+        <div className={`mb-2 rounded-md px-2 py-1.5 text-xs font-semibold ${T.down ? 'animate-pulse bg-red-600/80 text-white' : 'bg-red-500/25 text-red-100'}`}>
+          🌪️ {T.down ? `Tornado on the ground: ${T.ef}, ${T.kmh} km/h` : 'Tornado warning: take cover on the lowest floor'}
+          {T.damaged > 0 && <span className="font-normal"> · {T.damaged} buildings hit</span>}
+        </div>
+      )}
+      <div className="text-[11px] tracking-wider text-slate-400 uppercase">Thunderstorms</div>
+      <div className="mt-1 text-xs text-slate-400">
+        ⚡ {every ? `Lightning every ~${every < 60 ? `${Math.max(1, Math.round(every))} s` : `${Math.round(every / 60)} min`} within 10 km` : 'No lightning nearby'}
+        {' · '}
+        <span className={st.strikes ? 'text-amber-300' : 'text-slate-200'}>{st.strikes}</span> strike{st.strikes === 1 ? '' : 's'} in the city
+        {st.fires > 0 && <span className="text-orange-300"> · {st.fires} fire{st.fires > 1 ? 's' : ''}</span>}
+      </div>
+      {(st.tornadoes > 0 || st.nearTornadoes > 0) && (
+        <div className="text-xs text-slate-400">
+          🌪️ {st.tornadoes ? `${st.tornadoes} crossed the city` : ''}
+          {st.tornadoes && st.nearTornadoes ? ' · ' : ''}
+          {st.nearTornadoes ? `${st.nearTornadoes} reported nearby` : ''}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** The sea at the coast: level above normal (surge + tide) against the beachfront. */
+function SeaNow({ sea }) {
+  const over = sea.rise > sea.shore
+  const signed = (v) => `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(2)} m`
+  return (
+    <>
+      <div className="mt-2 flex items-baseline justify-between">
+        <span className="text-[11px] tracking-wider text-slate-400 uppercase">Sea level</span>
+        <span className={`font-mono ${over ? 'text-red-400' : sea.rise > 1 ? 'text-amber-300' : 'text-emerald-300'}`}>{signed(sea.rise)} vs normal</span>
+      </div>
+      <div className="relative mt-1 h-1.5 overflow-hidden rounded bg-slate-700">
+        <div className={`h-full transition-all ${over ? 'bg-red-500' : 'bg-cyan-400'}`} style={{ width: `${Math.max(0, Math.min(100, ((sea.rise + 1) / 8) * 100))}%` }} />
+        <div className="absolute top-0 h-full w-0.5 bg-white/70" style={{ left: `${Math.min(100, ((sea.shore + 1) / 8) * 100)}%` }} title="Top of the beachfront" />
+      </div>
+      <div className="mt-1 text-xs text-slate-400">
+        Surge {signed(sea.surge)} · tide {signed(sea.tide)} · beachfront +{sea.shore.toFixed(1)} m{sea.max > 0.3 ? ` · highest ${signed(sea.max)}` : ''}
+      </div>
+    </>
+  )
+}
+
 /** What the disaster is doing right now: rain and river, or shocks, fires and ground failure. */
 function Situation({ s }) {
-  const { flood, quake, typhoon: ty, totals: T } = s.sim
+  const { flood, quake, typhoon: ty, wind, storms, totals: T } = s.sim
   return (
     <>
     {ty && <StormNow ty={ty} />}
+    {wind && <WindToll w={wind} />}
+    {storms && <StormsNow st={storms} />}
     {flood && (
       <div className="mb-3">
         <div className="flex items-baseline justify-between">
@@ -110,6 +208,20 @@ function Situation({ s }) {
         <div className="mt-1 h-1.5 overflow-hidden rounded bg-slate-700">
           <div className={`h-full transition-all ${flood.stage > 0 ? 'bg-red-500' : 'bg-amber-400'}`} style={{ width: `${Math.max(0, Math.min(100, ((flood.stage + 4.5) / 6) * 100))}%` }} />
         </div>
+        {(flood.alarm != null || flood.diverted != null || flood.gate != null) && (
+          <div className="mt-1 text-xs text-slate-400">
+            {flood.alarm != null && <span className={flood.alarm >= 2 ? 'text-red-300' : flood.alarm ? 'text-amber-300' : ''}>{flood.alarm ? `River alarm ${flood.alarm}` : 'No river alarm'}</span>}
+            {flood.diverted > 1 && <span> · floodway taking {fmtInt(flood.diverted)} m³/s</span>}
+            {flood.gate != null && <span className={flood.gate ? 'text-amber-300' : ''}> · river gate {flood.gate ? 'shut' : 'open'}</span>}
+          </div>
+        )}
+        {flood.sea && <SeaNow sea={flood.sea} />}
+        {s.sim.shelters && (s.sim.shelters.cap > 0 || s.sim.shelters.sheltered > 0) && (
+          <div className="mt-1 text-xs text-slate-400">
+            ⛺ {fmtInt(s.sim.shelters.sheltered)} in shelters of {fmtInt(s.sim.shelters.cap)} places
+            {s.sim.shelters.crowded && <span className="text-orange-300"> · overcrowded</span>}
+          </div>
+        )}
         <div className="mt-2 text-xs">{flood.warned ? <span className="text-amber-300">⚠ Evacuation order in effect</span> : <span className="text-slate-500">No warning issued</span>}</div>
       </div>
     )}
@@ -221,6 +333,18 @@ function DesktopSim({ s, game }) {
   const sim = s.sim
   const quake = sim.quake
   const done = s.phase === 'results'
+  const [lenses, setLenses] = useState(false)
+  const lensOn = (sim.lens ?? 'city') !== 'city'
+  // the button is the on/off switch: on opens the panel on the flood depth lens, off returns to the plain city
+  const toggleLenses = () => {
+    if (lenses || lensOn) {
+      setLenses(false)
+      game.setLens('city')
+    } else {
+      setLenses(true)
+      game.setLens('flood')
+    }
+  }
   return (
     <>
       {/* clock & controls */}
@@ -254,11 +378,30 @@ function DesktopSim({ s, game }) {
               </button>
             </>
           )}
-          <button onClick={() => game.toggleOverlay()} className={`rounded-md px-3 py-1.5 text-sm ${s.overlay ? 'bg-amber-500/25 text-amber-200 ring-1 ring-amber-400' : 'text-slate-300 hover:bg-slate-700/60'}`}>
-            {quake ? 'Integrity view' : 'Flood depth view'}
-          </button>
+          {quake ? (
+            <button onClick={() => game.toggleOverlay()} className={`rounded-md px-3 py-1.5 text-sm ${s.overlay ? 'bg-amber-500/25 text-amber-200 ring-1 ring-amber-400' : 'text-slate-300 hover:bg-slate-700/60'}`}>
+              Integrity view
+            </button>
+          ) : (
+            <button onClick={toggleLenses} title="Turn the lenses on or off (L)" className={`rounded-md px-3 py-1.5 text-sm ${lenses || lensOn ? 'bg-sky-500/25 text-sky-100 ring-1 ring-sky-400' : 'text-slate-300 hover:bg-slate-700/60'}`}>
+              🔍 Lenses {lenses || lensOn ? 'on' : 'off'}
+            </button>
+          )}
         </div>
       </div>
+
+      {(lenses || lensOn) && !quake && (
+        <div className="scroll-thin pointer-events-auto absolute top-24 left-[17.5rem] max-h-[calc(100vh-8rem)] w-72 overflow-y-auto">
+          <LensPanel
+            s={s}
+            game={game}
+            onClose={() => {
+              setLenses(false)
+              game.setLens('city')
+            }}
+          />
+        </div>
+      )}
 
       {/* left: live stats */}
       <div className="pointer-events-auto absolute top-24 left-3 flex w-64 flex-col gap-2">
@@ -294,7 +437,7 @@ function Mini({ label, value, tone = 'text-white' }) {
 
 /** Phone layout: clock and controls on top, the key numbers under them, details, log and the selected building in sheets. */
 function MobileSim({ s, game }) {
-  const [sheet, setSheet] = useState(null) // 'details' | 'log'
+  const [sheet, setSheet] = useState(null) // 'details' | 'log' | 'lens'
   const sim = s.sim
   const T = sim.totals
   const quake = sim.quake
@@ -349,6 +492,21 @@ function MobileSim({ s, game }) {
           <Sheet title="Event log" onClose={() => setSheet(null)}>
             <EventLog log={sim.log} className="" />
           </Sheet>
+        ) : sheet === 'lens' ? (
+          <div className="scroll-thin pointer-events-auto max-h-[55vh] overflow-y-auto">
+            <LensPanel s={s} game={game} onClose={() => setSheet(null)} />
+          </div>
+        ) : (sim.lens ?? 'city') !== 'city' ? (
+          // the lens stays on while its sheet is closed, so the map can be seen; this turns it off
+          <div className="panel pointer-events-auto flex items-center gap-2 px-3 py-1.5 text-[13px]">
+            <span className="text-sky-200">🔍 {LENS_NAME[sim.lens]} lens on</span>
+            <button onClick={() => setSheet('lens')} className="ml-auto rounded-md px-2 py-1 text-slate-300">
+              Change
+            </button>
+            <button onClick={() => game.setLens('city')} className="rounded-md bg-slate-700/70 px-2.5 py-1 font-semibold text-white">
+              Turn off
+            </button>
+          </div>
         ) : null}
         <div className="panel pointer-events-auto flex items-center gap-1 px-2 py-1.5">
           <button onClick={() => open('details')} className={tab('details')}>
@@ -357,8 +515,15 @@ function MobileSim({ s, game }) {
           <button onClick={() => open('log')} className={tab('log')}>
             Log
           </button>
-          <button onClick={() => game.toggleOverlay()} className={`rounded-md px-2.5 py-1.5 text-[13px] whitespace-nowrap ${s.overlay ? 'bg-amber-500/25 text-amber-200 ring-1 ring-amber-400' : 'text-slate-300'}`}>
-            {quake ? 'Integrity' : 'Depth'}
+          <button
+            onClick={() => {
+              if (quake) return game.toggleOverlay()
+              if (sheet !== 'lens' && (sim.lens ?? 'city') === 'city') game.setLens('flood')
+              open('lens')
+            }}
+            className={`rounded-md px-2.5 py-1.5 text-[13px] whitespace-nowrap ${s.overlay ? 'bg-amber-500/25 text-amber-200 ring-1 ring-amber-400' : 'text-slate-300'}`}
+          >
+            {quake ? 'Integrity' : 'Lenses'}
           </button>
           <span className="ml-auto text-[11px] text-slate-500">Tap a building</span>
         </div>

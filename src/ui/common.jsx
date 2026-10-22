@@ -164,6 +164,25 @@ function Preparations({ measures, options }) {
   )
 }
 
+const ROOF_NAME = { light: 'Sheet / tile on timber', metal: 'Metal sheet on steel', slab: 'Concrete slab' }
+const kmh = (ms) => (ms ? `${Math.round(ms * 3.6)} km/h` : '—')
+
+/** What the forecast gusts are likely to do to this building. */
+function WindRisk({ w }) {
+  const m = w.medians
+  return (
+    <div className="mt-2 rounded-md bg-slate-800/60 p-2">
+      <div className="mb-1 text-[11px] text-slate-400 uppercase">Wind risk at the forecast peak</div>
+      <Row k="Roof" v={ROOF_NAME[w.kind]} />
+      <Row k="Gust at roof height" v={kmh(w.gust)} />
+      {m.glass && <Row k="Windows break" v={`${pct(w.pGlass)} · 50% at ${kmh(m.glass)}`} accent={w.pGlass > 0.5 ? 'text-amber-300' : undefined} />}
+      {m.cover && <Row k="Roof sheets / tiles lost" v={`${pct(w.pCover)} · 50% at ${kmh(m.cover)}`} accent={w.pCover > 0.5 ? 'text-amber-300' : undefined} />}
+      {m.roof && <Row k="Whole roof torn off" v={`${pct(w.pRoof)} · 50% at ${kmh(m.roof)}`} accent={w.pRoof > 0.3 ? 'text-orange-300' : undefined} />}
+      <Row k="Flattened" v={`${pct(w.pCollapse)} · 50% at ${kmh(m.collapse)}`} accent={w.pCollapse > 0.1 ? 'text-red-400' : undefined} />
+    </div>
+  )
+}
+
 export function BuildingPanel({ info, title = 'Building', onClose }) {
   if (!info) return null
   const q = info.quake
@@ -211,9 +230,13 @@ export function BuildingPanel({ info, title = 'Building', onClose }) {
           <Row k="Collapse" v={pct(q.pCollapse)} accent={q.pCollapse > 0.05 ? 'text-red-400' : undefined} />
         </div>
       )}
+      {info.wind && !s && <WindRisk w={info.wind} />}
       {s && (
         <div className="mt-2 rounded-md bg-slate-800/60 p-2">
           <div className="mb-1 text-[11px] text-slate-400 uppercase">Current state</div>
+          {s.wind && <Row k="Wind damage" v={s.wind} accent={s.wind === 'Intact' ? undefined : s.wind.startsWith('Flattened') ? 'text-red-400' : 'text-orange-300'} />}
+          {s.gust > 15 && <Row k="Gusts at roof height" v={`${Math.round(s.gust * 3.6)} km/h (max ${Math.round(s.maxGust * 3.6)})`} />}
+          {s.powered === false && <Row k="Power" v="Cut" accent="text-amber-300" />}
           {'ds' in s && <Row k="Damage" v={s.collapsed ? (s.toppled ? 'Toppled' : 'Collapsed') : s.burnt ? 'Burnt out' : s.ds} accent={s.collapsed || s.burnt ? 'text-red-400' : undefined} />}
           {'integrity' in s && !s.collapsed && (
             <div className="py-0.5">
