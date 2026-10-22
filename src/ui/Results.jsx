@@ -55,6 +55,7 @@ export default function Results({ s, game }) {
         </div>
 
         {r.prep && <PrepComparison r={r} p={r.prep} />}
+        {r.report && <TyphoonCompare r={r} rep={r.report} progress={s.prepProgress} />}
 
         <div className="mt-5 grid gap-4 sm:grid-cols-2">
           <div>
@@ -83,6 +84,8 @@ export default function Results({ s, game }) {
             </ul>
           </div>
         </div>
+
+        {r.report && <TyphoonSections rep={r.report} />}
 
         <div className="mt-6 flex flex-wrap justify-end gap-2">
           <button onClick={() => setHidden(true)} className="rounded-md px-3 py-2 text-sm text-slate-300 hover:bg-slate-700/60">
@@ -206,6 +209,157 @@ function PrepComparison({ r, p }) {
         "Unprepared" is the same earthquake run on the city as it was generated, alongside this one. That run has no people in the street, so it reuses this run's outdoor deaths. The split between measures is an estimate: building measures are taken away again in the damage model, facades are judged from the street deaths that unanchored facades caused, and early warning and gas valves by their effect in the simulation.
       </p>
     </div>
+  )
+}
+
+/** A difference that can go either way: lives or money the preparations saved (or cost). */
+const signed = (n, fmt) => (n == null ? '—' : Math.abs(n) < 0.5 ? '0' : n > 0 ? fmt(n) : `−${fmt(-n)}`)
+
+/** The typhoon's with/without comparison (stormReport.js): the same storm on the city as it was generated. */
+function TyphoonCompare({ r, rep, progress }) {
+  const c = rep.compare
+  if (c?.pending)
+    return (
+      <div className="mt-5 rounded-lg border border-slate-700 p-3 text-[13px] text-slate-300">
+        Running the same storm on the city as it was generated, to show what your preparations changed…
+        <div className="mt-2 h-1.5 overflow-hidden rounded bg-slate-800">
+          <div className="h-full bg-sky-500/80 transition-[width]" style={{ width: `${Math.round((progress ?? 0) * 100)}%` }} />
+        </div>
+      </div>
+    )
+  if (!c)
+    return (
+      <div className="mt-5 rounded-lg border border-slate-700 p-3 text-[13px] text-slate-400">
+        {rep.prepared ? (
+          'The comparison with the unprepared city could not be run this time.'
+        ) : (
+          <>
+            No typhoon preparations were made. Try the evacuation plan, the Flood, Coast and Wind tools or the city-wide upgrades, then use <span className="text-slate-200">Retry with my preparations</span> to compare.
+          </>
+        )}
+      </div>
+    )
+  const count = (n, est) => (est ? approx(n) : fmtInt(n))
+  const lives = (n) => signed(n, (v) => fmtInt(v))
+  const money = (n) => signed(n, fmtMoney)
+  return (
+    <div className="mt-5">
+      <h3 className="mb-2 text-xs font-semibold tracking-wider text-slate-400 uppercase">What your preparations did</h3>
+      <div className="mb-2 flex flex-wrap items-baseline gap-x-4 gap-y-1">
+        {c.saved.lives >= 0.5 ? (
+          <span className="text-lg font-bold text-emerald-300">{approx(c.saved.lives)} lives saved</span>
+        ) : (
+          <span className="text-[13px] text-slate-300">This time the unprepared city came off no worse in lives: chance plays a part in any single storm.</span>
+        )}
+        {c.spent > 0 && c.saved.loss > 0 && (
+          <span className="text-[13px] text-slate-300">
+            Every $1 spent avoided <span className="font-semibold text-white">${c.bcr.toFixed(1)}</span> of damage in this storm{' '}
+            <span className="text-slate-500">(NIBS 2019 finds $4–11 for wind and building codes, counting every storm over a building's life)</span>
+          </span>
+        )}
+      </div>
+      <div className="grid gap-2 sm:grid-cols-4">
+        <Versus label="Deaths" without={c.without.dead} actual={r.dead} fmt={count} />
+        <Versus label="Buildings flooded" without={c.without.flooded} actual={r.damaged} fmt={(v) => fmtInt(v)} />
+        {c.without.roofs || rep.roofs ? <Versus label="Roofs torn off" without={c.without.roofs} actual={rep.roofs} fmt={(v) => fmtInt(v)} /> : <Versus label="People in unlivable homes" without={c.without.homeless} actual={rep.homeless} fmt={(v) => fmtInt(v)} />}
+        <Versus label="Economic loss" without={c.without.loss} actual={r.loss} fmt={(v) => fmtMoney(v)} />
+      </div>
+      {c.rows.length > 0 && (
+        <table className="mt-3 w-full text-[12px]">
+          <thead>
+            <tr className="text-left text-[11px] text-slate-500 uppercase">
+              <th className="py-1 font-medium">Pillar</th>
+              <th className="hidden py-1 text-right font-medium sm:table-cell">Spent</th>
+              <th className="py-1 text-right font-medium">Lives saved</th>
+              <th className="py-1 text-right font-medium">Damage avoided</th>
+              <th className="hidden py-1 text-right font-medium sm:table-cell">Per $1</th>
+            </tr>
+          </thead>
+          <tbody>
+            {c.rows.map((m) => (
+              <tr key={m.key} className="border-t border-slate-800 text-slate-300">
+                <td className="py-1">
+                  {m.label}
+                  {m.note && <div className="text-[11px] text-slate-500">{m.note}</div>}
+                </td>
+                <td className="hidden py-1 text-right font-mono sm:table-cell">{m.spent > 0 ? fmtMoney(m.spent) : 'free'}</td>
+                <td className={`py-1 text-right font-mono ${m.lives <= -0.5 ? 'text-orange-300' : 'text-emerald-300'}`}>{lives(m.lives)}</td>
+                <td className={`py-1 text-right font-mono ${m.loss < -0.005 ? 'text-orange-300' : ''}`}>{m.loss == null ? '—' : Math.abs(m.loss) < 0.005 ? '—' : money(m.loss)}</td>
+                <td className="hidden py-1 text-right font-mono sm:table-cell">{m.bcr > 0 ? `$${m.bcr.toFixed(1)}` : '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <p className="mt-1.5 text-[11px] leading-snug text-slate-500">
+        "Unprepared" is the same storm, with the same random draws, run alongside this one on the city as it was generated, with no upgrades and the default plan (evacuate once the streets flood). It has no people in the street, so it reuses this run's outdoor deaths.{' '}
+        {c.split ? 'The plan row is the plan and warnings on their own; the other rows split what the works added by the hazard each death or loss came from. ' : ''}
+        New shelters count under the plan for cost, but their effect shows under the hazard they kept people from. Every building has the same luck in both runs, so the differences come from what you changed; a little chance remains (flying debris, lightning), so a life or a building either way can still be luck.
+      </p>
+    </div>
+  )
+}
+
+/** The report's pillars: warning, water, coast, wind, power and the recovery outlook. */
+function TyphoonSections({ rep }) {
+  return (
+    <div className="mt-5 space-y-2">
+      <h3 className="text-xs font-semibold tracking-wider text-slate-400 uppercase">After-action report</h3>
+      {rep.sections.map((sec, i) => (
+        <ReportSection key={sec.key} sec={sec} open={i === 0} />
+      ))}
+    </div>
+  )
+}
+
+function ReportSection({ sec, open }) {
+  const compared = sec.rows.some((r) => r.before != null)
+  const tone = (r) => (r.better === true ? 'text-emerald-300' : r.better === false ? 'text-orange-300' : 'text-slate-200')
+  return (
+    <details open={open} className="group rounded-lg bg-slate-800/40 px-3 py-2">
+      <summary className="cursor-pointer text-[13px] font-semibold text-slate-200 select-none">{sec.title}</summary>
+      <table className="mt-2 w-full text-[12px]">
+        {compared && (
+          <thead>
+            <tr className="text-left text-[11px] text-slate-500 uppercase">
+              <th className="py-0.5 font-medium" />
+              <th className="py-0.5 text-right font-medium">This run</th>
+              <th className="py-0.5 text-right font-medium">Unprepared</th>
+            </tr>
+          </thead>
+        )}
+        <tbody>
+          {sec.rows.map((r) => (
+            <tr key={r.label} className="border-t border-slate-800/80 text-slate-300">
+              <td className="py-1 pr-2">{r.label}</td>
+              <td className={`py-1 text-right font-mono whitespace-nowrap ${tone(r)}`}>{r.now}</td>
+              {compared && <td className="py-1 pl-2 text-right font-mono whitespace-nowrap text-slate-400">{r.before ?? ''}</td>}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {sec.list && (
+        <div className="mt-2">
+          <div className="text-[11px] text-slate-500 uppercase">{sec.list.title}</div>
+          <ol className="mt-1 list-decimal space-y-0.5 pl-5 text-[12px] text-slate-300">
+            {sec.list.items.map((t) => (
+              <li key={t}>{t}</li>
+            ))}
+          </ol>
+        </div>
+      )}
+      {sec.lessons.length > 0 && (
+        <ul className="mt-2 space-y-1">
+          {sec.lessons.map((l) => (
+            <li key={l} className="flex gap-2 text-[12px] leading-snug text-slate-300">
+              <span className="text-sky-400">›</span>
+              {l}
+            </li>
+          ))}
+        </ul>
+      )}
+      {sec.note && <p className="mt-2 text-[11px] leading-snug text-slate-500">{sec.note}</p>}
+    </details>
   )
 }
 

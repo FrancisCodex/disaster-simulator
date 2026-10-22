@@ -22,7 +22,7 @@
 
 import { GRID, CELL_ROAD, CELL_RIVER, CELL_PARK, CELL_POND, CONSTRUCTION, BUILDING_TYPES, WIND, WIND_BETA, roofKind, METAL_ROOF, SLAB_COLLAPSE, TREE_WIND, POLE_WIND, GRID_WIND, STREET_POLE_WIND, WIND_MEASURES } from './config.js'
 import { idx } from './cityGen.js'
-import { normCdf, clamp, smoothstep } from './math.js'
+import { normCdf, clamp, smoothstep, Rng } from './math.js'
 import { fieldAt, GUST_LAND } from './typhoonPhysics.js'
 import { MISSILES, takeOffSpeed, flightAt, hitChance, GLASS_E50, GLASS_BETA } from './debrisFlight.js'
 
@@ -100,20 +100,35 @@ export class WindDamage {
     this.time = 0
     this.events = []
     this.st = new Map()
+    // Each building and tree draws its own luck from its own seed (its id or its
+    // place), not from the shared stream: the same storm on a city with some
+    // buildings strengthened then fails the others exactly as before, so a
+    // with/without comparison shows what the measures did rather than chance.
+    // A component fails once its failure probability passes its threshold u
+    // (the same odds as drawing again each time the probability rises).
+    const base = Math.floor(rng.next() * 4294967296)
+    this.own = (key) => new Rng((base ^ Math.imul(key + 1, 0x9e3779b1)) >>> 0)
     for (const b of city.buildings) {
       if (b.removed) continue
-      this.st.set(b.id, { med: windMedians(b, false), kind: roofOf(b), p: { glass: 0, cover: 0, roof: 0, collapse: 0 }, dir: null, glass: false, cover: false, roof: false, collapsed: false, wear: 0, gust: 0, maxGust: 0, k: 1 + 0.08 * rng.normal(), shelter: new Float32Array(SECTORS).fill(NaN) })
+      const r = this.own(b.id)
+      const k = 1 + 0.08 * r.normal()
+      const u = { glass: r.next(), cover: r.next(), roof: r.next(), collapse: r.next() }
+      this.st.set(b.id, { med: windMedians(b, false), kind: roofOf(b), p: { glass: 0, cover: 0, roof: 0, collapse: 0 }, u, dir: null, glass: false, cover: false, roof: false, collapsed: false, wear: 0, gust: 0, maxGust: 0, k, shelter: new Float32Array(SECTORS).fill(NaN) })
     }
     // trees standing on open ground (the ones the renderer draws)
     this.trees = city.trees
       .filter((t) => city.buildingAt[idx(t.i, t.j)] < 0 && city.cellType[idx(t.i, t.j)] !== CELL_ROAD && city.cellType[idx(t.i, t.j)] !== CELL_POND && !t.fallen && !t.burnt)
-      .map((t) => ({ t, med: TREE_WIND[t.kind] * (0.85 + 0.3 * rng.next()) * (1.1 - 0.2 * (t.s - 1)) * (treeCare ? 1.15 : 1), k: 1 + 0.1 * rng.normal(), p: 0 }))
+      .map((t) => {
+        const r = this.own(1e6 + idx(t.i, t.j) * 64 + (Math.round((t.ox + t.oz) * 7) & 63))
+        return { t, med: TREE_WIND[t.kind] * (0.85 + 0.3 * r.next()) * (1.1 - 0.2 * (t.s - 1)) * (treeCare ? 1.15 : 1), k: 1 + 0.1 * r.normal(), p: 0, u: r.next() }
+      })
     const nz = Math.ceil(GRID / FEEDER)
     this.feeders = Array.from({ length: nz * nz }, () => ({ up: true, p: 0, cause: null }))
     this.gridUp = true
     this.gridP = 0
     this.stats = { glass: 0, cover: 0, roof: 0, collapsed: 0, trees: 0, roads: 0, poles: 0, deathsRoof: 0, deathsCollapse: 0, missiles: 0, missileGlass: 0, tornado: 0 }
     this.pending = { glass: 0, cover: 0, roof: 0, collapsed: 0, trees: 0, roads: 0 }
+    this.treeBlocked = new Set() // road cells fallen trees lie across
     this.flags = {}
     this.lastLog = {}
     this.wind = { v: 0, dir: [0, 0], gust: 0 }
@@ -220,12 +235,17 @@ export class WindDamage {
 
   /** A 3-s gust g (m/s, at roof height) blowing toward dir on building b for dtH hours, through the component chain. */
   load(b, s, g, dir, dtH) {
-    const { rng } = this
     s.gust = g
     if (g > s.maxGust) s.maxGust = g
     // the wind has swung round: a new face of the building takes the load
+    // (what it has survived so far counts half: its threshold moves with the odds, u ∈ (p, 1) → (p/2, 1))
     if (s.dir && s.dir[0] * dir[0] + s.dir[1] * dir[1] < -0.2) {
-      for (const c of COMPONENTS) s.p[c] *= 0.5
+      for (const c of COMPONENTS) {
+        const p = s.p[c]
+        const q = p * 0.5
+        if (p < 1) s.u[c] = q + ((s.u[c] - p) * (1 - q)) / (1 - p)
+        s.p[c] = q
+      }
       s.dir = null
     }
     if (g < 0.6 * Math.min(s.med.cover ?? 99, s.med.glass ?? 99, s.med.collapse)) return
@@ -245,9 +265,8 @@ export class WindDamage {
       if (c === 'roof' && s.kind === 'slab') continue
       const P = pFail(g, M[c])
       if (P <= s.p[c]) continue
-      const draw = (P - s.p[c]) / (1 - s.p[c])
       s.p[c] = P
-      if (rng.chance(draw)) {
+      if (P >= s.u[c]) {
         if (c === 'roof' && !s.cover) this.fail(b, s, 'cover', g)
         this.fail(b, s, c, g)
         if (c === 'collapse') break
@@ -406,9 +425,8 @@ export class WindDamage {
       const g = g0 * tr.k
       const P = pFail(g, tr.med * soak, 0.25)
       if (P <= tr.p) continue
-      const draw = (P - tr.p) / (1 - tr.p)
       tr.p = P
-      if (!rng.chance(draw)) continue
+      if (P < tr.u) continue
       // it falls downwind (world x east, z south)
       const wx = dir[0]
       const wz = -dir[1]
@@ -423,8 +441,10 @@ export class WindDamage {
         const j = clamp(Math.round(tr.t.j + wz * d), 0, GRID - 1)
         const k = idx(i, j)
         if (city.cellType[k] === CELL_ROAD) {
-          if (this.life && !this.life.blocked[k]) {
-            this.life.block(k)
+          // (counted here, with or without traffic to stop: the report's runs have none)
+          if (!this.treeBlocked.has(k) && !this.life?.blocked[k]) {
+            this.treeBlocked.add(k)
+            this.life?.block(k)
             this.stats.roads++
             this.pending.roads++
           }

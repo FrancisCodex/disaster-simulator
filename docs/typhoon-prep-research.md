@@ -290,6 +290,23 @@ The earthquake report already compares the real run with a shadow run of the sam
 
 **Phase 5b: after-action report.** The shadow run in a worker (§4.1), the pillar table (§4.2) and the recovery estimates (§4.3), all as numbers and short lessons.
 
+✅ **Built (phase 5b).** What was built, and what changed from the plan above:
+* **One storm engine for both runs.** The typhoon's simulation moved out of `game.js` into `StormRun` (`stormRun.js`): storm, water, wind, thunderstorms, the plan, alarms, pump power. The game drives it and draws what it reports. The report's runs use the same class in `stormWorker.js`, so "without your preparations" is the same code the player watched, not a copy.
+* **Two shadow runs, not one** (`stormShadow.js`). `none`: the city as generated, no upgrades, the default plan. `plan`: the city as generated with only the player's plan and warning upgrades. It runs only when the player both planned and built. The plan's share is none → plan; the works' share is plan → real, split by the hazard behind each death (surge → coast; drowning, swept away, wading → water; wind, roofs, tornado, fire → wind) and each building's loss. The workers keep pace with the live run and never pass it, so the comparison is at the moment the player ends the disaster.
+* **Common random numbers.** The first runs were dominated by chance. Tree care alone took one Haiyan seed from 57 to 24 deaths, because one fewer fallen tree reshuffled every later draw from the shared random stream. Now each building has its own fixed thresholds: a wind component fails when its failure probability passes u, and a building is swept away when its accumulated hazard passes an Exp(1) draw. Trees work the same way. The odds are unchanged, but the same building fails at the same load in every run. Afterwards, tree care and concrete poles changed only trees down (613 → 603) and power; deaths were identical. Straps, fixings and shutters on every house cut roofs lost 199 → 181 and 218 → 195 on two seeds.
+* **When the hazard reached each zone** is when it reached the first home in that zone: seawater inside on the coast, floodwater inside by the river, the first roof gone among light-material homes. City-wide triggers (the "streets flooded" alarm) made a zone look late when nothing had reached it.
+* **Recovery rules of thumb** (all stated on the report):
+  * Power: ~2 days to assess (1 if the transmission line held), then the outage shrinks with τ ≈ 3.1 days. A whole-city outage reaches 70% in ~6 days and 95% in ~11–12. Concrete poles ×0.8, buried lines ×0.5.
+  * Roads: a chainsaw crew clears ~6 sections a day.
+  * Debris: ~100 t a day per loader-and-truck crew. A lost roof leaves ~12 kg/m², a collapsed building 0.15–1 t per m² of floor, a fallen tree ~1 t.
+  * Leptospirosis: 0.1–0.4% of people who waded through water over 0.3 m, with a 7.6% case fatality (Ondoy's ~2,100 cases for roughly a million exposed **(verify)**).
+* **Road blockages** from fallen trees are now counted by `WindDamage` itself. Before, they were counted only when street agents existed, so the shadow runs always showed none.
+* **Results.**
+  * Haiyan on a coastal metropolis, 12 h: unprepared 157 deaths (105 surge), plan alone 16, and wind works added nothing on top. At 300 km/h the roofs go regardless; only evacuation saves lives.
+  * Ketsana (Ondoy) inland with drainage, dredging and the floodway: ~20 lives saved, $43 M of damage avoided on $98 M spent. Homes made unlivable fell from 3,781 to 324 people, and expected leptospirosis fell to none.
+  * The single-storm benefit–cost ratio is shown next to NIBS's, which counts every storm over a building's life.
+* **Not built:** insurance payouts (E1), and wave attack avoided by mangroves as its own line (it shows through surge deaths and buildings reached by seawater). Shelter supplies, crews and treatment stay in the operations update.
+
 **Second tier, if time allows.** Catchment dam and reforestation (A6), underground tunnel (A7), flood basins (A8), green infrastructure (A9), reef (B3), dunes (B4), insurance (E1).
 
 **Deferred to the operations update (typhoon and earthquake).**

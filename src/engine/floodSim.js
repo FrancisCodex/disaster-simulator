@@ -243,6 +243,7 @@ export class FloodSim {
       drainEff *= clamp((this.tideGates ? 2 : 1.5) - this.seaRise, 0, 1)
       if (this.gate) this.operateGate(dt)
     }
+    this.drainEff = drainEff
     const drain = (this.drainage / 3.6e6) * dt * drainEff
     // upstream hydrograph: lagged runoff of the rain falling on the catchment
     const basin = this.raining && this.storm ? this.storm.catchmentAt(this.time) * UPLAND_RAIN : 0

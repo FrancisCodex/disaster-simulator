@@ -24,21 +24,20 @@ import {
   VARIANT_NAMES,
   SEAWALL_HEIGHT,
   BIG_PUMP_RATE,
-  RIVER_ALARMS,
   RIVER_HALF_WIDTH,
 } from './config.js'
-import { PLAN_ACTIONS, PLAN_TRIGGERS, DEFAULT_PLAN, SUGGESTED_PLAN, surgeBand, alarmLevel, triggerMet } from './evacPlan.js'
+import { DEFAULT_PLAN, SUGGESTED_PLAN } from './evacPlan.js'
 import { generateCity, addBuilding, idx, occupancyAt, cityStats, cellToWorld } from './cityGen.js'
 import { Rng, clamp, smoothstep } from './math.js'
 import { World, sheddingFacade } from './world.js'
 import { FloodSim, forecastRiverPeak, GATE_SURGE, GATE_PUMP } from './floodSim.js'
 import { floodMap, depthColor, LENS_GREY } from './floodMap.js'
-import { FloodImpact } from './floodImpact.js'
-import { TyphoonSim } from './typhoonSim.js'
-import { buildStorm, forecastSummary, catchmentRain, signalAt } from './typhoonPhysics.js'
-import { WindDamage, windRisk, roofOf } from './windDamage.js'
-import { StormHazards, hazardForecast, STRIKE_R, CG_SHARE } from './stormHazards.js'
-import { FireSim } from './fireSim.js'
+import { buildStorm, forecastSummary, catchmentRain } from './typhoonPhysics.js'
+import { windRisk, roofOf } from './windDamage.js'
+import { hazardForecast, CG_SHARE } from './stormHazards.js'
+import { StormRun } from './stormRun.js'
+import { ShadowRuns } from './stormShadow.js'
+import { typhoonReport, PEOPLE_UPGRADES } from './stormReport.js'
 import { QuakeSim, demand, mediansFor, damageProbs, collapseProb, cellOfBuilding, soilName, rockPgaAt, withGeometry, quakeAzimuth, shapeOf, dsFromD, compass, groundPeriod, buildingPeriod, resonance, softStoreyOf } from './quakeSim.js'
 import { siteDistances } from './quakePhysics.js'
 
@@ -139,19 +138,6 @@ export const TOOLS = [
   { key: 'softstorey', name: 'Brace soft storey', group: 'Quake', icon: '🏗️', desc: 'Add steel frames or shear walls to an open shopfront ground floor (the LA / San Francisco soft-storey retrofit). Cheap: only the ground floor is worked on.' },
   { key: 'anchor', name: 'Anchor facade', group: 'Quake', icon: '🧷', desc: 'Tie back brick facades and parapets, film the glass. Stops most of the falling masonry and glass that kills people in the street (Christchurch 2011).' },
 ]
-
-/** How high the beachfront of a coastal city stands (m above mean sea level): the median of the land within 60 m of the shore. */
-export function shoreRise(city) {
-  if (!city.coast) return Infinity
-  const zs = []
-  for (let i = 0; i < GRID; i++)
-    for (let j = Math.floor(city.coast.shore[i]) - 6; j < city.coast.shore[i]; j++) {
-      const k = idx(i, j)
-      if (j >= 0 && !city.sea[k] && city.cellType[k] !== CELL_RIVER) zs.push(city.z[k] + city.levee[k])
-    }
-  zs.sort((a, b) => a - b)
-  return zs.length ? zs[zs.length >> 1] - city.coast.msl : Infinity
-}
 
 export const BUILDING_TOOLS = ['retrofit', 'isolate', 'elevate', 'softstorey', 'anchor', 'straps', 'fixings', 'shutters', 'rod']
 // tools painted cell by cell with a drag
@@ -311,7 +297,8 @@ export class Game {
     this.seaLevelMap = null
     this.log = []
     this.results = null
-    this.flood = this.quake = this.impact = this.shadow = this.typhoon = this.windDmg = this.hazards = this.tyFire = null
+    this.stopShadows()
+    this.flood = this.quake = this.impact = this.shadow = this.typhoon = this.windDmg = this.hazards = this.tyFire = this.run = null
     // the old colouring reads the simulation just cleared: drop it before the new city is drawn
     this.world.colorFn = null
     this.world.controls.autoRotate = false
@@ -1284,25 +1271,37 @@ export class Game {
     this.log = []
     this.world.setHighlight(null)
     this.rng = new Rng((settings.seed ^ 0x5bd1e995) >>> 0)
-    const P = CITY_TYPES[city.type]
     const stats = cityStats(city, settings.startHour)
     if (settings.disaster === 'typhoon') {
-      this.typhoon = new TyphoonSim(this.level, { place: city.name, shoreRise: shoreRise(city) })
-      const U = this.upgrades
-      this.flood = new FloodSim(city, { storm: this.typhoon, drainage: P.drainage + 15 * U.drainage, tideGates: !!U.tideGates, generators: !!U.pumpGenerators })
-      this.impact = new FloodImpact(city, this.flood, { warning: U.floodWarning, surgeWarning: !!U.surgeWarning, drills: !!U.drills, startHour: settings.startHour, signal: () => this.typhoon.signal, surgeZone: this.typhoon.fc.sea?.peak ?? 0, rng: this.rng })
-      this.windDmg = new WindDamage(city, this.impact, this.typhoon, { rng: new Rng((settings.seed ^ 0x2545f491) >>> 0), life: this.world.life, treeCare: !!U.treeCare, poles: U.poles || 0 })
-      // lightning, tornadoes, and the fires lightning starts
-      this.hazards = new StormHazards(this.typhoon, { rng: new Rng((settings.seed ^ 0x3c6ef372) >>> 0), mode: this.level.tornado ?? 'natural', centre: { x: cellToWorld(city.center.i), z: cellToWorld(city.center.j) } })
-      this.tyFire = new FireSim(city, new Rng((settings.seed ^ 0x1b873593) >>> 0))
-      this.storms = { strikes: 0, fires: 0, logged: 0 }
-      this.windAcc = 0
-      // the plan: steps whose trigger has already come by the time the simulation starts were carried out then
-      this.planFired = {}
-      this.alarm = 0
+      // the "without" runs of the after-action report start from copies taken before the storm touches the city
+      this.realSummary = null
+      this.startShadows()
+      const w = this.world
+      const fx = {
+        groundAt: (x, z) => w.groundAt(x, z),
+        lamps: () => w.life.lamps,
+        life: w.life,
+        lightning: (x, y, z) => w.lightning(x, y, z),
+        treesDown: () => (w.treesDirty = true),
+        windChanged: () => this.syncWind(),
+        tornado: (t) => {
+          // slow down to watch it: a tornado crosses the city in a few minutes
+          if (this.speedIdx > 0) {
+            this.speedIdx = 0
+            this.pushLog(t, 'Slowing the clock to 1 min/s so you can follow the tornado.', 'info')
+          }
+        },
+      }
+      const run = (this.run = new StormRun(city, this.level, { startHour: settings.startHour, seed: settings.seed, upgrades: this.upgrades, plan: this.plan, fx }))
+      this.rng = run.rng
+      this.typhoon = run.typhoon
+      this.flood = run.flood
+      this.impact = run.impact
+      this.windDmg = run.windDmg
+      this.hazards = run.hazards
+      this.tyFire = run.tyFire
       this.gateShut = false
-      this.evalPlan(true)
-      this.population = this.impact.population
+      this.population = run.population
       this.drainTyphoonLog()
     } else {
       // the scenario may put the whole district on one kind of ground (the prepared city is restored on retry)
@@ -1366,6 +1365,14 @@ export class Game {
         this.emit()
       }
     }
+    // the report's comparison is still catching up: show its progress
+    if (this.phase === 'results' && this.shadows) {
+      this.uiTimer = (this.uiTimer || 0) + dt
+      if (this.uiTimer > 0.5) {
+        this.uiTimer = 0
+        this.emit()
+      }
+    }
     this.updateLens(dt)
     if (this.phase === 'sim' || this.phase === 'results') {
       const hour = this.settings.startHour + this.simTime / 3600
@@ -1422,233 +1429,10 @@ export class Game {
     this.emit()
   }
 
-  /** What the plan's triggers watch, right now. */
-  planState() {
-    const ty = this.typhoon
-    const tau = ty.tau()
-    return { tau, signal: ty.signal, surge: this.city.coast ? surgeBand(ty.fc.sea, tau) : 0, alarm: this.alarm, flooding: this.impact.flooding(), gauges: !!this.upgrades.floodWarning }
-  }
-
-  /**
-   * How many hours before the simulation began a trigger was already met
-   * (orders given then have had time to work), at most a day.
-   */
-  triggerAge(key) {
-    const T = PLAN_TRIGGERS[key]
-    const ty = this.typhoon
-    const tau = ty.tau()
-    let age = 0
-    if (T.kind === 'hours') age = tau - T.level
-    else if (T.kind === 'surge') age = tau - (ty.fc.sea.surgeMaxTau - 48)
-    else if (T.kind === 'signal') {
-      // walk back until the signal was lower
-      for (let a = 0.5; a <= 24; a += 0.5) {
-        if (signalAt(ty.fc.timeline, tau - a) < T.level) break
-        age = a
-      }
-    }
-    return clamp(age, 0, 24)
-  }
-
-  /** Check the plan's triggers and carry out the steps that are due. start: at the start of the simulation. */
-  evalPlan(start = false) {
-    const st = this.planState()
-    for (const [action, trig] of Object.entries(this.plan)) {
-      if (this.planFired[action] || trig === 'never') continue
-      if ((PLAN_ACTIONS[action].coastal || PLAN_TRIGGERS[trig]?.coastal) && !this.city.coast) continue
-      if (!triggerMet(trig, st)) continue
-      this.planFired[action] = true
-      this.planStep(action, trig, start ? this.triggerAge(trig) : 0)
-    }
-  }
-
-  planStep(action, trig, head) {
-    const im = this.impact
-    const when = PLAN_TRIGGERS[trig].name
-    const ago = head >= 1 ? ` (${Math.round(head)} h ago, before the storm got close)` : ''
-    const t = this.simTime
-    const late = trig === 'flooding'
-    switch (action) {
-      case 'closeSchools': {
-        const n = im.closeSchools()
-        this.pushLog(t, `${when}${ago}: classes and work suspended. ~${Math.round(n).toLocaleString()} people sent home from schools and offices.`, 'info')
-        break
-      }
-      case 'shutters': {
-        const n = this.windDmg.closeShutters()
-        if (n) this.pushLog(t, `${when}${ago}: storm shutters closed on ${n} building${n > 1 ? 's' : ''}.`, 'info')
-        break
-      }
-      case 'evacCoast':
-      case 'evacRiver':
-      case 'evacLight': {
-        const zone = PLAN_ACTIONS[action].zone
-        im.order(zone, head)
-        const what = { coast: 'the coastal zone the surge could reach', river: 'low-lying and riverside areas', light: 'light-material homes' }[zone]
-        const share = Math.round(im.compliance(zone) * 100)
-        this.pushLog(t, late ? `Emergency evacuation of ${what} — late: the water is already in the streets.` : `${when}${ago}: pre-emptive evacuation of ${what}. About ${share}% of residents are expected to go.`, late ? 'bad' : 'warn')
-        break
-      }
-      case 'forced':
-        im.force()
-        this.pushLog(t, `${when}${ago}: forced evacuation. Police and barangay officials are moving everyone still in the danger zones.`, 'warn')
-        break
-      case 'boats':
-        im.boatsSafe = true
-        this.pushLog(t, `${when}${ago}: rescue boats moved from the fire stations to the shelters.`, 'info')
-        break
-    }
-  }
-
-  /** River alarm levels at the gauge (only read if the city has gauges). */
-  checkAlarms() {
-    const a = alarmLevel(this.flood.stage, RIVER_ALARMS)
-    if (a <= this.alarm) return
-    this.alarm = a
-    if (!this.upgrades.floodWarning) return
-    const text = ['', 'River alarm 1 at the gauge: warning — the river is rising toward its banks.', 'River alarm 2: prepare to evacuate low-lying areas.', 'River alarm 3: critical level — the river is about to overtop.'][a]
-    this.pushLog(this.simTime, text, a >= 2 ? 'bad' : 'warn')
-  }
-
-  /** Every simulated minute: lightning in the district, tornadoes, and the fires they start. */
-  stepHazards(t) {
-    const H = this.hazards
-    const events = H.update(t, 60, { groundAt: (x, z) => this.world.groundAt(x, z), cands: (x, z) => this.strikeCandidates(x, z) })
-    for (const e of events.splice(0)) {
-      if (e.strike) this.lightningStrike(e.strike)
-      else this.pushLog(e.t, e.text, e.level)
-    }
-    if (H.tornado && !H.tornado.slowed) {
-      // slow down to watch it: a tornado crosses the city in a few minutes
-      H.tornado.slowed = true
-      if (this.speedIdx > 0) {
-        this.speedIdx = 0
-        this.pushLog(t, 'Slowing the clock to 1 min/s so you can follow the tornado.', 'info')
-      }
-    }
-    if (H.gusts) {
-      const n = this.windDmg.tornadoLoad(
-        (b) => H.gustAt(b.cx, b.cz, Math.max(b.fw, b.fd) / 2),
-        (tr) => H.gustAt(cellToWorld(tr.i) + tr.ox, cellToWorld(tr.j) + tr.oz),
-        1 / 60,
-      )
-      H.gusts.T.damaged += n
-    }
-    this.stepTyFire(1 / 60)
-  }
-
-  /** What a lightning leader over (x0, z0) could attach to: roofs, trees and poles (see strikePoint). */
-  strikeCandidates(x0, z0) {
-    const { city, world } = this
-    const R = STRIKE_R + 40
-    const out = []
-    for (const b of city.buildings) {
-      if (b.removed || Math.abs(b.cx - x0) > R + b.fw || Math.abs(b.cz - z0) > R + b.fd) continue
-      if (this.windDmg.st.get(b.id)?.collapsed || this.impact.st.get(b.id)?.collapsed) continue
-      out.push({ kind: 'building', ref: b, x: b.cx, z: b.cz, y: b.base + b.elevated + b.height, r: Math.min(b.fw, b.fd) / 2 })
-    }
-    for (const t of city.trees) {
-      if (t.fallen || t.burnt) continue
-      const x = cellToWorld(t.i) + t.ox
-      const z = cellToWorld(t.j) + t.oz
-      if (Math.abs(x - x0) > R || Math.abs(z - z0) > R) continue
-      out.push({ kind: 'tree', ref: t, x, z, y: world.groundAt(x, z) + 5 + 5 * t.s, r: 2 })
-    }
-    for (const p of world.life.lamps ?? []) {
-      if (p.fallen || Math.abs(p.x - x0) > R || Math.abs(p.z - z0) > R) continue
-      out.push({ kind: 'pole', ref: p, x: p.x, z: p.z, y: p.y + 7.5, r: 0.3 })
-    }
-    return out
-  }
-
-  /** A cloud-to-ground strike in the district: what it hit and what that did. */
-  lightningStrike(hit) {
-    const { rng } = this.hazards
-    const S = this.storms
-    S.strikes++
-    this.world.lightning(hit.x, hit.y, hit.z)
-    const rain = this.flood.rain
-    let text = null
-    if (hit.kind === 'building') {
-      const b = hit.ref
-      const s = this.impact.st.get(b.id)
-      const name = BUILDING_TYPES[b.type].name.toLowerCase()
-      // the current finds the wiring and the roof timbers; concrete with steel inside mostly takes it to ground
-      const pFire = b.construction === 'wood_old' || b.construction === 'wood_mod' ? 0.3 : b.construction === 'urm' ? 0.12 : 0.04
-      if (b.rod) text = `Lightning struck the lightning rod on ${/^[aeiou]/.test(name) ? 'an' : 'a'} ${name} and went safely to ground.`
-      else if (s && !s.burning && !s.burnt && rng.chance(pFire)) {
-        this.tyIgnite(b, s, 'lightning')
-        text = null
-      } else text = `Lightning struck ${/^[aeiou]/.test(name) ? 'an' : 'a'} ${name}${b.floors >= 6 ? ` (${b.floors} floors), the tallest thing around` : ''}.${rng.chance(0.25) ? ' Its electrics are fried.' : ''}`
-      if (!b.rod && rng.chance(0.2)) this.windDmg.feederFault(b.x, b.y, 'lightning')
-    } else if (hit.kind === 'tree') {
-      const tr = this.tyFire.trees.find((o) => o.t === hit.ref)
-      // a soaked tree rarely burns: the bolt splits it instead
-      if (tr && !tr.fire && !tr.burnt && rng.chance(0.35 * (1 - 0.7 * smoothstep(3, 25, rain)))) {
-        this.tyFire.lightTree(tr)
-        text = 'Lightning set a tree on fire.'
-      } else {
-        text = 'Lightning split a tree.'
-        if (rng.chance(0.4) && !hit.ref.fallen) {
-          hit.ref.fallen = { ax: Math.random() - 0.5, az: Math.random() - 0.5, th: 1.35 }
-          this.world.treesDirty = true
-        }
-      }
-    } else if (hit.kind === 'pole') {
-      text = 'Lightning hit a street light and blew the transformer on its line.'
-      this.windDmg.feederFault(Math.floor((hit.x + 500) / 10), Math.floor((hit.z + 500) / 10), 'lightning')
-    }
-    this.syncWind()
-    if (text && S.logged < 6) {
-      S.logged++
-      this.pushLog(this.simTime, text, 'warn')
-    }
-  }
-
-  /** A building catches fire (lightning, radiant heat, embers, a burning tree); most people get out. */
-  tyIgnite(b, s, how) {
-    if (s.burning || s.burnt) return
-    this.tyFire.ignite(b, s)
-    this.storms.fires++
-    const out = s.present * 0.85
-    s.present -= out
-    s.evacuated += out
-    this.impact.placeEvacuees(out, this.impact.shelters)
-    if (this.storms.fires > 8) return
-    const name = BUILDING_TYPES[b.type].name.toLowerCase()
-    const a = /^[aeiou]/.test(name) ? 'an' : 'a'
-    const text = {
-      lightning: `Lightning set ${a} ${name} on fire.`,
-      radiant: `Fire spread to ${a} ${name} next door.`,
-      embers: `Wind-blown embers set ${a} ${name} on fire.`,
-      tree: `A burning tree set ${a} ${name} on fire.`,
-    }[how] ?? `Fire broke out in ${a} ${name}.`
-    this.pushLog(this.simTime, `${text} ${this.flood.rain > 5 ? 'The rain is helping to hold it back.' : 'Fire crews cannot get out in this wind.'}`, 'bad')
-  }
-
-  /** Fires during a typhoon: the rain soaks them and crews can't go out, so most go out by themselves. */
-  stepTyFire(dtH) {
-    const F = this.tyFire
+  /** Draw the fires the storm has started: flames, and the charred trees left behind. */
+  drawTyFire() {
     const st = this.impact.st
-    const rain = this.flood.rain
-    const now = this.typhoon.now
-    // the wind leans the flames and carries embers — but wet embers rarely light anything
-    F.wind = { dir: Math.atan2(-now.dir[1], now.dir[0]), speed: Math.min(15, now.wind * 0.5) * (1 - 0.85 * smoothstep(1, 12, rain)) }
-    let any = false
-    for (const s of st.values()) if (s.burning) any = true
-    if (!any && !F.trees.some((t) => t.fire)) return
-    const ext = () => 0.4 + rain / 5
-    const was = new Set()
-    for (const [id, s] of st) if (s.burning) was.add(id)
-    F.step(dtH, st, ext, (o, os, how) => this.tyIgnite(o, os, how))
-    for (const id of was) {
-      const s = st.get(id)
-      if (s.burning || !s.burnt) continue
-      const b = this.city.byId.get(id)
-      this.impact.kill(b, s, s.present * 0.05, 'fire')
-      this.pushLog(this.simTime, `A ${BUILDING_TYPES[b.type].name.toLowerCase()} has burnt out.`, 'bad')
-    }
-    // the renderer's flames and charred trees
+    const F = this.tyFire
     const w = this.world
     const burning = []
     for (const b of w.bList) {
@@ -1715,36 +1499,23 @@ export class Game {
 
   stepFlood(want) {
     const f = this.flood
-    const done = f.advance(want, 12)
+    const run = this.run
+    const done = run.advance(want, 12)
     this.physicsLimited = done < want * 0.85
     this.simTime = f.time
-    this.typhoon.update(f.time)
+    this.shadows?.sync(f.time)
     this.drainTyphoonLog()
-    // wind damage every simulated minute (the eyewall passes in under an hour)
-    this.windAcc += done
-    const ticks = Math.floor(this.windAcc / 60)
-    if (ticks > 0) {
-      this.windAcc -= ticks * 60
-      for (let q = ticks - 1; q >= 0; q--) {
-        const tm = f.time - this.windAcc - q * 60
-        this.windDmg.update(tm, 1 / 60, { cumRain: f.cumRain })
-        this.stepHazards(tm)
-      }
+    if (run.windTicked) {
       // park lamps, goals and signs stand ~3–5 m up, below the roof-height gust
       const W = this.windDmg.wind
       if (W.gust > 30) this.world.windProps(W.gust * 0.92, W.dir[0], -W.dir[1])
       this.syncWind()
     }
-    this.acc += done
-    let tick = false
-    while (this.acc >= 300) {
-      this.acc -= 300
-      this.checkAlarms()
-      this.evalPlan()
-      this.impact.update(300 / 3600)
-      this.impact.updateLevees(300 / 3600)
-      tick = true
+    if (run.fireDirty) {
+      run.fireDirty = false
+      this.drawTyFire()
     }
+    const tick = run.ticked
     this.waterFrame = (this.waterFrame || 0) + 1
     if (this.waterFrame % 2 === 0) {
       f.computeFlow()
@@ -1761,6 +1532,7 @@ export class Game {
 
   drainTyphoonLog() {
     for (const e of this.typhoon.events.splice(0)) this.pushLog(e.t, e.text, e.level)
+    for (const e of this.run.events.splice(0)) this.pushLog(e.t, e.text, e.level)
   }
 
   /** Show what the wind did: roofs, broken windows, flattened buildings, fallen trees, power cuts. */
@@ -1792,13 +1564,7 @@ export class Game {
         const lit = b.type === 'hospital' || b.type === 'fire' || W.powered(b.x, b.y)
         world.animFor(b).dark = !lit
       }
-      let cut = 0
-      for (const p of this.flood.pumps) {
-        const was = p.unpowered
-        p.unpowered = !W.powered(p.i, p.j)
-        if (p.unpowered && !was && p.active && !p.generator) cut++
-      }
-      if (cut) this.pushLog(this.simTime, `${cut} pump station${cut > 1 ? 's have' : ' has'} lost power and stopped.`, 'bad')
+      // (pumps without generators stop with their feeder: StormRun.powerPumps)
       // street lights and traffic signals go dark with their feeder
       world.life.setPower((x, z) => W.powered(clamp(Math.floor((x + 500) / 10), 0, GRID - 1), clamp(Math.floor((z + 500) / 10), 0, GRID - 1)))
       colors = true
@@ -2050,13 +1816,75 @@ export class Game {
   }
 
 
+  /** Has the player changed how people are warned and moved: the plan, or the warning upgrades? */
+  planChanged() {
+    return Object.keys(DEFAULT_PLAN).some((k) => this.plan[k] !== DEFAULT_PLAN[k]) || PEOPLE_UPGRADES.some((k) => this.upgrades[k])
+  }
+
+  /**
+   * The after-action report's "without" runs (stormShadow.js), started with
+   * the simulation: the same storm on the city as it was generated, with no
+   * upgrades and the default plan; and, when the player both changed the plan
+   * and built, the same with only their plan and warning upgrades.
+   */
+  startShadows() {
+    this.stopShadows()
+    if (!this.baselineCity || typeof Worker === 'undefined') return
+    const planChanged = this.planChanged()
+    const works = Object.keys(this.prepSnapshot.spentBy).some((k) => !PEOPLE_UPGRADES.includes(k))
+    if (!planChanged && !works) return
+    const opts = { startHour: this.settings.startHour, seed: this.settings.seed }
+    const jobs = { none: { city: this.baselineCity, level: this.level, opts: { ...opts, upgrades: {}, plan: DEFAULT_PLAN } } }
+    if (planChanged && works) {
+      const upgrades = Object.fromEntries(PEOPLE_UPGRADES.map((k) => [k, this.upgrades[k]]))
+      jobs.plan = { city: this.baselineCity, level: this.level, opts: { ...opts, upgrades, plan: this.plan } }
+    }
+    this.shadows = new ShadowRuns(jobs)
+  }
+
+  stopShadows() {
+    this.shadows?.stop()
+    this.shadows = null
+  }
+
   endDisaster() {
     if (this.phase !== 'sim') return
     this.phase = 'results'
     this.paused = true
     this.results = this.computeResults()
     this.world.rain.update(0, 0, this.world.controls.target)
+    // the typhoon's comparison arrives once the shadow runs have caught up with this one
+    const sh = this.shadows
+    if (this.run && sh) {
+      const t = this.flood.time
+      sh.report(t).then((S) => {
+        if (this.shadows !== sh || this.phase !== 'results') return
+        this.results = { ...this.results, report: this.stormReport(S) }
+        this.stopShadows()
+        this.emit()
+      })
+    }
     this.emit()
+  }
+
+  /**
+   * The typhoon's after-action report (stormReport.js). S: the shadow runs'
+   * summaries by name; undefined while they are still running, null if there are none.
+   */
+  stormReport(S) {
+    const snap = this.prepSnapshot
+    this.realSummary ??= this.run.summary()
+    return typhoonReport({
+      real: this.realSummary,
+      none: S === undefined ? undefined : (S?.none ?? null),
+      plan: S === undefined ? undefined : (S?.plan ?? null),
+      outdoorDead: this.world.life.stats.pedDead + this.world.life.stats.carDead,
+      spentBy: snap.spentBy,
+      spent: snap.spent,
+      planChanged: this.planChanged(),
+      coast: !!this.city.coast,
+      shoreRise: this.typhoon.shoreRise,
+    })
   }
 
   retry(keepPrep) {
@@ -2082,7 +1910,8 @@ export class Game {
     this.phase = 'menu'
     this.world.setFloodMap(null)
     this.world.setLabels([])
-    this.flood = this.quake = this.impact = this.shadow = this.typhoon = this.windDmg = this.hazards = this.tyFire = null
+    this.stopShadows()
+    this.flood = this.quake = this.impact = this.shadow = this.typhoon = this.windDmg = this.hazards = this.tyFire = this.run = null
     this.results = null
     this.loadDemo()
     this.emit()
@@ -2207,7 +2036,8 @@ export class Game {
       if (S.missileGlass >= 5) lessons.push(`Flying roof sheets broke windows in ${S.missileGlass} buildings. A loose sheet takes off at ~35 km/h, then flies at almost the wind's speed for hundreds of metres and hits with several kilojoules: enough to cut through a door or a person. Fixing sheets to every purlin and shuttering windows breaks the chain.`)
       const Hz = this.hazards
       for (const T of Hz.tornadoes) lessons.push(`A${T.ef.n === 0 ? 'n' : ''} ${T.ef.name} tornado crossed the city (${T.ef.kmh} km/h)${T.damaged ? ` and damaged ${T.damaged} buildings in a track only ~${T.rc * 3} m wide` : ''}. Tornadoes in typhoons form in the outer rainbands of the front-right quadrant, often around landfall, with only minutes of warning: the safe place is an interior room on the lowest floor.`)
-      if (this.storms.strikes) lessons.push(`Lightning struck the city ${this.storms.strikes} time${this.storms.strikes > 1 ? 's' : ''}${this.storms.fires ? ` and started ${this.storms.fires} fire${this.storms.fires > 1 ? 's' : ''}` : ''}. Most strikes went to the tallest roofs, trees and poles: lightning rods give them a safe path to ground. The heavy rain keeps most fires small.`)
+      const SR = this.run.storms
+      if (SR.strikes) lessons.push(`Lightning struck the city ${SR.strikes} time${SR.strikes > 1 ? 's' : ''}${SR.fires ? ` and started ${SR.fires} fire${SR.fires > 1 ? 's' : ''}` : ''}. Most strikes went to the tallest roofs, trees and poles: lightning rods give them a safe path to ground. The heavy rain keeps most fires small.`)
       if (this.typhoon.flags.inEye) lessons.push('The eye passed over the city. The calm in the eye is the most dangerous moment to go outside: the back eyewall returns within the hour, from the opposite direction.')
       if (!this.upgrades.floodWarning && dead > 0) lessons.push('Pre-emptive evacuation tied to the PAGASA wind signals gets people out of low-lying and light-material homes before the water rises and the roofs go, rather than after.')
     }
@@ -2233,6 +2063,7 @@ export class Game {
       causes: causes.map((c) => ({ ...c, value: Math.round(c.value) })),
       lessons,
       prep: this.quake && this.shadow ? this.prepEffect(T, this.quake.deathsByCause) : null,
+      report: this.run ? this.stormReport(this.shadows ? undefined : null) : null,
     }
   }
 
@@ -2482,7 +2313,7 @@ export class Game {
     s.riskLayer = this.riskLayer
     s.coastal = !!this.city.coast
     s.plan = this.plan
-    s.planFired = this.planFired ?? null
+    s.planFired = this.run?.planFired ?? null
     s.leveeHeight = this.leveeHeight
     const M = this.floodMapData
     if (M) {
@@ -2511,7 +2342,7 @@ export class Game {
       }
       if (this.flood) {
         const f = this.flood
-        s.sim.flood = { rain: f.rain, cumRain: f.cumRain, basinRain: f.basinRain, stage: f.stage, inflow: f.inflow, warned: this.impact.warned, pumpsFailed: f.pumps.filter((p) => p.failed).length, alarm: this.upgrades.floodWarning ? this.alarm : null, diverted: f.floodway ? f.diverted : null, gate: f.gate ? f.gateClosed : null }
+        s.sim.flood = { rain: f.rain, cumRain: f.cumRain, basinRain: f.basinRain, stage: f.stage, inflow: f.inflow, warned: this.impact.warned, pumpsFailed: f.pumps.filter((p) => p.failed).length, alarm: this.upgrades.floodWarning ? this.run.alarm : null, diverted: f.floodway ? f.diverted : null, gate: f.gate ? f.gateClosed : null }
         const im = this.impact
         let sheltered = 0
         let cap = 0
@@ -2530,7 +2361,7 @@ export class Game {
         s.sim.wind = { ...W.stats, power: W.poweredShare(), gridUp: W.gridUp, pumpsOff: this.flood.pumps.filter((p) => p.unpowered).length }
         const Hz = this.hazards
         const T = Hz.tornado
-        s.sim.storms = { strikes: this.storms.strikes, fires: this.storms.fires, flashRate: Hz.rate ?? 0, nearTornadoes: Hz.nearTornadoes, tornado: T ? { ef: T.ef.name, kmh: T.ef.kmh, down: T.down, damaged: T.damaged } : null, tornadoes: Hz.tornadoes.length }
+        s.sim.storms = { strikes: this.run.storms.strikes, fires: this.run.storms.fires, flashRate: Hz.rate ?? 0, nearTornadoes: Hz.nearTornadoes, tornado: T ? { ef: T.ef.name, kmh: T.ef.kmh, down: T.down, damaged: T.damaged } : null, tornadoes: Hz.tornadoes.length }
         s.sim.lens = this.lens
         s.sim.lensStats = this.lensStats
         // the ground under the cursor
@@ -2551,6 +2382,8 @@ export class Game {
       }
     }
     if (this.results) s.results = this.results
+    // how far the typhoon report's comparison runs have got
+    s.prepProgress = this.results?.report?.pending && this.shadows ? this.shadows.progress(this.flood.time) : null
     return s
   }
 }

@@ -15,7 +15,7 @@
 
 import { GRID, CONSTRUCTION, BUILDING_TYPES } from './config.js'
 import { occupancyAt, idx, residentsOf } from './cityGen.js'
-import { clamp } from './math.js'
+import { clamp, Rng } from './math.js'
 
 const LIGHT = ['wood_old', 'urm']
 const CROWD = 2.5 // a shelter crowds up to this many times its Sphere capacity
@@ -47,6 +47,7 @@ export class FloodImpact {
     this.events = []
     this.leftArea = 0
     this.rescued = 0
+    this.waded = 0 // people who left through water over 0.3 m deep
     // mangroves break the waves riding on a surge: the share of wave attack that gets through, by column
     this.waveThrough = new Float32Array(GRID).fill(1)
     if (city.mangrove)
@@ -59,6 +60,8 @@ export class FloodImpact {
     this.deathsByType = {}
     this.st = new Map()
     this.population = 0
+    // each building's own luck against being swept away (see WindDamage: the same in every run of this storm)
+    const base = Math.floor(rng.next() * 4294967296)
     for (const b of city.buildings) {
       if (b.removed) continue
       const present = occupancyAt(b, startHour)
@@ -77,6 +80,8 @@ export class FloodImpact {
         sea: false, // seawater got into it
         start: present,
         gone: 0, // left under an order
+        hz: 0, // hazard of being swept away, accumulated while the water is strong enough
+        e: -Math.log(1 - new Rng((base ^ Math.imul(b.id + 1, 0x85ebca6b)) >>> 0).next()), // it goes when hz reaches this
       })
     }
     this.shelters = city.buildings.filter((b) => !b.removed && b.type === 'shelter')
@@ -187,7 +192,7 @@ export class FloodImpact {
   }
 
   update(dtH) {
-    const { city, sim, rng } = this
+    const { city, sim } = this
     const h = sim.h
     const zg = sim.zg
 
@@ -247,7 +252,8 @@ export class FloodImpact {
         const dv = dOut * Math.max(v + vw, 0.3)
         const buoy = (b.construction === 'wood_old' || b.construction === 'wood_mod') && dIn > 2.6
         if (dv > C.floodDV || buoy) {
-          if (rng.chance(clamp(dtH * 2, 0, 1))) {
+          s.hz -= Math.log(1 - clamp(dtH * 2, 0, 0.999))
+          if (s.hz >= s.e) {
             s.collapsed = true
             const dead = s.present * 0.35
             this.kill(b, s, dead, 'collapse')
@@ -289,7 +295,8 @@ export class FloodImpact {
         if (moving > 0) {
           s.gone += moving
           if (dOut > 0.3) {
-            // wading through moving water is the deadliest part of a flood
+            // wading through moving water is the deadliest part of a flood (and how leptospirosis spreads)
+            this.waded += moving
             const m = clamp(0.012 * dOut * (v + 0.5), 0, 0.25)
             this.kill(b, s, moving * m, 'evacuation')
           }
