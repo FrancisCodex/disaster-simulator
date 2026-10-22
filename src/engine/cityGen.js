@@ -137,6 +137,8 @@ export function makeBuilding(city, rng, { type, x, y, w, d, floors, construction
 const SEABED = { open: 0.7, shelf: 0.22, bay: 0.4 }
 // height of the river banks at the coast (m above mean sea level): deltas on a wide shelf are the lowest
 const LOWLAND = { open: 1.8, shelf: 1.0, bay: 1.6 }
+// the sand runs 2.5 cells up from the waterline; streets keep 4 cells (40 m) back from it
+const BEACH_SETBACK = 4
 
 /**
  * opts.coast: { shelf } for a coastal city: the sea along the south edge of
@@ -286,7 +288,8 @@ export function generateCity(typeKey, seed, opts = {}) {
       const main = (rx && (isMain(i, ox) || isMain(i - 1, ox))) || (ry && (isMain(j, oy) || isMain(j - 1, oy)))
       const inCity = dist < P.radius
       if (!(inCity || (main && dist < P.radius * 2.2))) continue
-      if (sea[k]) continue
+      // no streets on the beach: they stop on the grass behind it
+      if (coast && coast.shore[i] - (j + 0.5) < BEACH_SETBACK) continue
       if (cellType[k] === CELL_RIVER) {
         if (ry && !rx && (main || inCity)) {
           bridge[k] = 1
