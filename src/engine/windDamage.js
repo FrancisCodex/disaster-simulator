@@ -16,11 +16,15 @@
 // Trees fall at lower gusts once the soil is soaked, block roads and bring
 // down power lines; poles fail on their own above ~170 km/h, and the line
 // that feeds the whole city above ~210 km/h. Unpowered pumps stop.
+// Roof sheets and tiles that come off fly downwind (debrisFlight.js) and
+// break the windows they reach with enough energy. A tornado crossing the
+// city loads every building along its track through the same chain.
 
 import { GRID, CELL_ROAD, CELL_RIVER, CELL_PARK, CELL_POND, CONSTRUCTION, BUILDING_TYPES, WIND, WIND_BETA, roofKind, METAL_ROOF, SLAB_COLLAPSE, TREE_WIND, POLE_WIND, GRID_WIND, STREET_POLE_WIND } from './config.js'
 import { idx } from './cityGen.js'
 import { normCdf, clamp, smoothstep } from './math.js'
 import { fieldAt, GUST_LAND } from './typhoonPhysics.js'
+import { MISSILES, takeOffSpeed, flightAt, hitChance, GLASS_E50, GLASS_BETA } from './debrisFlight.js'
 
 export const FEEDER = 25 // cells per side of one distribution feeder's area (250 m)
 const SECTORS = 8
@@ -32,6 +36,14 @@ const COLLAPSE_CASUALTY = { wood_old: [0.008, 0.15], wood_mod: [0.008, 0.15], ur
 const COLLAPSE_CASUALTY_RC = [0.03, 0.2]
 
 const pFail = (g, m, beta = WIND_BETA) => (m ? normCdf(Math.log(g / m) / beta) : 0)
+/** What comes off a building's roof: sheets off metal and most light roofs, tiles off the rest, gravel and vents off a slab. */
+export function missileOf(b) {
+  const kind = roofKind(b.type)
+  if (kind === 'slab') return MISSILES.gravel
+  if (kind === 'metal') return MISSILES.sheet
+  return b.construction === 'wood_old' || b.construction === 'wood_mod' || b.seed < 0.6 ? MISSILES.sheet : MISSILES.tile
+}
+
 /** 3-s gust profile: speed-up with height above open ground (exponent ~0.1). */
 export const heightFactor = (z) => Math.pow(Math.max(z, 6) / 10, 0.1)
 
@@ -84,7 +96,7 @@ export class WindDamage {
     this.feeders = Array.from({ length: nz * nz }, () => ({ up: true, p: 0, cause: null }))
     this.gridUp = true
     this.gridP = 0
-    this.stats = { glass: 0, cover: 0, roof: 0, collapsed: 0, trees: 0, roads: 0, poles: 0, deathsRoof: 0, deathsCollapse: 0 }
+    this.stats = { glass: 0, cover: 0, roof: 0, collapsed: 0, trees: 0, roads: 0, poles: 0, deathsRoof: 0, deathsCollapse: 0, missiles: 0, missileGlass: 0, tornado: 0 }
     this.pending = { glass: 0, cover: 0, roof: 0, collapsed: 0, trees: 0, roads: 0 }
     this.flags = {}
     this.lastLog = {}
@@ -155,7 +167,6 @@ export class WindDamage {
     const dir = f.dir
     this.wind = { v: V, dir, gust: V * GUST_LAND }
     if (V * GUST_LAND < 18) return this.flushLogs()
-    const { rng } = this
     // the wind comes from the opposite of where it blows
     const from = Math.atan2(-dir[0], -dir[1])
     const sector = ((Math.round((from / (Math.PI * 2)) * SECTORS) % SECTORS) + SECTORS) % SECTORS
@@ -170,43 +181,49 @@ export class WindDamage {
       // s.k: this building's own exposure (a corner plot, a gap between blocks); the minute-to-minute
       // scatter of gusts is already in the fragility's β, so it is not drawn again each minute
       const g = V * GUST_LAND * heightFactor(b.height + b.elevated) * this.shelterOf(b, s, sector) * s.k
-      s.gust = g
-      if (g > s.maxGust) s.maxGust = g
-      // the wind has swung round: a new face of the building takes the load
-      if (s.dir && s.dir[0] * dir[0] + s.dir[1] * dir[1] < -0.2) {
-        for (const c of COMPONENTS) s.p[c] *= 0.5
-        s.dir = null
-      }
-      if (g < 0.6 * Math.min(s.med.cover ?? 99, s.med.glass ?? 99, s.med.collapse)) continue
-      if (!s.dir) s.dir = dir
-      // connections work loose under sustained strong gusts
-      if (s.med.roof && g > 0.75 * s.med.roof) s.wear += dtH
-      const worn = 1 - 0.07 * clamp(s.wear / 2, 0, 1)
-      const inside = s.glass ? 0.88 : 1
-      const M = {
-        glass: s.med.glass,
-        cover: s.med.cover && s.med.cover * worn * inside,
-        roof: s.med.roof && s.med.roof * worn * inside * (s.cover ? 0.95 : 1),
-        collapse: s.med.collapse * (s.roof ? 0.9 : 1) * worn,
-      }
-      for (const c of COMPONENTS) {
-        if (s[c === 'collapse' ? 'collapsed' : c] || !M[c]) continue
-        if (c === 'roof' && s.kind === 'slab') continue
-        const P = pFail(g, M[c])
-        if (P <= s.p[c]) continue
-        const draw = (P - s.p[c]) / (1 - s.p[c])
-        s.p[c] = P
-        if (rng.chance(draw)) {
-          if (c === 'roof' && !s.cover) this.fail(b, s, 'cover', g)
-          this.fail(b, s, c, g)
-          if (c === 'collapse') break
-        }
-      }
+      this.load(b, s, g, dir, dtH)
     }
     this.updateTrees(V, dir, cumRain)
     this.updateStreet(V, dir)
     this.updatePower(V)
     return this.flushLogs()
+  }
+
+  /** A 3-s gust g (m/s, at roof height) blowing toward dir on building b for dtH hours, through the component chain. */
+  load(b, s, g, dir, dtH) {
+    const { rng } = this
+    s.gust = g
+    if (g > s.maxGust) s.maxGust = g
+    // the wind has swung round: a new face of the building takes the load
+    if (s.dir && s.dir[0] * dir[0] + s.dir[1] * dir[1] < -0.2) {
+      for (const c of COMPONENTS) s.p[c] *= 0.5
+      s.dir = null
+    }
+    if (g < 0.6 * Math.min(s.med.cover ?? 99, s.med.glass ?? 99, s.med.collapse)) return
+    if (!s.dir) s.dir = dir
+    // connections work loose under sustained strong gusts
+    if (s.med.roof && g > 0.75 * s.med.roof) s.wear += dtH
+    const worn = 1 - 0.07 * clamp(s.wear / 2, 0, 1)
+    const inside = s.glass ? 0.88 : 1
+    const M = {
+      glass: s.med.glass,
+      cover: s.med.cover && s.med.cover * worn * inside,
+      roof: s.med.roof && s.med.roof * worn * inside * (s.cover ? 0.95 : 1),
+      collapse: s.med.collapse * (s.roof ? 0.9 : 1) * worn,
+    }
+    for (const c of COMPONENTS) {
+      if (s[c === 'collapse' ? 'collapsed' : c] || !M[c]) continue
+      if (c === 'roof' && s.kind === 'slab') continue
+      const P = pFail(g, M[c])
+      if (P <= s.p[c]) continue
+      const draw = (P - s.p[c]) / (1 - s.p[c])
+      s.p[c] = P
+      if (rng.chance(draw)) {
+        if (c === 'roof' && !s.cover) this.fail(b, s, 'cover', g)
+        this.fail(b, s, c, g)
+        if (c === 'collapse') break
+      }
+    }
   }
 
   fail(b, s, c, g) {
@@ -222,16 +239,16 @@ export class WindDamage {
       s.cover = true
       this.stats.cover++
       this.pending.cover++
-      this.debrisStrike(b, 1)
+      this.debrisStrike(b, 0.25)
       this.events.push({ t: this.time, damage: b.id, ds: 1, roof: 'cover' })
     } else if (c === 'roof') {
       s.roof = true
       this.stats.roof++
       this.pending.roof++
-      this.debrisStrike(b, 2)
+      this.debrisStrike(b, 0.6)
       if (is) {
         const dead = is.present * ROOF_CASUALTY[0]
-        im.kill(b, is, dead, 'roof')
+        im.kill(b, is, dead, this.cause ?? 'roof')
         this.stats.deathsRoof += dead
         is.injured += is.present * ROOF_CASUALTY[1]
       }
@@ -249,7 +266,7 @@ export class WindDamage {
         is.collapsed = true
         const [fd, fi] = COLLAPSE_CASUALTY[b.construction] ?? COLLAPSE_CASUALTY_RC
         const dead = is.present * fd
-        im.kill(b, is, dead, 'wind')
+        im.kill(b, is, dead, this.cause ?? 'wind')
         this.stats.deathsCollapse += dead
         is.injured += is.present * fi
         if (b.type === 'hospital') is.offline = true
@@ -263,23 +280,84 @@ export class WindDamage {
   }
 
   /**
-   * Sheets and tiles from b's roof fly downwind: each window within ~140 m in
-   * their path has one chance of being hit (more pieces from a whole roof).
+   * A share `frac` of src's roof comes off and flies downwind (debrisFlight.js):
+   * sheets far and fast, tiles a short way, nothing at all below its take-off
+   * speed. A building in the path is hit by the pieces still airborne when
+   * they reach it, below its roofline; a hit breaks a window if it carries
+   * enough energy.
    */
-  debrisStrike(src, pieces) {
-    const [ux, un] = this.wind.dir
-    if (this.wind.gust < 25) return
+  debrisStrike(src, frac) {
+    const dir = this.wind.dir
+    const U = this.st.get(src.id)?.gust || this.wind.gust
+    const mis = missileOf(src)
+    if (U < takeOffSpeed(mis)) return
+    const n = clamp(Math.round((src.fw * src.fd * frac) / mis.A), 1, mis === MISSILES.sheet ? 30 : 60)
+    this.stats.missiles += n
+    const h = src.height + src.elevated
+    // the flight direction in world axes (x east, z south)
+    const ux = dir[0]
+    const uz = -dir[1]
+    const srcW = Math.abs(uz) * src.fw + Math.abs(ux) * src.fd
     for (const b of this.city.buildings) {
-      if (b === src) continue
+      if (b === src || b.removed) continue
       const s = this.st.get(b.id)
-      if (!s || s.glass || s.collapsed || !s.med.glass) continue
+      if (!s || s.collapsed || s.glass || !s.med.glass) continue
       const dx = b.cx - src.cx
       const dz = b.cz - src.cz
-      const d = Math.hypot(dx, dz)
-      // downwind (wind east = +x, north = −z)
-      if (d > 140 || (dx * ux - dz * un) / d < 0.5) continue
-      if (this.rng.chance(0.05 * pieces * (1 - d / 140))) this.fail(b, s, 'glass', this.wind.gust)
+      const along = dx * ux + dz * uz
+      if (along < 5 || along > 400) continue
+      if (Math.abs(dx * uz - dz * ux) > 0.3 * along + srcW / 2 + Math.max(b.fw, b.fd) / 2) continue
+      // reaching the near face, below the target's roofline (it stands on its own ground)
+      const depth = Math.abs(ux) * b.fw + Math.abs(uz) * b.fd
+      const f = flightAt(mis, U, h, Math.max(1, along - depth / 2))
+      if (!f || f.y > b.height + b.elevated + (b.groundZ - src.groundZ)) continue
+      const w = Math.abs(uz) * b.fw + Math.abs(ux) * b.fd
+      // about a third of a facade is glass
+      const pHit = hitChance(w, along, srcW) * 0.35 * pFail(f.E, GLASS_E50, GLASS_BETA)
+      if (this.rng.chance(1 - Math.pow(1 - pHit, n))) {
+        this.stats.missileGlass++
+        this.fail(b, s, 'glass', this.wind.gust)
+      }
     }
+  }
+
+  /**
+   * A tornado over the last minute (stormHazards.js): gustOf(b) gives the
+   * strongest 3-s gust (m/s, near the ground) at building b and the direction
+   * it blew, or null where the track missed; gustAtTree(t) the same for a
+   * tree. Everything along the track is loaded through the same chain.
+   * Returns how many buildings it damaged.
+   */
+  tornadoLoad(gustOf, gustAtTree, dtH) {
+    this.cause = 'tornado'
+    let hit = 0
+    for (const b of this.city.buildings) {
+      const s = this.st.get(b.id)
+      if (!s || s.collapsed || b.removed) continue
+      const w = gustOf(b)
+      if (!w) continue
+      const g = w.g * heightFactor(b.height + b.elevated) * s.k
+      if (g <= s.gust) continue
+      const before = +s.glass + s.cover + s.roof
+      const keep = this.wind
+      this.wind = { ...keep, dir: w.dir, gust: w.g }
+      this.load(b, s, g, w.dir, dtH)
+      this.wind = keep
+      if (s.glass + s.cover + s.roof > before || s.collapsed) hit++
+    }
+    for (const tr of this.trees) {
+      if (tr.t.fallen) continue
+      const w = gustAtTree(tr.t)
+      if (!w || !this.rng.chance(pFail(w.g * tr.k, tr.med, 0.25))) continue
+      tr.t.fallen = { ax: w.dir[0], az: -w.dir[1], th: 1.3 + this.rng.float(0, 0.25) }
+      this.stats.trees++
+      this.pending.trees++
+      this.events.push({ t: this.time, tree: true })
+      if (this.rng.chance(0.3)) this.feederFault(tr.t.i, tr.t.j, 'tornado')
+    }
+    this.cause = null
+    this.stats.tornado += hit
+    return hit
   }
 
   updateTrees(V, dir, cumRain) {
@@ -380,7 +458,7 @@ export class WindDamage {
     this.events.push({ t: this.time, power: true })
     if (this.gridUp) {
       const where = this.compassArea(i, j)
-      const why = cause === 'trees' ? 'falling trees brought down the lines' : cause === 'collapse' ? 'a collapsing building took the lines down' : 'power poles snapped'
+      const why = { trees: 'falling trees brought down the lines', collapse: 'a collapsing building took the lines down', tornado: 'the tornado brought the lines down', lightning: 'lightning struck a transformer' }[cause] ?? 'power poles snapped'
       this.log(`Power cut in the ${where} of the city: ${why}.`, 'warn')
     }
   }

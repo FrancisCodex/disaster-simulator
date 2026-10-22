@@ -7,6 +7,8 @@ import { idx, cellToWorld } from './cityGen.js'
 import { makeNoise2D, clamp, lerp, smoothstep, normCdf } from './math.js'
 import { Particles, Debris, Rain } from './effects.js'
 import { StormClouds, WindStreaks } from './weather.js'
+import { StormFx } from './stormFx.js'
+import { vortexWind } from './stormHazards.js'
 import { depthColor } from './floodMap.js'
 import { makeWaterMaterial, SkyEnvironment } from './materials.js'
 import { BuildingParts } from './buildingMesh.js'
@@ -134,6 +136,7 @@ export class World {
     this.streaks = new WindStreaks(scene)
     this.leaves = new Particles(scene, 1500, false)
     this.spray = new Particles(scene, 1500, false)
+    this.stormFx = new StormFx(scene, this.dust)
     // wind for swaying trees: (direction x, direction z, sway amplitude m, speed m/s)
     this.uWind = { value: new THREE.Vector4(1, 0, 0, 0) }
     this.cloudTint = new THREE.Color(0x5c6470)
@@ -208,6 +211,7 @@ export class World {
   // ------------------------------------------------------------------ city
   buildCity(city, hour = 12) {
     this.floodBaseY = null
+    if (this.tornado) this.setTornado(null)
     this.city = city
     this.clearGround()
     this.burning = [] // fires of the previous city must not follow us onto the new one
@@ -2331,6 +2335,49 @@ export class World {
     }
   }
 
+  /** A cloud-to-ground strike at (x, y, z) — or, with no point, a flash inside the clouds. */
+  lightning(x, y, z) {
+    if (x == null) return this.stormFx.cloudFlash(0.25 + Math.random() * 0.45)
+    this.stormFx.strike(x, y, z)
+    this.dustBurst(x, y, z, 6, 3)
+  }
+
+  /**
+   * The tornado on the ground: { T (the vortex, see stormHazards.js), x, z } or null.
+   * Windborne debris is sucked into it, and what stands in its core is knocked down.
+   */
+  setTornado(tor) {
+    this.tornado = tor
+    this.stormFx.setTornado(tor && { x: tor.x, z: tor.z, y: this.groundAt(tor.x, tor.z), rc: tor.T.rc, hemi: tor.T.hemi, mx: tor.T.mx, mz: tor.T.mz })
+    this.debris.windAt = tor
+      ? (x, z) => {
+          const [wx, wz] = this.windVec ?? [0, 0]
+          const d = Math.hypot(x - tor.x, z - tor.z)
+          if (d > tor.T.rc * 8) return [wx, wz, 0]
+          const v = vortexWind(tor.T, x, z, tor.x, tor.z)
+          // the updraught in and around the core lofts what it picks up
+          return [wx + v.vx - tor.T.mx, wz + v.vz - tor.T.mz, 30 * Math.exp(-((d / (tor.T.rc * 1.5)) ** 2))]
+        }
+      : null
+  }
+
+  /** Each frame the tornado is down: loose debris near it takes off, and it hits people, cars and poles in its core. */
+  updateTornado() {
+    const tor = this.tornado
+    if (!tor) return
+    const R = tor.T.rc * 1.6
+    for (const it of this.debris.items) {
+      if (it.dead || Math.abs(it.x - tor.x) > R || Math.abs(it.z - tor.z) > R) continue
+      it.windborne = true
+      it.sleep = false
+      it.surf = null
+    }
+    this.tornadoHitT = (this.tornadoHitT ?? 0) - this.frameDt
+    if (this.tornadoHitT > 0) return
+    this.tornadoHitT = 0.25
+    this.strikeAt(tor.x, tor.z, tor.T.rc * 0.7, 3e4)
+  }
+
   /** Clouds, wind streaks, leaves stripped from the trees and spray blown off the water. */
   updateWeather(dt) {
     const wind = this.windVec ?? [0, 0]
@@ -2679,7 +2726,9 @@ export class World {
     this.fire.update(dt)
     this.smoke.update(dt, 3)
     this.dust.update(dt, 1)
+    this.updateTornado()
     this.debris.update(dt)
+    this.stormFx.update(dt, this.nightF ?? 0)
     this.wreck.update(dt)
     if (this.treesDirty && this.realTime - (this.treesT ?? -1) > 0.4) {
       this.treesT = this.realTime

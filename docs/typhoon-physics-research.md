@@ -150,6 +150,13 @@ Published climatology:
 * When a tornado spawns, run a **Rankine vortex** across the grid (core radius 20–60 m, EF0–EF2, path 1–5 km at the band's motion), added on top of the TC wind. Damage uses the same wind fragility (§6), so its narrow track of destruction emerges by itself.
 * Show it rarely and dramatically, together with a "tornado warning" log line.
 
+### 4.3 As implemented (phase 4)
+* **Lightning** (`stormHazards.js`): the flash rate (all flashes, per km² per hour) follows the convective rain of the rainbands, damped inside ~1.5 Rmax, plus an eyewall burst while the peak wind is rising. A quarter of flashes reach the ground. A strike in the district attaches where the electrogeometric model puts it: the highest `top + √(R² − d²)` over roofs, trees and street-light poles, with R = 45 m. Strikes can set a building alight (timber ~30%, masonry ~12%, concrete ~4%), set a tree burning (much less likely in heavy rain) or split it, and blow transformers. The quake's `FireSim` burns the fires, with rain putting them out fast. Expected per storm: 0.2–1.6 ground strikes in the 1 km² city, and hundreds to ~2,000 flashes within 10 km.
+* **TC tornadoes:** genesis density = quadrant (−20° to 120° from the motion, mirrored in the south) × distance (peak ~280 km, a smaller one near the core) × landfall (×3 just after landfall, ×0.3 at sea) × intensity, scaled to ~10 tornadoes over a strong landfalling storm's region. Honest odds of one crossing the district are ~0.005% per storm, so the menu has a **what-if** (EF1 or EF2) that sends one through the city. It comes while a rainband is overhead before landfall, and only when its winds stand out above the typhoon's. Nearby tornadoes are reported in the log. The vortex is Rankine (core radius 20 / 35 / 50 m for EF0–2) carried with the low-level flow at 12–18 m/s, its gusts loading buildings and trees through the same fragility chain. The clock drops to 1 min/s so the player can watch.
+
+### 6.3.1 Windborne debris as implemented (phase 4)
+`debrisFlight.js` uses Wills et al. for take-off speed (a loose sheet lifts at ~9 m/s, a tile at ~28 m/s), and integrates a 2-D tumbling-plate trajectory (C_D 1.17, autorotation C_L 0.3). In typhoon winds a sheet flies 100–300 m at nearly the wind's speed (several kJ on impact); tiles fall within 30–140 m. When a roof fails, its pieces fly downwind. A building in their path is hit by the pieces still airborne below its roofline, and a hit breaks glass with a lognormal fragility on impact energy (E50 = 35 J). The renderer's flying sheets use the same aerodynamics, in the local wind including a tornado's vortex and updraught. Rapier stays reserved for structural wreckage: the analytic flight model gives the damage chain thousands of missiles per storm at negligible cost.
+
 ---
 
 ## 5. Storm surge (coastal cities)
@@ -309,7 +316,9 @@ src/engine/typhoonSim.js       orchestrator: advances the storm along its track;
                                wind (speed, dir, gust field), rain, catchment rain, sea level and
                                lightning/tornado events; owns component damage state.
 src/engine/windDamage.js       component fragility chain (§6.1), trees, poles.
-src/engine/debrisFlight.js     Rapier aerodynamics for windborne debris (§6.3).
+src/engine/debrisFlight.js     windborne debris: take-off, plate trajectories, impact energy (§6.3).
+src/engine/stormHazards.js     lightning (rolling sphere) and TC tornadoes (Rankine vortex), §4.
+src/engine/stormFx.js          bolts, flashes, the tornado funnel.
 src/engine/floodSim.js         + rain source hook, wind stress, time-varying downstream sea level.
 src/engine/config.js           TYPHOON_LEVELS, HISTORICAL_TYPHOONS (best-track points),
                                per-construction wind resistances, TCWS table.
@@ -320,7 +329,7 @@ Suggested phases, each one shippable:
 1. ✅ **Storm core + rain into FloodSim:** tracks, Holland wind (HUD readout only), R-CLIPER with rainbands, catchment inflow, the three-mode picker, TCWS signals. *Replaces the flood mode with nothing lost.*
 2. ✅ **Wind damage:** component fragility, trees, power, reversal fatigue, roof loss visuals, slanted rain. Torn-off roof sheets already fly downwind with a simple drag model; phase 4 adds full plate aerodynamics and impact damage.
 3. ✅ **Storm surge:** coastal city variant, tide, downstream boundary, Haiyan and Nargis presets. See §5.1 for what was built.
-4. **Debris, lightning and tornadoes:** Rapier debris flight, rolling-sphere strikes, TC-tornado vortex.
+4. ✅ **Debris, lightning and tornadoes:** debris flight, rolling-sphere strikes, TC-tornado vortex. See §4.3 and §6.3.1 for what was built.
 5. **Prep tools and after-action report:** shutters, roof straps, tree trimming, buried lines, generators at pumps, sea wall, mangrove belt, signal-triggered evacuation plans.
 
 ---

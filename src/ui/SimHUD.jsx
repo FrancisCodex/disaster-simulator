@@ -129,6 +129,37 @@ function WindToll({ w }) {
   )
 }
 
+/** Thunderstorms: lightning over and in the city, and a tornado on the ground. */
+function StormsNow({ st }) {
+  const T = st.tornado
+  const every = st.flashRate > 0.05 ? 3600 / (st.flashRate * 314) : null
+  if (!T && !st.strikes && !every && !st.tornadoes && !st.nearTornadoes) return null
+  return (
+    <div className="mb-3">
+      {T && (
+        <div className={`mb-2 rounded-md px-2 py-1.5 text-xs font-semibold ${T.down ? 'animate-pulse bg-red-600/80 text-white' : 'bg-red-500/25 text-red-100'}`}>
+          🌪️ {T.down ? `Tornado on the ground: ${T.ef}, ${T.kmh} km/h` : 'Tornado warning: take cover on the lowest floor'}
+          {T.damaged > 0 && <span className="font-normal"> · {T.damaged} buildings hit</span>}
+        </div>
+      )}
+      <div className="text-[11px] tracking-wider text-slate-400 uppercase">Thunderstorms</div>
+      <div className="mt-1 text-xs text-slate-400">
+        ⚡ {every ? `Lightning every ~${every < 60 ? `${Math.max(1, Math.round(every))} s` : `${Math.round(every / 60)} min`} within 10 km` : 'No lightning nearby'}
+        {' · '}
+        <span className={st.strikes ? 'text-amber-300' : 'text-slate-200'}>{st.strikes}</span> strike{st.strikes === 1 ? '' : 's'} in the city
+        {st.fires > 0 && <span className="text-orange-300"> · {st.fires} fire{st.fires > 1 ? 's' : ''}</span>}
+      </div>
+      {(st.tornadoes > 0 || st.nearTornadoes > 0) && (
+        <div className="text-xs text-slate-400">
+          🌪️ {st.tornadoes ? `${st.tornadoes} crossed the city` : ''}
+          {st.tornadoes && st.nearTornadoes ? ' · ' : ''}
+          {st.nearTornadoes ? `${st.nearTornadoes} reported nearby` : ''}
+        </div>
+      )}
+    </div>
+  )
+}
+
 /** The sea at the coast: level above normal (surge + tide) against the beachfront. */
 function SeaNow({ sea }) {
   const over = sea.rise > sea.shore
@@ -152,11 +183,12 @@ function SeaNow({ sea }) {
 
 /** What the disaster is doing right now: rain and river, or shocks, fires and ground failure. */
 function Situation({ s }) {
-  const { flood, quake, typhoon: ty, wind, totals: T } = s.sim
+  const { flood, quake, typhoon: ty, wind, storms, totals: T } = s.sim
   return (
     <>
     {ty && <StormNow ty={ty} />}
     {wind && <WindToll w={wind} />}
+    {storms && <StormsNow st={storms} />}
     {flood && (
       <div className="mb-3">
         <div className="flex items-baseline justify-between">

@@ -23,7 +23,7 @@ export class FloodImpact {
     this.events = []
     this.leftArea = 0
     this.rescued = 0
-    this.deathsByCause = { drowning: 0, collapse: 0, evacuation: 0, roof: 0, wind: 0, surge: 0 }
+    this.deathsByCause = { drowning: 0, collapse: 0, evacuation: 0, roof: 0, wind: 0, surge: 0, tornado: 0, fire: 0 }
     this.deathsByType = {}
     this.st = new Map()
     this.population = 0
@@ -290,14 +290,14 @@ export class FloodImpact {
       dead += s.dead
       injured += s.injured
       if (s.maxIn > 0.3) flooded++
-      if (s.collapsed) destroyed++
+      if (s.collapsed || s.burnt) destroyed++
       // wind damage (WindDamage sets this.wind): a lost roof lets the rain in and the home is unlivable
       const w = this.wind?.st.get(b.id)
-      if (s.maxIn > 0.5 || s.collapsed || w?.roof) displaced += b.residents
+      if (s.maxIn > 0.5 || s.collapsed || s.burnt || w?.roof) displaced += b.residents
       if (s.dIn > 0.5) atRisk += s.present
       const share = Math.min(1, Math.ceil(s.maxIn / b.floorH) / b.floors)
       const windF = !w ? 0 : w.roof ? 0.3 : w.cover ? 0.1 : w.glass ? 0.04 : 0
-      const f = s.collapsed ? 1 : Math.max(windF, Math.min(1, 0.33 * Math.sqrt(s.maxIn)) * share)
+      const f = s.collapsed || s.burnt ? 1 : Math.max(windF, Math.min(1, 0.33 * Math.sqrt(s.maxIn)) * share)
       loss += b.value * f
     }
     for (let k = 0; k < GRID * GRID; k++) if (this.city.levee[k] > 0 && this.sim.maxH[k] > 0.3) loss += 0.02

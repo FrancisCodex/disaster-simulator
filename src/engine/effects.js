@@ -195,19 +195,23 @@ export class Debris {
       for (let s = 0; s < steps && !it.sleep; s++) {
         it.vy -= 9.81 * h
         if (it.windborne) {
-          // a sheet in the wind: drag toward the wind's speed, and lift while it tumbles
-          // (thin plates fly far: ρ_air·C·A / 2m ≈ 0.06 /m for roof sheeting)
-          const [ux, uz] = this.wind
-          const rx = ux * 1.15 - it.vx
-          const ry = -it.vy
-          const rz = uz * 1.15 - it.vz
-          const U = Math.hypot(rx, ry, rz)
-          const k = 0.06 * U * h
-          it.vx += k * rx
-          it.vy += k * ry + (it.age < 2 ? 0.004 * (ux * ux + uz * uz) * h : 0)
-          it.vz += k * rz
-          it.wx += (Math.random() - 0.5) * U * h
-          it.wz += (Math.random() - 0.5) * U * h
+          // a tumbling plate (see debrisFlight.js): drag along the relative wind and,
+          // while it autorotates, a lift across it. ρa·A / 2m ≈ 0.19 /m for roof sheeting.
+          // The wind is the local one: a tornado's vortex and updraught when one is near.
+          const w = this.windAt ? this.windAt(it.x, it.z) : this.wind
+          const ux = w[0] * 1.15
+          const uz = w[1] * 1.15
+          const rx = ux - it.vx
+          const ry = (w[2] ?? 0) - it.vy
+          const rz = uz - it.vz
+          const R = Math.hypot(rx, ry, rz)
+          const Rh = Math.hypot(rx, rz)
+          const k = 0.19 * R * h
+          it.vx += k * 1.17 * rx
+          it.vy += k * (1.17 * ry + 0.3 * Rh)
+          it.vz += k * 1.17 * rz
+          it.wx += (Math.random() - 0.5) * R * h
+          it.wz += (Math.random() - 0.5) * R * h
         }
         it.x += it.vx * h
         it.y += it.vy * h
