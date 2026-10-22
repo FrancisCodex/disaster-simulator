@@ -648,22 +648,63 @@ export const COSTS = {
   softStoreyM2: 300, // $/m² footprint: steel frames / shear walls in the ground floor only
   anchorM2: 60, // $/m² facade: ties, parapet bracing, glazing film
   elevateM2: 1400, // $/m² footprint
-  leveeCell: 0.3, // $M per 10 m of 3 m flood wall
+  leveeCell: 0.3, // $M per 10 m of 3 m flood wall (scales with height)
   pump: 6,
+  bigPump: 13, // 25 m³/s
   pond: 1.5,
   park: 0.25,
+  // typhoon wind measures, per building
+  strapsM2: 35, // $/m² footprint: hurricane ties on every rafter or truss
+  fixingsM2: 25, // $/m² footprint: screws at every purlin, edge strips
+  shuttersM2: 40, // $/m² facade (a third of it glazed)
+  rod: 0.02, // $M per lightning protection system
+  // coast
+  seawallCell: 0.45, // $M per 10 m of 4 m sea wall with flap gates
+  mangroveCell: 0.015, // $M per 10 × 10 m planted (and grown)
+  riverGate: 9,
+  relocateHousehold: 0.012, // $M per household: land, compensation, moving
 }
 
 export const LEVEE_HEIGHT = 3
+export const LEVEE_HEIGHTS = [2, 3, 4]
+export const SEAWALL_HEIGHT = 4 // m above the ground it stands on
 export const PUMP_RATE = 10 // m³/s
+export const BIG_PUMP_RATE = 25
 export const POND_DEPTH = 3.5
+// Wind hardening, as multipliers on the 50%-failure gusts of WIND (see windMedians):
+// hurricane straps hold the roof structure and tie the walls together,
+// better fixings keep the sheets on, closed shutters stop the glass going
+// (and with it the internal pressure) and take ~20× the impact energy.
+export const WIND_MEASURES = {
+  straps: { roof: 1.3, collapse: 1.1 },
+  fixings: { cover: 1.25 },
+  shutters: { glass: 1.15, impact: 20 },
+}
+// River level alarms (m relative to the banks), after Marikina's gauge: warning, prepare, forced evacuation
+export const RIVER_ALARMS = [-2.5, -1.5, -0.5]
 
 export const UPGRADES = {
   floodWarning: {
-    name: 'Typhoon early warning & pre-emptive evacuation',
-    desc: 'River gauges, sirens and a plan tied to the PAGASA wind signals: low-lying districts are evacuated as soon as Signal No. 3 is raised or the river nears its banks.',
+    name: 'River gauges, sirens & warning network',
+    desc: 'Gauges with alarm levels on the river, sirens and barangay radios: the evacuation plan\'s orders reach every street within the hour, and the plan can act on river alarms.',
     cost: () => 1.5,
     disaster: 'typhoon',
+    group: 'People',
+  },
+  surgeWarning: {
+    name: 'Plain-language storm surge warnings',
+    desc: 'Surge warnings in colour bands with what they mean ("water over the roofs of one-storey houses"), as PAGASA adopted after Haiyan. Far more coastal residents leave when told.',
+    cost: () => 0.8,
+    disaster: 'typhoon',
+    group: 'People',
+    coastal: true,
+  },
+  drills: {
+    name: 'Community drills & volunteers',
+    desc: 'Trained barangay volunteers and yearly drills, as in Bangladesh\'s Cyclone Preparedness Programme: people know where to go and leave faster when ordered.',
+    cost: (city) => Math.round(city.buildings.length * 0.003 * 10) / 10 + 0.5,
+    disaster: 'typhoon',
+    group: 'People',
   },
   drainage: {
     name: 'Storm-drain upgrade',
@@ -671,12 +712,71 @@ export const UPGRADES = {
     cost: (city, lvl) => Math.round(city.urbanCells * 0.004 * (1 + lvl * 0.5) * 10) / 10,
     max: 2,
     disaster: 'typhoon',
+    group: 'Water',
+  },
+  tideGates: {
+    name: 'Flap gates on drain outfalls',
+    desc: 'One-way gates where the drains empty: a high river or sea can no longer push back up them, so drains keep working longer in a high tide or surge.',
+    cost: (city) => Math.round(city.urbanCells * 0.0015 * 10) / 10 + 1,
+    disaster: 'typhoon',
+    group: 'Water',
+  },
+  pumpGenerators: {
+    name: 'Backup generators at pump stations',
+    desc: 'Every pump station (built now or later) keeps running in a blackout. Without them, pumps stop exactly when the storm cuts the power.',
+    cost: (city) => 1 + city.pumps.length * 0.8,
+    disaster: 'typhoon',
+    group: 'Water',
   },
   dredge: {
     name: 'River dredging & widening',
     desc: 'Deepens the river channel by 1.5 m, raising how much flow it can carry before overtopping.',
     cost: (city) => (city.type === 'rural' ? 12 : 20),
     disaster: 'typhoon',
+    group: 'Water',
+  },
+  floodway: {
+    name: 'Upstream floodway',
+    desc: 'A diversion channel upstream takes the river\'s flow above 400 m³/s, up to 1,000 m³/s more, away to a lake or the sea (as the Manggahan Floodway does for the Marikina). Above its capacity, the river floods anyway.',
+    cost: (city) => (city.type === 'rural' ? 25 : 60),
+    disaster: 'typhoon',
+    group: 'Water',
+  },
+  windCodeProgram: {
+    name: 'Wind-resistant roof code',
+    desc: 'Every light or metal roof gets hurricane straps and proper sheet fixings, enforced through permits (the NSCP wind provisions, done properly). Owners share the cost: the city pays 50%.',
+    program: { tools: ['straps', 'fixings'], share: 0.5 },
+    disaster: 'typhoon',
+    group: 'Wind',
+  },
+  criticalWindProgram: {
+    name: 'Storm-proof hospitals, schools & shelters',
+    desc: 'Shutters, straps and fixings on every hospital, school, fire station and shelter, so they come through the storm usable. Full cost.',
+    program: { tools: ['shutters', 'straps', 'fixings'], share: 1, types: ['hospital', 'school', 'fire', 'shelter'] },
+    disaster: 'typhoon',
+    group: 'Wind',
+  },
+  treeCare: {
+    name: 'Tree pruning & line clearance',
+    desc: 'Street and park trees thinned, deadwood removed, and branches cut back from power lines: trees stand up to stronger gusts and fewer of them bring the lines down.',
+    cost: (city) => Math.round(city.trees.length * 0.0015 * 10) / 10 + 0.3,
+    disaster: 'typhoon',
+    group: 'Wind',
+  },
+  poles: {
+    name: 'Hardened power distribution',
+    desc: 'Level 1: concrete and steel poles instead of wood (Meralco\'s programme). Level 2: lines buried underground — about 80% fewer outages in Florida after Irma, at ~10× the cost, but a flooded transformer still fails.',
+    cost: (city, lvl) => Math.round(city.urbanCells * (lvl ? 0.03 : 0.006) * 10) / 10,
+    max: 2,
+    disaster: 'typhoon',
+    group: 'Wind',
+  },
+  relocation: {
+    name: 'Danger-zone relocation',
+    desc: 'Homes the forecast puts under more than 1 m of river or sea water are demolished and their families resettled. It saves lives — but they must be rehoused, and resettlement far from work costs them their livelihood.',
+    action: true,
+    disaster: 'typhoon',
+    group: 'Land',
   },
   quakeWarning: {
     name: 'Earthquake early warning',

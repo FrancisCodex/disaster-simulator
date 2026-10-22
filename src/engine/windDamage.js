@@ -20,7 +20,7 @@
 // break the windows they reach with enough energy. A tornado crossing the
 // city loads every building along its track through the same chain.
 
-import { GRID, CELL_ROAD, CELL_RIVER, CELL_PARK, CELL_POND, CONSTRUCTION, BUILDING_TYPES, WIND, WIND_BETA, roofKind, METAL_ROOF, SLAB_COLLAPSE, TREE_WIND, POLE_WIND, GRID_WIND, STREET_POLE_WIND } from './config.js'
+import { GRID, CELL_ROAD, CELL_RIVER, CELL_PARK, CELL_POND, CONSTRUCTION, BUILDING_TYPES, WIND, WIND_BETA, roofKind, METAL_ROOF, SLAB_COLLAPSE, TREE_WIND, POLE_WIND, GRID_WIND, STREET_POLE_WIND, WIND_MEASURES } from './config.js'
 import { idx } from './cityGen.js'
 import { normCdf, clamp, smoothstep } from './math.js'
 import { fieldAt, GUST_LAND } from './typhoonPhysics.js'
@@ -38,7 +38,7 @@ const COLLAPSE_CASUALTY_RC = [0.03, 0.2]
 const pFail = (g, m, beta = WIND_BETA) => (m ? normCdf(Math.log(g / m) / beta) : 0)
 /** What comes off a building's roof: sheets off metal and most light roofs, tiles off the rest, gravel and vents off a slab. */
 export function missileOf(b) {
-  const kind = roofKind(b.type)
+  const kind = roofOf(b)
   if (kind === 'slab') return MISSILES.gravel
   if (kind === 'metal') return MISSILES.sheet
   return b.construction === 'wood_old' || b.construction === 'wood_mod' || b.seed < 0.6 ? MISSILES.sheet : MISSILES.tile
@@ -47,10 +47,16 @@ export function missileOf(b) {
 /** 3-s gust profile: speed-up with height above open ground (exponent ~0.1). */
 export const heightFactor = (z) => Math.pow(Math.max(z, 6) / 10, 0.1)
 
-/** 50%-failure gusts (m/s) of a building's components, after preparations. */
-export function windMedians(b) {
+/** The roof a building has: its type's, unless it was built with a concrete slab (a cyclone shelter). */
+export const roofOf = (b) => b.slabRoof ? 'slab' : roofKind(b.type)
+
+/**
+ * 50%-failure gusts (m/s) of a building's components, after preparations
+ * (WIND_MEASURES). Shutters only count once they are closed.
+ */
+export function windMedians(b, shut = true) {
   const W = WIND[b.construction] ?? WIND.rc_mod
-  const kind = roofKind(b.type)
+  const kind = roofOf(b)
   const m = { glass: W.glass, cover: W.cover, roof: W.roof, collapse: W.collapse }
   if (kind === 'metal') {
     m.cover = METAL_ROOF.cover
@@ -61,6 +67,13 @@ export function windMedians(b) {
     m.collapse *= SLAB_COLLAPSE
   }
   if (BUILDING_TYPES[b.type].windows === 0) m.glass = null
+  const X = WIND_MEASURES
+  if (b.straps && m.roof) {
+    m.roof *= X.straps.roof
+    m.collapse *= X.straps.collapse
+  }
+  if (b.fixings && m.cover) m.cover *= X.fixings.cover
+  if (b.shutters && shut && m.glass) m.glass *= X.shutters.glass
   return m
 }
 
@@ -70,12 +83,15 @@ export function windRisk(b, gust) {
   const g = gust * heightFactor(b.height + b.elevated)
   const pGlass = pFail(g, m.glass)
   const pRoof = pFail(g, m.roof && m.roof * (1 - 0.12 * pGlass))
-  return { kind: roofKind(b.type), medians: m, gust: g, pGlass, pCover: pFail(g, m.cover), pRoof, pCollapse: pFail(g, m.collapse * (1 - 0.1 * pRoof)) }
+  return { kind: roofOf(b), medians: m, gust: g, pGlass, pCover: pFail(g, m.cover), pRoof, pCollapse: pFail(g, m.collapse * (1 - 0.1 * pRoof)) }
 }
 
 export class WindDamage {
-  constructor(city, impact, typhoon, { rng, life = null }) {
+  /** opts: treeCare (pruned trees), poles: the distribution lines (0 on wooden poles, 1 concrete / steel poles, 2 underground). */
+  constructor(city, impact, typhoon, { rng, life = null, treeCare = false, poles = 0 }) {
     this.city = city
+    this.treeCare = treeCare
+    this.lines = poles
     this.impact = impact
     impact.wind = this
     this.ty = typhoon
@@ -86,12 +102,12 @@ export class WindDamage {
     this.st = new Map()
     for (const b of city.buildings) {
       if (b.removed) continue
-      this.st.set(b.id, { med: windMedians(b), kind: roofKind(b.type), p: { glass: 0, cover: 0, roof: 0, collapse: 0 }, dir: null, glass: false, cover: false, roof: false, collapsed: false, wear: 0, gust: 0, maxGust: 0, k: 1 + 0.08 * rng.normal(), shelter: new Float32Array(SECTORS).fill(NaN) })
+      this.st.set(b.id, { med: windMedians(b, false), kind: roofOf(b), p: { glass: 0, cover: 0, roof: 0, collapse: 0 }, dir: null, glass: false, cover: false, roof: false, collapsed: false, wear: 0, gust: 0, maxGust: 0, k: 1 + 0.08 * rng.normal(), shelter: new Float32Array(SECTORS).fill(NaN) })
     }
     // trees standing on open ground (the ones the renderer draws)
     this.trees = city.trees
       .filter((t) => city.buildingAt[idx(t.i, t.j)] < 0 && city.cellType[idx(t.i, t.j)] !== CELL_ROAD && city.cellType[idx(t.i, t.j)] !== CELL_POND && !t.fallen && !t.burnt)
-      .map((t) => ({ t, med: TREE_WIND[t.kind] * (0.85 + 0.3 * rng.next()) * (1.1 - 0.2 * (t.s - 1)), k: 1 + 0.1 * rng.normal(), p: 0 }))
+      .map((t) => ({ t, med: TREE_WIND[t.kind] * (0.85 + 0.3 * rng.next()) * (1.1 - 0.2 * (t.s - 1)) * (treeCare ? 1.15 : 1), k: 1 + 0.1 * rng.normal(), p: 0 }))
     const nz = Math.ceil(GRID / FEEDER)
     this.feeders = Array.from({ length: nz * nz }, () => ({ up: true, p: 0, cause: null }))
     this.gridUp = true
@@ -105,6 +121,19 @@ export class WindDamage {
 
   log(text, level = 'info') {
     this.events.push({ t: this.time, text, level })
+  }
+
+  /** The evacuation plan's order to close storm shutters: from now on they protect the glass. Returns how many were closed. */
+  closeShutters() {
+    let n = 0
+    for (const b of this.city.buildings) {
+      const s = this.st.get(b.id)
+      if (!b.shutters || !s || s.shut || s.collapsed) continue
+      s.shut = true
+      s.med = windMedians(b, true)
+      n++
+    }
+    return n
   }
 
   feederOf(i, j) {
@@ -253,6 +282,10 @@ export class WindDamage {
         is.injured += is.present * ROOF_CASUALTY[1]
       }
       this.events.push({ t: this.time, damage: b.id, ds: 2, roof: 'lost' })
+      if (b.type === 'shelter' && is && !is.roofless) {
+        is.roofless = true
+        this.log(`An evacuation shelter has lost its roof: ${Math.round(is.present)} evacuees must move to another one, through the storm.`, 'bad')
+      }
       if (b.type === 'hospital' && is && !is.offline) {
         is.offline = true
         this.log('The hospital has lost its roof: wards are being moved to the lower floors.', 'bad')
@@ -291,7 +324,8 @@ export class WindDamage {
     const U = this.st.get(src.id)?.gust || this.wind.gust
     const mis = missileOf(src)
     if (U < takeOffSpeed(mis)) return
-    const n = clamp(Math.round((src.fw * src.fd * frac) / mis.A), 1, mis === MISSILES.sheet ? 30 : 60)
+    // sheets screwed to every purlin mostly stay with the roof when it goes
+    const n = clamp(Math.round((src.fw * src.fd * frac * (src.fixings ? 0.5 : 1)) / mis.A), 1, mis === MISSILES.sheet ? 30 : 60)
     this.stats.missiles += n
     const h = src.height + src.elevated
     // the flight direction in world axes (x east, z south)
@@ -313,7 +347,9 @@ export class WindDamage {
       if (!f || f.y > b.height + b.elevated + (b.groundZ - src.groundZ)) continue
       const w = Math.abs(uz) * b.fw + Math.abs(ux) * b.fd
       // about a third of a facade is glass
-      const pHit = hitChance(w, along, srcW) * 0.35 * pFail(f.E, GLASS_E50, GLASS_BETA)
+      // closed shutters or impact glass take ~20× the energy
+      const e50 = GLASS_E50 * (b.shutters && s.shut ? WIND_MEASURES.shutters.impact : 1)
+      const pHit = hitChance(w, along, srcW) * 0.35 * pFail(f.E, e50, GLASS_BETA)
       if (this.rng.chance(1 - Math.pow(1 - pHit, n))) {
         this.stats.missileGlass++
         this.fail(b, s, 'glass', this.wind.gust)
@@ -392,7 +428,7 @@ export class WindDamage {
             this.stats.roads++
             this.pending.roads++
           }
-          if (rng.chance(0.35)) this.feederFault(i, j, 'trees')
+          if (rng.chance(this.treeCare ? 0.15 : 0.35)) this.feederFault(i, j, 'trees')
           break
         }
         const bid = city.buildingAt[k]
@@ -451,6 +487,9 @@ export class WindDamage {
   }
 
   feederFault(i, j, cause) {
+    // buried lines don't care about trees, poles or wreckage; concrete poles shrug off half the falling trees
+    if (this.lines === 2 && cause !== 'flood' && cause !== 'lightning') return
+    if (this.lines === 1 && cause === 'trees' && this.rng.chance(0.5)) return
     const fd = this.feeders[this.feederOf(clamp(i, 0, GRID - 1), clamp(j, 0, GRID - 1))]
     if (!fd.up) return
     fd.up = false
@@ -458,7 +497,7 @@ export class WindDamage {
     this.events.push({ t: this.time, power: true })
     if (this.gridUp) {
       const where = this.compassArea(i, j)
-      const why = { trees: 'falling trees brought down the lines', collapse: 'a collapsing building took the lines down', tornado: 'the tornado brought the lines down', lightning: 'lightning struck a transformer' }[cause] ?? 'power poles snapped'
+      const why = { trees: 'falling trees brought down the lines', collapse: 'a collapsing building took the lines down', tornado: 'the tornado brought the lines down', lightning: 'lightning struck a transformer', flood: 'floodwater reached the underground transformers' }[cause] ?? 'power poles snapped'
       this.log(`Power cut in the ${where} of the city: ${why}.`, 'warn')
     }
   }
@@ -466,14 +505,15 @@ export class WindDamage {
   updatePower(V) {
     const { rng } = this
     const g = V * GUST_LAND * 1.05 // poles stand ~10 m tall in the open along streets
+    const nz = Math.ceil(GRID / FEEDER)
+    if (this.lines === 2) this.floodedTransformers()
     for (let q = 0; q < this.feeders.length; q++) {
       const fd = this.feeders[q]
-      if (!fd.up) continue
-      const P = pFail(g, POLE_WIND, 0.25)
+      if (!fd.up || this.lines === 2) continue
+      const P = pFail(g, POLE_WIND * (this.lines === 1 ? 1.25 : 1), 0.25)
       if (P <= fd.p) continue
       const draw = (P - fd.p) / (1 - fd.p)
       fd.p = P
-      const nz = Math.ceil(GRID / FEEDER)
       if (rng.chance(draw)) this.feederFault((q % nz) * FEEDER + FEEDER / 2, Math.floor(q / nz) * FEEDER + FEEDER / 2, 'poles')
     }
     if (this.gridUp) {
@@ -487,6 +527,30 @@ export class WindDamage {
           this.log('Blackout: the transmission line feeding the city has failed. Every pump, street light and lift without a generator stops.', 'bad')
         }
       }
+    }
+  }
+
+  /** Underground lines: a feeder whose ground-level transformers stand in more than 0.5 m of water shorts out. */
+  floodedTransformers() {
+    const h = this.impact.sim?.h
+    if (!h) return
+    const nz = Math.ceil(GRID / FEEDER)
+    for (let q = 0; q < this.feeders.length; q++) {
+      const fd = this.feeders[q]
+      if (!fd.up) continue
+      const i0 = (q % nz) * FEEDER
+      const j0 = Math.floor(q / nz) * FEEDER
+      // a transformer every ~50 m along the feeder's streets
+      let wet = 0
+      let n = 0
+      for (let j = j0 + 2; j < Math.min(GRID, j0 + FEEDER); j += 5)
+        for (let i = i0 + 2; i < Math.min(GRID, i0 + FEEDER); i += 5) {
+          const k = idx(i, j)
+          if (this.city.cellType[k] !== CELL_ROAD) continue
+          n++
+          if (h[k] > 0.5) wet++
+        }
+      if (n && wet / n > 0.25) this.feederFault(i0 + FEEDER / 2, j0 + FEEDER / 2, 'flood')
     }
   }
 

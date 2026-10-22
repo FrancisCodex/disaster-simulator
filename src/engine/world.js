@@ -853,11 +853,21 @@ export class World {
           ctx.fillRect(x + Math.random() * PX, y + Math.random() * PX, 2, 1.2)
         }
       }
-    for (let k = 0; k < GRID * GRID; k++)
+    for (let k = 0; k < GRID * GRID; k++) {
       if (city.levee[k] > 0) {
-        ctx.fillStyle = '#6d6047'
+        ctx.fillStyle = city.seawall?.[k] ? '#8d8a82' : '#6d6047'
         ctx.fillRect((k % GRID) * PX, Math.floor(k / GRID) * PX, PX, PX)
       }
+      // a mangrove belt: dark tangled roots on the mud
+      if (city.mangrove?.[k]) {
+        const x = (k % GRID) * PX
+        const y = Math.floor(k / GRID) * PX
+        ctx.fillStyle = '#3d4a2c'
+        ctx.fillRect(x, y, PX, PX)
+        ctx.fillStyle = 'rgba(28,38,22,0.8)'
+        for (let q = 0; q < 6; q++) ctx.fillRect(x + ((k * 7 + q * 5) % PX), y + ((k * 3 + q * 11) % PX), 3, 3)
+      }
+    }
     if (this.groundFx) this.paintGroundFx(ctx)
     this.terrainTex.needsUpdate = true
   }
@@ -1388,8 +1398,22 @@ export class World {
       const i = k % GRID
       const j = Math.floor(k / GRID)
       if (city.levee[k] > 0) {
-        items.push({ x: cellToWorld(i), z: cellToWorld(j), y: city.z[k] - 0.5, sx: CELL, sz: CELL, sy: city.levee[k] + 0.5, c: 0x8a8273 })
+        // sea walls are pale concrete; river walls earth-coloured
+        items.push({ x: cellToWorld(i), z: cellToWorld(j), y: city.z[k] - 0.5, sx: CELL, sz: CELL, sy: city.levee[k] + 0.5, c: city.seawall?.[k] ? 0xa7a49c : 0x8a8273 })
       }
+    }
+    // the river gate: piers across the mouth, the gate leaf raised while it is open
+    const RG = city.riverGate
+    if (RG) {
+      const shut = !!this.gateShut
+      for (const k of RG.cells) {
+        const x = cellToWorld(k % GRID)
+        const z = cellToWorld(Math.floor(k / GRID))
+        items.push({ x, z, y: shut ? city.z[k] : RG.crest, sx: CELL, sz: 3, sy: shut ? RG.crest - city.z[k] : 2.5, c: 0x5d6b78 })
+        items.push({ x: x - CELL / 2, z, y: city.z[k] - 1, sx: 1.6, sz: 4, sy: RG.crest + 3 - city.z[k], c: 0x9a9a92 })
+      }
+      const k = RG.cells[RG.cells.length - 1]
+      items.push({ x: cellToWorld(k % GRID) + CELL / 2, z: cellToWorld(Math.floor(k / GRID)), y: city.z[k] - 1, sx: 1.6, sz: 4, sy: RG.crest + 3 - city.z[k], c: 0x9a9a92 })
     }
     // bridges: an arched deck from road to road, railings, piers and abutments
     for (const sp of city.bridgeSpans || []) {

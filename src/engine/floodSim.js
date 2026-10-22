@@ -36,7 +36,14 @@ const STAGE_TABLE = [
  * solver uses, so the peak inflow is exact; the level it reaches comes from
  * STAGE_TABLE (dredging lowers it by about a metre).
  */
-export function forecastRiverPeak(storm, catchmentRain, tau0, tau1, { dredged = false } = {}) {
+// The upstream floodway (an upgrade): flow above q0 is diverted, up to cap more (m³/s)
+export const FLOODWAY = { q0: 400, cap: 1000 }
+// The river gate (a coastal upgrade): it shuts once the sea is this far above normal (m), and pumps this much (m³/s) while shut
+export const GATE_SURGE = 1.2
+export const GATE_PUMP = 400
+export const divertFlow = (q) => q - clamp(q - FLOODWAY.q0, 0, FLOODWAY.cap)
+
+export function forecastRiverPeak(storm, catchmentRain, tau0, tau1, { dredged = false, floodway = false } = {}) {
   const dt = 300
   let lag = 0
   let cum = 0
@@ -47,7 +54,8 @@ export function forecastRiverPeak(storm, catchmentRain, tau0, tau1, { dredged = 
     cum += (basin * dt) / 3600
     lag += ((basin - lag) * dt) / (2.5 * 3600)
     const runoffC = 0.25 + 0.55 * (cum / (cum + 100))
-    const q = BASE_FLOW + (CATCHMENT_M2 * runoffC * lag) / 3.6e6
+    let q = BASE_FLOW + (CATCHMENT_M2 * runoffC * lag) / 3.6e6
+    if (floodway) q = divertFlow(q)
     if (q > peak) {
       peak = q
       tPeak = tau
@@ -69,7 +77,8 @@ export function stageFor(q) {
 }
 
 export class FloodSim {
-  constructor(city, { storm = null, drainage = 20 } = {}) {
+  /** tideGates: flap gates on the drain outfalls; generators: every pump has a backup generator. */
+  constructor(city, { storm = null, drainage = 20, tideGates = false, generators = false } = {}) {
     const N = GRID
     this.city = city
     this.N = N
@@ -90,6 +99,8 @@ export class FloodSim {
       const t = city.cellType[k]
       const built = city.buildingAt[k] >= 0
       this.nn[k] = built ? 0.1 : t === CELL_ROAD ? 0.016 : t === CELL_RIVER ? 0.03 : t === CELL_PARK ? 0.05 : 0.035
+      // a mangrove forest's roots and trunks drag on the water flowing through it
+      if (city.mangrove?.[k]) this.nn[k] = 0.12
       this.cls[k] = t === CELL_RIVER ? 2 : built || t === CELL_ROAD ? 1 : 0
       if (t === CELL_RIVER) {
         this.river.push(k)
@@ -109,7 +120,8 @@ export class FloodSim {
       for (let k = 0; k < N * N; k++) {
         const i = k % N
         const j = (k - i) / N
-        if (city.sea[k] && (i === 0 || i === N - 1 || j === N - 1 || this.coast.shore[i] - (j + 0.5) < -3)) {
+        // (mangroves are always solved: their drag is the point of them)
+        if (city.sea[k] && (i === 0 || i === N - 1 || j === N - 1 || (this.coast.shore[i] - (j + 0.5) < -3 && !city.mangrove?.[k]))) {
           this.seaEdge.push(k)
           this.fixed[k] = 1
         }
@@ -118,7 +130,23 @@ export class FloodSim {
     this.seaZ = this.coast ? this.coast.msl : 0
     this.seaRise = 0 // m above mean sea level
     this.seaMax = 0
-    this.pumps = city.pumps.map((p) => ({ ...p, active: true, removed: 0 }))
+    // where seawater has got to: the sea itself, then every wet cell the sea has flowed into
+    this.salt = this.coast ? Uint8Array.from(city.sea) : null
+    this.pumps = city.pumps.map((p) => ({ ...p, rate: p.rate ?? PUMP_RATE, generator: generators, active: true, removed: 0 }))
+    this.tideGates = tideGates
+    this.floodway = !!city.floodway
+    this.diverted = 0 // m³/s taken away by the floodway right now
+    this.divertedVol = 0
+    // the river gate at the mouth (a coastal upgrade): a flap that shuts when the sea stands above the river
+    this.gate = city.riverGate ?? null
+    this.gateClosed = false
+    this.gateChanges = 0
+    this.gatePumped = 0
+    // flap culverts through the sea wall: water behind it drains out whenever it stands higher than the sea side
+    this.flaps = []
+    if (city.seawall)
+      for (let k = N; k < N * (N - 1); k++)
+        if (city.seawall[k] && city.levee[k] > 0 && !city.levee[k - N] && !city.levee[k + N]) this.flaps.push([k - N, k + N])
     this.time = 0
     this.rain = 0
     this.cumRain = 0
@@ -206,12 +234,14 @@ export class FloodSim {
     const infil = this.raining ? ((6 + 24 * Math.exp(-th / 1.5)) / 3.6e6) * dt : 0
     // storm drains back up when the river is near its banks, and on the coast
     // when the sea covers their outfalls (high tide, surge)
-    let drainEff = clamp(-this.stage / 1.2, 0, 1)
+    // (flap gates on the outfalls stop the backflow: the drains keep working until the river is right at them)
+    let drainEff = clamp(-this.stage / (this.tideGates ? 0.4 : 1.2), 0, 1)
     if (this.coast) {
       this.seaZ = this.seaLevel(this.raining ? this.time : 0)
       this.seaRise = this.seaZ - this.coast.msl
       if (this.raining && this.seaRise > this.seaMax) this.seaMax = this.seaRise
-      drainEff *= clamp(1.5 - this.seaRise, 0, 1)
+      drainEff *= clamp((this.tideGates ? 2 : 1.5) - this.seaRise, 0, 1)
+      if (this.gate) this.operateGate(dt)
     }
     const drain = (this.drainage / 3.6e6) * dt * drainEff
     // upstream hydrograph: lagged runoff of the rain falling on the catchment
@@ -222,6 +252,12 @@ export class FloodSim {
     this.rainLag += ((basin - this.rainLag) * dt) / tau
     const runoffC = 0.25 + 0.55 * (this.cumBasin / (this.cumBasin + 100))
     this.inflow = BASE_FLOW + (this.catchment * runoffC * this.rainLag) / 3.6e6
+    if (this.floodway) {
+      const q = this.inflow
+      this.inflow = divertFlow(q)
+      this.diverted = q - this.inflow
+      this.divertedVol += this.diverted * dt
+    }
 
     // ---- momentum: x faces
     for (let j = 0; j < N; j++) {
@@ -331,7 +367,7 @@ export class FloodSim {
 
     // ---- pumps (fail when their own site floods)
     for (const p of this.pumps) {
-      if (!p.active || p.unpowered) continue
+      if (!p.active || (p.unpowered && !p.generator)) continue
       const pk = p.j * N + p.i
       if (h[pk] > 1.2) {
         p.active = false
@@ -348,7 +384,7 @@ export class FloodSim {
           if (cls[kk] !== 2) wet += h[kk]
         }
       if (wet <= 0.001) continue
-      const vol = Math.min(PUMP_RATE * dt, wet * cellA * 0.5)
+      const vol = Math.min(p.rate * dt, wet * cellA * 0.5)
       const frac = vol / (wet * cellA)
       for (let dj = -4; dj <= 4; dj++)
         for (let di = -4; di <= 4; di++) {
@@ -360,6 +396,15 @@ export class FloodSim {
         }
       p.removed += vol
       toRiver += vol
+    }
+
+    // ---- flap culverts in the sea wall (~1.5 m² of opening per 10 m of wall)
+    for (const [land, sea] of this.flaps) {
+      const dh = zg[land] + h[land] - zg[sea] - h[sea]
+      if (dh < 0.02 || h[land] < 0.02) continue
+      const vol = Math.min(0.6 * 1.5 * Math.sqrt(2 * G * dh) * dt, h[land] * cellA * 0.5)
+      h[land] -= vol / cellA
+      h[sea] += vol / cellA
     }
 
     // ---- river: drained water + upstream inflow
@@ -403,7 +448,106 @@ export class FloodSim {
     }
   }
 
+  /**
+   * The river gate is a storm-surge barrier, not a tide gate: it stays open
+   * for ordinary tides (a river in flood has to reach the sea) and shuts only
+   * when a surge has lifted the sea well above normal and above the river
+   * behind it, so the surge can't run up the river. While it is shut, its
+   * pumping station lifts river water over it into the sea; it opens once the
+   * surge has fallen away and the river stands higher than the sea again.
+   * (It compares with the open sea, not the water just outside the gate,
+   * where the river rushing out piles up for a few minutes.) It waits 10
+   * minutes between movements so it doesn't chatter.
+   */
+  operateGate(dt) {
+    const { gate } = this
+    const up = this.rowLevel(gate.j - 2)
+    const since = this.time - (this.gateT ?? -1e9)
+    const surge = this.seaRise > GATE_SURGE
+    if (!this.gateClosed) {
+      if (surge && since > 600 && this.seaZ > up + 0.02) this.moveGate(true)
+      return
+    }
+    // shut through the surge (the river's own flow piles up against it for a while); open once the sea has fallen back
+    if (since > 600 && this.seaRise < GATE_SURGE - 0.3 && up > this.seaZ) return this.moveGate(false)
+    this.pumpOverGate(dt)
+  }
+
+  /** The barrier's pumps: river water from just behind the gate to just outside it. */
+  pumpOverGate(dt) {
+    const { N, h, city, gate } = this
+    const cellA = this.dx * this.dx
+    const from = []
+    const to = []
+    for (let i = 0; i < N; i++) {
+      const ku = (gate.j - 1) * N + i
+      const kd = (gate.j + 1) * N + i
+      if (city.cellType[ku] === CELL_RIVER && h[ku] > 0.1) from.push(ku)
+      if (city.cellType[kd] === CELL_RIVER) to.push(kd)
+    }
+    if (!from.length || !to.length) return
+    let avail = 0
+    for (const k of from) avail += (h[k] - 0.1) * cellA
+    const vol = Math.min(GATE_PUMP * dt, avail * 0.5)
+    if (vol <= 0) return
+    for (const k of from) h[k] -= ((h[k] - 0.1) * cellA * (vol / avail)) / cellA
+    for (const k of to) h[k] += vol / to.length / cellA
+    this.gatePumped += vol
+  }
+
+  /** Mean water level of the channel across row j (river or sea cells near the river's line). */
+  rowLevel(j) {
+    const { N, h, zg, city } = this
+    let s = 0
+    let n = 0
+    for (let i = 0; i < N; i++) {
+      const k = j * N + i
+      if (city.cellType[k] !== CELL_RIVER || Math.abs(i + 0.5 - city.riverCenter[j]) > 4 || h[k] < 0.05) continue
+      s += zg[k] + h[k]
+      n++
+    }
+    return n ? s / n : this.seaZ
+  }
+
+  moveGate(shut) {
+    this.gateClosed = shut
+    this.gateT = this.time
+    this.gateChanges++
+    for (const k of this.gate.cells) this.zg[k] = shut ? this.gate.crest : this.city.z[k]
+  }
+
+  /**
+   * Spread the seawater mark: from every salty cell, across faces where water
+   * is flowing out of it into a wet neighbour (run every ~20 s, so it follows
+   * a surge up the streets and the river, but not rain water lying behind a
+   * wall that held).
+   */
+  spreadSalt() {
+    const { N, h, qx, qy, salt } = this
+    const q = []
+    for (let k = 0; k < N * N; k++) if (salt[k] && h[k] > 0.05) q.push(k)
+    while (q.length) {
+      const k = q.pop()
+      const i = k % N
+      const j = (k - i) / N
+      // east, west, south, north: positive flux runs toward +i / +j
+      const out = [
+        i < N - 1 && qx[j * (N - 1) + i] > 1e-3 ? k + 1 : -1,
+        i > 0 && qx[j * (N - 1) + i - 1] < -1e-3 ? k - 1 : -1,
+        j < N - 1 && qy[k] > 1e-3 ? k + N : -1,
+        j > 0 && qy[k - N] < -1e-3 ? k - N : -1,
+      ]
+      for (const kk of out) {
+        if (kk < 0 || salt[kk] || h[kk] < 0.05) continue
+        salt[kk] = 1
+        q.push(kk)
+      }
+    }
+  }
+
   updateStage() {
+    // ordinary tides wash in and out of the estuary; only a storm surge carries the sea ashore
+    if (this.salt && this.raining && (this.storm?.seaAt?.(this.time)?.surge ?? 0) > 0.5) this.spreadSalt()
     const { N, h, zg, city } = this
     let s = 0
     let n = 0

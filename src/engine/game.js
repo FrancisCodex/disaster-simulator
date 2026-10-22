@@ -22,16 +22,21 @@ import {
   POND_DEPTH,
   DAMAGE_STATES,
   VARIANT_NAMES,
+  SEAWALL_HEIGHT,
+  BIG_PUMP_RATE,
+  RIVER_ALARMS,
+  RIVER_HALF_WIDTH,
 } from './config.js'
+import { PLAN_ACTIONS, PLAN_TRIGGERS, DEFAULT_PLAN, SUGGESTED_PLAN, surgeBand, alarmLevel, triggerMet } from './evacPlan.js'
 import { generateCity, addBuilding, idx, occupancyAt, cityStats, cellToWorld } from './cityGen.js'
 import { Rng, clamp, smoothstep } from './math.js'
 import { World, sheddingFacade } from './world.js'
-import { FloodSim, forecastRiverPeak } from './floodSim.js'
+import { FloodSim, forecastRiverPeak, GATE_SURGE, GATE_PUMP } from './floodSim.js'
 import { floodMap, depthColor, LENS_GREY } from './floodMap.js'
 import { FloodImpact } from './floodImpact.js'
 import { TyphoonSim } from './typhoonSim.js'
-import { buildStorm, forecastSummary, catchmentRain } from './typhoonPhysics.js'
-import { WindDamage, windRisk } from './windDamage.js'
+import { buildStorm, forecastSummary, catchmentRain, signalAt } from './typhoonPhysics.js'
+import { WindDamage, windRisk, roofOf } from './windDamage.js'
 import { StormHazards, hazardForecast, STRIKE_R, CG_SHARE } from './stormHazards.js'
 import { FireSim } from './fireSim.js'
 import { QuakeSim, demand, mediansFor, damageProbs, collapseProb, cellOfBuilding, soilName, rockPgaAt, withGeometry, quakeAzimuth, shapeOf, dsFromD, compass, groundPeriod, buildingPeriod, resonance, softStoreyOf } from './quakeSim.js'
@@ -116,8 +121,17 @@ export const TOOLS = [
   { key: 'fire', name: 'Fire & Rescue', group: 'Build', icon: '🚒', desc: 'Puts out fires, digs out trapped people, runs boat rescues in floods.', size: [3, 3] },
   { key: 'shelter', name: 'Shelter', group: 'Build', icon: '⛺', desc: 'Evacuation centre. Put it on high ground, away from the river.', size: [3, 3] },
   { key: 'park', name: 'Park', group: 'Build', icon: '🌳', desc: 'Green space soaks up rain and gives open space after an earthquake.', size: [3, 3] },
-  { key: 'levee', name: 'Flood wall', group: 'Flood', icon: '🧱', desc: `Drag to paint a ${LEVEE_HEIGHT} m flood wall. Can fail if overtopped.`, size: [1, 1] },
-  { key: 'pump', name: 'Pump station', group: 'Flood', icon: '⛽', desc: 'Pumps 10 m³/s of floodwater into the river. Fails if its site floods.', size: [1, 1] },
+  { key: 'cycshelter', name: 'Cyclone shelter', group: 'Build', icon: '🏛️', desc: 'An evacuation centre on a floor raised 3 m, with a concrete roof and shutters, built for super-typhoon winds (the Ligtas Pinoy standard). A school or hall the rest of the year.', size: [3, 3], disaster: 'typhoon' },
+  { key: 'levee', name: 'Flood wall', group: 'Flood', icon: '🧱', desc: 'Drag to paint a flood wall, 2, 3 or 4 m high. Can fail if overtopped.', size: [1, 1] },
+  { key: 'pump', name: 'Pump station', group: 'Flood', icon: '⛽', desc: 'Pumps 10 m³/s of floodwater into the river. Fails if its site floods; stops in a blackout without backup generators.', size: [1, 1] },
+  { key: 'bigpump', name: 'Large pump', group: 'Flood', icon: '🏭', desc: `Pumps ${BIG_PUMP_RATE} m³/s of floodwater into the river. Fails if its site floods; stops in a blackout without backup generators.`, size: [1, 1] },
+  { key: 'seawall', name: 'Sea wall', group: 'Coast', icon: '🧱', desc: `Drag to paint a ${SEAWALL_HEIGHT} m concrete sea wall along the shore (like the Leyte Tide Embankment). Flap culverts let rain water behind it drain out at low tide. The surge goes round it up the river unless the river is gated or its banks walled; a surge near the crest can breach it.`, size: [1, 1], coastal: true },
+  { key: 'rivergate', name: 'River gate', group: 'Coast', icon: '🚧', desc: `A storm-surge barrier across the river near its mouth: open for ordinary tides, it shuts once a surge lifts the sea ${GATE_SURGE} m above normal, and pumps ${GATE_PUMP} m³/s of river water over itself until the surge passes. A river in flood still piles up behind it: wall the banks or add an upstream floodway. Tie it into the sea wall on both banks.`, size: [1, 1], coastal: true },
+  { key: 'mangrove', name: 'Mangroves', group: 'Coast', icon: '🌿', desc: 'Drag to plant a mangrove belt in the shallows. A belt a few hundred metres wide breaks most of the waves riding on a surge, but lowers the surge itself by only centimetres.', size: [1, 1], coastal: true },
+  { key: 'straps', name: 'Roof straps', group: 'Wind', icon: '🔗', desc: 'Hurricane ties on every rafter or truss: the roof stays on and the walls stay braced (+30% wind resistance of the roof structure).' },
+  { key: 'fixings', name: 'Sheet fixings', group: 'Wind', icon: '🪛', desc: 'Screws at every purlin and edge strips: the sheets stay on (+25%), and those that go mostly stay with the roof instead of flying.' },
+  { key: 'shutters', name: 'Storm shutters', group: 'Wind', icon: '🪟', desc: 'Shutters or impact glass: windows hold against flying roof sheets, so the wind can\'t get in and push the roof off from inside. They only help once closed: put that in the plan.' },
+  { key: 'rod', name: 'Lightning rod', group: 'Wind', icon: '⚡', desc: 'A lightning protection system: strikes on the building go safely to ground.' },
   { key: 'pond', name: 'Retention pond', group: 'Flood', icon: '💧', desc: `Excavates a ${POND_DEPTH} m deep basin that stores stormwater.`, size: [4, 4] },
   { key: 'elevate', name: 'Elevate', group: 'Flood', icon: '⬆️', desc: 'Raise a low-rise building 2 m on a new foundation.' },
   { key: 'retrofit', name: 'Retrofit', group: 'Quake', icon: '🔩', desc: 'Strengthen the structure one code level (e.g. masonry → reinforced concrete).' },
@@ -139,7 +153,9 @@ export function shoreRise(city) {
   return zs.length ? zs[zs.length >> 1] - city.coast.msl : Infinity
 }
 
-export const BUILDING_TOOLS = ['retrofit', 'isolate', 'elevate', 'softstorey', 'anchor']
+export const BUILDING_TOOLS = ['retrofit', 'isolate', 'elevate', 'softstorey', 'anchor', 'straps', 'fixings', 'shutters', 'rod']
+// tools painted cell by cell with a drag
+export const PAINT_TOOLS = ['levee', 'seawall', 'mangrove']
 const QUAKE_TOOLS = ['retrofit', 'isolate', 'softstorey', 'anchor']
 // what each spending key counts towards in the after-action comparison
 const SPEND_GROUP = {
@@ -167,6 +183,7 @@ function hasMeasure(tool, b) {
   if (tool === 'softstorey') return !!b.softFixed && !!b.openFront
   if (tool === 'anchor') return !!b.facadeAnchored
   if (tool === 'elevate') return b.elevated > 0
+  if (tool === 'straps' || tool === 'fixings' || tool === 'shutters' || tool === 'rod') return !!b[tool]
   return false
 }
 
@@ -176,6 +193,8 @@ const NEW_BUILD = {
   hospital: { floors: 5, construction: 'rc_high' },
   fire: { floors: 2, construction: 'rc_high' },
   shelter: { floors: 2, construction: 'rc_high' },
+  // a raised, slab-roofed, shuttered evacuation centre
+  cycshelter: { type: 'shelter', floors: 2, construction: 'rc_high', premium: 1.35 },
 }
 
 export const START_TIMES = [
@@ -264,7 +283,10 @@ export class Game {
     this.setupCity(city)
     this.budget = CITY_TYPES[city.type].budget
     this.spent = 0
-    this.upgrades = { floodWarning: false, drainage: 0, dredge: false, quakeWarning: false, gasShutoff: false }
+    this.upgrades = { floodWarning: false, drainage: 0, dredge: false, quakeWarning: false, gasShutoff: false, poles: 0 }
+    // the typhoon plan: when each action is taken (evacPlan.js)
+    this.plan = { ...DEFAULT_PLAN }
+    this.leveeHeight = LEVEE_HEIGHT
     this.relocated = 0
     this.actions = {}
     this.spentBy = {}
@@ -293,6 +315,7 @@ export class Game {
     // the old colouring reads the simulation just cleared: drop it before the new city is drawn
     this.world.colorFn = null
     this.world.controls.autoRotate = false
+    this.world.gateShut = false
     this.world.buildCity(city, this.settings.startHour)
     for (const b of city.buildings) b.openFront = this.world.openFront(b)
     this.world.burning = []
@@ -402,7 +425,7 @@ export class Game {
     let down = null
     el.addEventListener('pointerdown', (e) => {
       down = { x: e.clientX, y: e.clientY, button: e.button }
-      if (this.phase === 'prepare' && this.tool === 'levee' && e.button === 0) {
+      if (this.phase === 'prepare' && PAINT_TOOLS.includes(this.tool) && e.button === 0) {
         // keep the camera controls from seeing this drag
         e.stopImmediatePropagation()
         this.painting = true
@@ -486,21 +509,38 @@ export class Game {
         return b ? (2 * (b.fw + b.fd) * b.height * COSTS.anchorM2) / 1e6 : 0
       case 'elevate':
         return b ? (b.fw * b.fd * COSTS.elevateM2) / 1e6 : 0
+      case 'straps':
+        return b ? (b.fw * b.fd * COSTS.strapsM2) / 1e6 : 0
+      case 'fixings':
+        return b ? (b.fw * b.fd * COSTS.fixingsM2) / 1e6 : 0
+      case 'shutters':
+        // the facade up to ~10 storeys; above that the glazing is engineered curtain wall anyway
+        return b ? (2 * (b.fw + b.fd) * Math.min(b.height, 30) * COSTS.shuttersM2) / 1e6 : 0
+      case 'rod':
+        return b ? COSTS.rod * (b.height > 40 ? 3 : 1) : 0
       case 'levee':
-        return COSTS.leveeCell
+        return (COSTS.leveeCell * this.leveeHeight) / LEVEE_HEIGHT
+      case 'seawall':
+        return COSTS.seawallCell
+      case 'mangrove':
+        return COSTS.mangroveCell
+      case 'rivergate':
+        return COSTS.riverGate
       case 'pump':
         return COSTS.pump
+      case 'bigpump':
+        return COSTS.bigPump
       case 'pond':
         return COSTS.pond
       case 'park':
         return COSTS.park
       default: {
         if (!NEW_BUILD[tool] || !fp) return 0
-        const T = BUILDING_TYPES[tool]
+        const T = BUILDING_TYPES[NEW_BUILD[tool].type ?? tool]
         let floors = NEW_BUILD[tool].floors
         if (tool === 'apartment' && P.key === 'rural') floors = 3
         const area = (fp.w * 10 - 5) * (fp.d * 10 - 5) * floors
-        return (area * T.costM2) / 1e6
+        return (area * T.costM2 * (NEW_BUILD[tool].premium ?? 1)) / 1e6
       }
     }
   }
@@ -534,6 +574,44 @@ export class Game {
       if (b.floors > 3) return 'Only low-rise buildings (≤3 floors) can be raised'
       return null
     }
+    if (tool === 'straps') {
+      if (b.straps) return 'Roof already strapped'
+      if (roofOf(b) === 'slab') return 'Concrete roof slab: nothing to strap down'
+      return null
+    }
+    if (tool === 'fixings') {
+      if (b.fixings) return 'Roof sheets already fixed'
+      if (roofOf(b) === 'slab') return 'Concrete roof slab: no sheets to fix'
+      return null
+    }
+    if (tool === 'shutters') {
+      if (b.shutters) return 'Already has shutters'
+      if (BUILDING_TYPES[b.type].windows === 0) return 'No windows to protect'
+      return null
+    }
+    if (tool === 'rod') return b.rod ? 'Already has a lightning rod' : null
+    return null
+  }
+
+  /** Can a painting tool go on cell (i, j)? Returns null if so, else why not. */
+  paintCheck(tool, i, j) {
+    const { city } = this
+    const k = idx(i, j)
+    if (city.buildingAt[k] >= 0 || city.bridge[k] || city.pumps.some((q) => q.i === i && q.j === j)) return 'Blocked'
+    if (tool === 'mangrove') {
+      if (city.mangrove?.[k]) return 'Already planted'
+      const coast = city.coast
+      const deep = coast ? coast.msl - city.z[k] : 0
+      // in the shallows off the beach, out of the river's channel
+      if (!coast || !city.sea[k] || deep > 2.5) return 'Mangroves grow in the shallows off the beach'
+      if (Math.abs(i + 0.5 - city.riverCenter[j]) < RIVER_HALF_WIDTH + 1) return 'Keep the river mouth open'
+      return null
+    }
+    if (city.levee[k] > 0 || city.cellType[k] === CELL_RIVER) return 'Blocked'
+    if (tool === 'seawall') {
+      if (!city.coast || city.coast.shore[i] - (j + 0.5) > 12) return 'A sea wall goes along the shore'
+      return null
+    }
     return null
   }
 
@@ -558,18 +636,20 @@ export class Game {
         hl = { x: b.x, y: b.y, w: b.w, d: b.d, h: b.height + b.elevated + 1, base: b.base, color: tool === 'inspect' ? 0x93c5fd : reason ? 0xef4444 : tool === 'demolish' ? 0xf97316 : 0x4ade80 }
       } else if (tool === 'demolish') {
         const k = idx(p.i, p.j)
-        if (city.levee[k] > 0 || city.pumps.some((q) => q.i === p.i && q.j === p.j)) hl = { x: p.i, y: p.j, w: 1, d: 1, h: 5, color: 0xf97316 }
+        if (city.levee[k] > 0 || city.mangrove?.[k] || city.riverGate?.cells.includes(k) || city.pumps.some((q) => q.i === p.i && q.j === p.j)) hl = { x: p.i, y: p.j, w: 1, d: 1, h: 5, color: 0xf97316 }
       }
     } else {
       const fp = this.footprint(tool, p.i, p.j)
-      const k = idx(p.i, p.j)
-      let ok
-      if (tool === 'levee') ok = city.cellType[k] !== CELL_RIVER && city.buildingAt[k] < 0 && !city.bridge[k] && !city.levee[k]
-      else if (tool === 'pump') ok = this.areaFree(fp.x, fp.y, 1, 1, { allowRoad: true })
-      else ok = this.areaFree(fp.x, fp.y, fp.w, fp.d)
+      let why
+      if (PAINT_TOOLS.includes(tool)) why = this.paintCheck(tool, p.i, p.j)
+      else if (tool === 'pump' || tool === 'bigpump') why = this.areaFree(fp.x, fp.y, 1, 1, { allowRoad: true }) ? null : 'Blocked — needs empty land or a road'
+      else if (tool === 'rivergate') why = this.gateCheck(p.i, p.j)
+      else why = this.areaFree(fp.x, fp.y, fp.w, fp.d) ? null : 'Blocked — needs empty land'
       cost = this.toolCost(tool, null, fp)
-      reason = ok ? null : 'Blocked — needs empty land'
-      hl = { ...fp, h: tool === 'levee' ? LEVEE_HEIGHT : 6, color: ok ? 0x4ade80 : 0xef4444 }
+      reason = why
+      const gate = tool === 'rivergate' && !why ? this.gateCells(p.j) : null
+      const hx = gate ? Math.min(...gate.map((q) => q % GRID)) : fp.x
+      hl = { ...fp, x: hx, w: gate ? gate.length : fp.w, h: tool === 'levee' ? this.leveeHeight : tool === 'seawall' ? SEAWALL_HEIGHT : tool === 'mangrove' ? 3 : 6, color: why ? 0xef4444 : 0x4ade80 }
     }
     this.world.setHighlight(hl)
     const prev = this.hover
@@ -606,13 +686,24 @@ export class Game {
       return
     }
     const fp = this.footprint(tool, p.i, p.j)
-    if (tool === 'levee') return
-    if (tool === 'pump') {
+    if (PAINT_TOOLS.includes(tool)) return
+    if (tool === 'pump' || tool === 'bigpump') {
       if (!this.areaFree(fp.x, fp.y, 1, 1, { allowRoad: true })) return this.notify('A pump needs an empty cell or road.', 'bad')
-      if (!this.pay(COSTS.pump, 'pump')) return
-      city.pumps.push({ i: fp.x, j: fp.y })
+      if (!this.pay(this.toolCost(tool), tool)) return
+      const rate = tool === 'bigpump' ? BIG_PUMP_RATE : 10
+      city.pumps.push({ i: fp.x, j: fp.y, rate })
       this.world.rebuildStatic()
-      this.notify('Pump station built (10 m³/s).', 'good')
+      this.notify(`Pump station built (${rate} m³/s)${this.upgrades.pumpGenerators ? ', with a backup generator' : ''}.`, 'good')
+      return
+    }
+    if (tool === 'rivergate') {
+      const why = this.gateCheck(p.i, p.j)
+      if (why) return this.notify(why, 'bad')
+      if (!this.pay(COSTS.riverGate, 'rivergate')) return
+      city.riverGate = { j: p.j, cells: this.gateCells(p.j), crest: city.coast.msl + 5 }
+      this.world.rebuildStatic()
+      this.refreshPreview()
+      this.notify('River gate built across the mouth. It shuts while the sea stands above the river.', 'good')
       return
     }
     if (!this.areaFree(fp.x, fp.y, fp.w, fp.d)) return this.notify('That spot is blocked — it needs open land.', 'bad')
@@ -650,15 +741,20 @@ export class Game {
       if (tool === 'apartment' && city.type === 'rural') floors = 3
       const rng = new Rng(Math.floor(Math.random() * 1e9))
       for (let j = fp.y; j < fp.y + fp.d; j++) for (let i = fp.x; i < fp.x + fp.w; i++) if (city.cellType[idx(i, j)] === CELL_PARK) city.cellType[idx(i, j)] = CELL_GRASS
-      const nb = addBuilding(city, rng, { type: tool, ...fp, floors, construction: NEW_BUILD[tool].construction })
+      const nb = addBuilding(city, rng, { type: NEW_BUILD[tool].type ?? tool, ...fp, floors, construction: NEW_BUILD[tool].construction })
       nb.built = true
+      if (tool === 'cycshelter') {
+        // raised above the surge, under a concrete roof, shuttered
+        Object.assign(nb, { elevated: 3, slabRoof: true, shutters: true, cyclone: true })
+        this.world.rebuildStatic()
+      }
       if (nb.residents) this.relocated = Math.max(0, this.relocated - nb.residents)
       this.world.paintTerrain()
       this.world.buildTrees()
       this.world.rebuildBuildings()
       this.applyColorMode()
       this.selected = nb.id
-      this.notify(`${BUILDING_TYPES[tool].name} built — ${cost.toFixed(2)} $M`, 'good')
+      this.notify(`${TOOLS.find((t) => t.key === tool).name} built — ${cost.toFixed(2)} $M`, 'good')
     }
   }
 
@@ -668,9 +764,25 @@ export class Game {
     if (!b) {
       if (city.levee[k] > 0) {
         city.levee[k] = 0
+        if (city.seawall) city.seawall[k] = 0
         this.world.rebuildStatic()
         this.world.paintTerrain()
         if (this.overlay) this.applyColorMode()
+        this.emit()
+        return
+      }
+      if (city.riverGate?.cells.includes(k)) {
+        city.riverGate = null
+        this.world.rebuildStatic()
+        this.refreshPreview()
+        this.emit()
+        return
+      }
+      if (city.mangrove?.[k]) {
+        city.mangrove[k] = 0
+        city.trees = city.trees.filter((t) => idx(t.i, t.j) !== k)
+        this.world.paintTerrain()
+        this.world.buildTrees()
         this.emit()
         return
       }
@@ -710,20 +822,55 @@ export class Game {
     if (this.leveePaintDirty) this.world.rebuildStatic()
   }
 
+  /** One cell of a painting tool: a flood wall, a sea wall or mangroves. */
   paintLeveeCell(i, j) {
-    const p = { i, j }
-    const { city } = this
-    const k = idx(p.i, p.j)
-    if (city.levee[k] > 0 || city.cellType[k] === CELL_RIVER || city.buildingAt[k] >= 0 || city.bridge[k]) return
-    if (city.pumps.some((q) => q.i === p.i && q.j === p.j)) return
-    if (!this.pay(COSTS.leveeCell, 'levee')) {
+    const { city, tool } = this
+    if (i < 0 || j < 0 || i >= GRID || j >= GRID || this.paintCheck(tool, i, j)) return
+    const k = idx(i, j)
+    if (!this.pay(this.toolCost(tool), tool)) {
       this.painting = false
       this.world.controls.enabled = true
       return
     }
-    city.levee[k] = LEVEE_HEIGHT
+    if (tool === 'levee') city.levee[k] = this.leveeHeight
+    else if (tool === 'seawall') {
+      city.levee[k] = SEAWALL_HEIGHT
+      ;(city.seawall ??= new Uint8Array(GRID * GRID))[k] = 1
+    } else if (tool === 'mangrove') {
+      ;(city.mangrove ??= new Uint8Array(GRID * GRID))[k] = 1
+      // a few low, dense trees standing in the water
+      for (let q = 0; q < 2; q++) city.trees.push({ i, j, ox: Math.random() * 7 - 3.5, oz: Math.random() * 7 - 3.5, s: 0.55 + Math.random() * 0.2, kind: 0, mangrove: true })
+    }
     this.leveePaintDirty = true
     this.version++
+  }
+
+  /** Flood wall height for the next cells painted (m). */
+  setLeveeHeight(h) {
+    this.leveeHeight = h
+    this.emit()
+  }
+
+  /** The river cells across row j (a gate spans the channel bank to bank). */
+  gateCells(j) {
+    const out = []
+    for (let i = 0; i < GRID; i++) {
+      const k = idx(i, j)
+      if (this.city.cellType[k] === CELL_RIVER && !this.city.sea[k]) out.push(k)
+    }
+    return out
+  }
+
+  /** Can the river gate go across row j? null if so. */
+  gateCheck(i, j) {
+    const { city } = this
+    if (!city.coast) return 'Only a coastal city has a river mouth to gate'
+    if (city.riverGate) return 'The river already has a gate (demolish it to move it)'
+    const k = idx(i, j)
+    if (city.cellType[k] !== CELL_RIVER || city.sea[k]) return 'Click on the river, near its mouth'
+    if (city.coast.shoreMean - j > 25) return 'Too far upstream: put it within 250 m of the mouth'
+    if (this.gateCells(j).some((q) => city.bridge[q])) return 'There is a bridge here'
+    return null
   }
 
   buyUpgrade(key) {
@@ -731,28 +878,36 @@ export class Game {
     const lvl = typeof this.upgrades[key] === 'number' ? this.upgrades[key] : this.upgrades[key] ? 1 : 0
     if (U.max ? lvl >= U.max : lvl >= 1) return
     if (U.program) return this.runProgram(key)
+    if (key === 'relocation') return this.relocate()
     const cost = U.cost(this.city, lvl)
     if (!this.pay(cost, key)) return
     if (U.max) this.upgrades[key] = lvl + 1
     else this.upgrades[key] = true
     if (key === 'dredge') {
-      for (let k = 0; k < GRID * GRID; k++) if (this.city.cellType[k] === CELL_RIVER) this.city.z[k] -= 1.5
+      for (let k = 0; k < GRID * GRID; k++) if (this.city.cellType[k] === CELL_RIVER && !this.city.sea[k]) this.city.z[k] -= 1.5
       this.city.dredged = true
       this.world.updateTerrainHeights()
       this.refreshPreview()
     }
+    if (key === 'floodway') {
+      this.city.floodway = true
+      if (this.overlay) this.applyColorMode()
+    }
     this.notify(`${U.name} purchased (${cost.toFixed(1)} $M).`, 'good')
   }
 
-  /** Carry out a city-wide program: the same measure on every building that qualifies. */
+  /** Carry out a city-wide program: the same measures on every building that qualifies. */
   runProgram(key) {
     const U = UPGRADES[key]
     const { targets, cost } = this.programPlan(key)
     if (!targets.length) return this.notify('No buildings need this.')
     if (!this.pay(cost, key)) return
     for (const b of targets) {
-      this.applyMeasure(U.program.tool, b)
-      if (U.program.full) while (CONSTRUCTION[b.construction].next) this.applyMeasure(U.program.tool, b)
+      for (const tool of U.program.tools ?? [U.program.tool]) {
+        if (this.checkTool(tool, b) !== null) continue
+        this.applyMeasure(tool, b)
+        if (U.program.full) while (CONSTRUCTION[b.construction].next) this.applyMeasure(tool, b)
+      }
     }
     this.upgrades[key] = true
     this.world.rebuildBuildings()
@@ -767,20 +922,76 @@ export class Game {
       const { cost, targets } = this.programPlan(key)
       return { cost, owned: lvl >= 1, lvl, count: targets.length }
     }
+    if (key === 'relocation') {
+      const { cost, targets, people } = this.relocationPlan()
+      return { cost, owned: lvl >= 1, lvl, count: targets.length, people }
+    }
     return { cost: U.cost(this.city, lvl), owned: U.max ? lvl >= U.max : lvl >= 1, lvl }
   }
 
   /** The buildings a city-wide program would work on, and the city's share of the bill. */
   programPlan(key) {
     const P = UPGRADES[key].program
-    const targets = this.city.buildings.filter((b) => (!P.construction || b.construction === P.construction) && (!P.types || P.types.includes(b.type)) && this.checkTool(P.tool, b) === null)
+    const tools = P.tools ?? [P.tool]
+    const targets = this.city.buildings.filter((b) => (!P.construction || b.construction === P.construction) && (!P.types || P.types.includes(b.type)) && tools.some((t) => this.checkTool(t, b) === null))
     let cost = 0
     for (const b of targets) {
-      let steps = 1
-      if (P.full) for (let c = CONSTRUCTION[b.construction].next; CONSTRUCTION[c]?.next; c = CONSTRUCTION[c].next) steps++
-      cost += this.toolCost(P.tool, b) * steps
+      for (const t of tools) {
+        if (this.checkTool(t, b) !== null) continue
+        let steps = 1
+        if (P.full) for (let c = CONSTRUCTION[b.construction].next; CONSTRUCTION[c]?.next; c = CONSTRUCTION[c].next) steps++
+        cost += this.toolCost(t, b) * steps
+      }
     }
     return { targets, cost: cost * P.share }
+  }
+
+  /**
+   * Danger-zone relocation: the homes the forecast puts under more than 1 m of
+   * river or sea water, and what it costs to clear them and resettle families
+   * (cached until the city or the scenario changes).
+   */
+  relocationPlan() {
+    const { city } = this
+    let walls = 0
+    for (let k = 0; k < GRID * GRID; k++) walls += city.levee[k]
+    const key = JSON.stringify([this.settings.typhoon, this.settings.level, this.settings.coast, city.buildings.length, walls, !!city.floodway, !!city.dredged, !!city.riverGate])
+    if (this.relocCache?.key !== key) {
+      const fc = this.riverForecast()
+      const sea = city.coast ? Math.round((this.level.forecast.sea?.peak ?? 0) * 10) / 10 : null
+      const M = floodMap(city, Math.round(fc.stage * 10) / 10, this.level.forecast.rainTotal, sea)
+      const targets = city.buildings.filter((b) => (b.type === 'house' || b.type === 'apartment') && b.residents > 0 && this.waterInside(b, M) > 1)
+      let cost = 0
+      let people = 0
+      for (const b of targets) {
+        people += b.residents
+        cost += this.toolCost('demolish', b) + (b.residents / 4) * COSTS.relocateHousehold
+      }
+      this.relocCache = { key, plan: { targets, cost, people } }
+    }
+    return this.relocCache.plan
+  }
+
+  relocate() {
+    const { targets, cost, people } = this.relocationPlan()
+    if (!targets.length) return this.notify('No homes are in the danger zone.')
+    if (!this.pay(cost, 'relocation')) return
+    const { city } = this
+    for (const b of targets) {
+      city.buildings = city.buildings.filter((x) => x !== b)
+      city.byId.delete(b.id)
+      for (let j = b.y; j < b.y + b.d; j++) for (let i = b.x; i < b.x + b.w; i++) city.buildingAt[idx(i, j)] = -1
+    }
+    this.relocated += people
+    city.resettled = (city.resettled ?? 0) + people
+    this.upgrades.relocation = true
+    this.relocCache = null
+    if (this.selected != null && !city.byId.get(this.selected)) this.selected = null
+    this.world.paintTerrain()
+    this.world.rebuildBuildings()
+    this.world.rebuildStatic()
+    this.applyColorMode()
+    this.notify(`${targets.length} homes cleared from the danger zone: ${people.toLocaleString()} people to resettle. Build new housing on safe ground for them.`, 'good')
   }
 
   /** Apply one building measure (a tool, or a city-wide program doing the same job). */
@@ -797,6 +1008,7 @@ export class Game {
     if (tool === 'softstorey') b.softFixed = 'brace'
     if (tool === 'anchor') b.facadeAnchored = true
     if (tool === 'elevate') b.elevated = 2
+    if (tool === 'straps' || tool === 'fixings' || tool === 'shutters' || tool === 'rod') b[tool] = true
   }
 
   /** Measures a building has had, for the inspect panel. */
@@ -807,7 +1019,12 @@ export class Game {
     if (b.construction === 'isolated') out.push(b.origConstruction ? `Base-isolated (was ${CONSTRUCTION[b.origConstruction].short})` : 'Base-isolated')
     if (b.softFixed && b.openFront) out.push(b.softFixed === 'brace' ? 'Soft storey braced' : 'Ground floor braced by retrofit')
     if (b.facadeAnchored) out.push('Facade & parapets anchored')
-    if (b.elevated) out.push(`Raised ${b.elevated} m`)
+    if (b.cyclone) out.push('Cyclone shelter: raised floor, concrete roof, shutters')
+    else if (b.elevated) out.push(`Raised ${b.elevated} m`)
+    if (b.straps) out.push('Roof strapped to the walls')
+    if (b.fixings) out.push('Roof sheets screwed at every purlin')
+    if (b.shutters && !b.cyclone) out.push('Storm shutters (close them in the plan)')
+    if (b.rod) out.push('Lightning rod')
     return out
   }
 
@@ -972,10 +1189,10 @@ export class Game {
 
   /** Forecast peak of the river for this scenario (cached until the scenario or the channel changes). */
   riverForecast() {
-    const key = JSON.stringify([this.settings.typhoon, this.settings.level, this.settings.coast, !!this.city.dredged])
+    const key = JSON.stringify([this.settings.typhoon, this.settings.level, this.settings.coast, !!this.city.dredged, !!this.city.floodway])
     if (this.riverFcCache?.key !== key) {
       const fc = this.level.forecast
-      const r = forecastRiverPeak(buildStorm(this.level), catchmentRain, fc.startH, fc.endH + 12, { dredged: this.city.dredged })
+      const r = forecastRiverPeak(buildStorm(this.level), catchmentRain, fc.startH, fc.endH + 12, { dredged: this.city.dredged, floodway: this.city.floodway })
       this.riverFcCache = { key, r }
     }
     return this.riverFcCache.r
@@ -1071,14 +1288,20 @@ export class Game {
     const stats = cityStats(city, settings.startHour)
     if (settings.disaster === 'typhoon') {
       this.typhoon = new TyphoonSim(this.level, { place: city.name, shoreRise: shoreRise(city) })
-      this.flood = new FloodSim(city, { storm: this.typhoon, drainage: P.drainage + 15 * this.upgrades.drainage })
-      this.impact = new FloodImpact(city, this.flood, { warning: this.upgrades.floodWarning, startHour: settings.startHour, signal: () => this.typhoon.signal, surgeZone: this.typhoon.fc.sea?.peak ?? 0, rng: this.rng })
-      this.windDmg = new WindDamage(city, this.impact, this.typhoon, { rng: new Rng((settings.seed ^ 0x2545f491) >>> 0), life: this.world.life })
+      const U = this.upgrades
+      this.flood = new FloodSim(city, { storm: this.typhoon, drainage: P.drainage + 15 * U.drainage, tideGates: !!U.tideGates, generators: !!U.pumpGenerators })
+      this.impact = new FloodImpact(city, this.flood, { warning: U.floodWarning, surgeWarning: !!U.surgeWarning, drills: !!U.drills, startHour: settings.startHour, signal: () => this.typhoon.signal, surgeZone: this.typhoon.fc.sea?.peak ?? 0, rng: this.rng })
+      this.windDmg = new WindDamage(city, this.impact, this.typhoon, { rng: new Rng((settings.seed ^ 0x2545f491) >>> 0), life: this.world.life, treeCare: !!U.treeCare, poles: U.poles || 0 })
       // lightning, tornadoes, and the fires lightning starts
       this.hazards = new StormHazards(this.typhoon, { rng: new Rng((settings.seed ^ 0x3c6ef372) >>> 0), mode: this.level.tornado ?? 'natural', centre: { x: cellToWorld(city.center.i), z: cellToWorld(city.center.j) } })
       this.tyFire = new FireSim(city, new Rng((settings.seed ^ 0x1b873593) >>> 0))
       this.storms = { strikes: 0, fires: 0, logged: 0 }
       this.windAcc = 0
+      // the plan: steps whose trigger has already come by the time the simulation starts were carried out then
+      this.planFired = {}
+      this.alarm = 0
+      this.gateShut = false
+      this.evalPlan(true)
       this.population = this.impact.population
       this.drainTyphoonLog()
     } else {
@@ -1187,6 +1410,106 @@ export class Game {
     }
   }
 
+  /** Set when a plan action is taken (a PLAN_TRIGGERS key). */
+  setPlan(action, trigger) {
+    this.plan = { ...this.plan, [action]: trigger }
+    this.emit()
+  }
+
+  /** Replace the plan with the suggested one, or reset to doing nothing until the streets flood. */
+  usePlan(which) {
+    this.plan = { ...(which === 'suggested' ? SUGGESTED_PLAN : DEFAULT_PLAN) }
+    this.emit()
+  }
+
+  /** What the plan's triggers watch, right now. */
+  planState() {
+    const ty = this.typhoon
+    const tau = ty.tau()
+    return { tau, signal: ty.signal, surge: this.city.coast ? surgeBand(ty.fc.sea, tau) : 0, alarm: this.alarm, flooding: this.impact.flooding(), gauges: !!this.upgrades.floodWarning }
+  }
+
+  /**
+   * How many hours before the simulation began a trigger was already met
+   * (orders given then have had time to work), at most a day.
+   */
+  triggerAge(key) {
+    const T = PLAN_TRIGGERS[key]
+    const ty = this.typhoon
+    const tau = ty.tau()
+    let age = 0
+    if (T.kind === 'hours') age = tau - T.level
+    else if (T.kind === 'surge') age = tau - (ty.fc.sea.surgeMaxTau - 48)
+    else if (T.kind === 'signal') {
+      // walk back until the signal was lower
+      for (let a = 0.5; a <= 24; a += 0.5) {
+        if (signalAt(ty.fc.timeline, tau - a) < T.level) break
+        age = a
+      }
+    }
+    return clamp(age, 0, 24)
+  }
+
+  /** Check the plan's triggers and carry out the steps that are due. start: at the start of the simulation. */
+  evalPlan(start = false) {
+    const st = this.planState()
+    for (const [action, trig] of Object.entries(this.plan)) {
+      if (this.planFired[action] || trig === 'never') continue
+      if ((PLAN_ACTIONS[action].coastal || PLAN_TRIGGERS[trig]?.coastal) && !this.city.coast) continue
+      if (!triggerMet(trig, st)) continue
+      this.planFired[action] = true
+      this.planStep(action, trig, start ? this.triggerAge(trig) : 0)
+    }
+  }
+
+  planStep(action, trig, head) {
+    const im = this.impact
+    const when = PLAN_TRIGGERS[trig].name
+    const ago = head >= 1 ? ` (${Math.round(head)} h ago, before the storm got close)` : ''
+    const t = this.simTime
+    const late = trig === 'flooding'
+    switch (action) {
+      case 'closeSchools': {
+        const n = im.closeSchools()
+        this.pushLog(t, `${when}${ago}: classes and work suspended. ~${Math.round(n).toLocaleString()} people sent home from schools and offices.`, 'info')
+        break
+      }
+      case 'shutters': {
+        const n = this.windDmg.closeShutters()
+        if (n) this.pushLog(t, `${when}${ago}: storm shutters closed on ${n} building${n > 1 ? 's' : ''}.`, 'info')
+        break
+      }
+      case 'evacCoast':
+      case 'evacRiver':
+      case 'evacLight': {
+        const zone = PLAN_ACTIONS[action].zone
+        im.order(zone, head)
+        const what = { coast: 'the coastal zone the surge could reach', river: 'low-lying and riverside areas', light: 'light-material homes' }[zone]
+        const share = Math.round(im.compliance(zone) * 100)
+        this.pushLog(t, late ? `Emergency evacuation of ${what} — late: the water is already in the streets.` : `${when}${ago}: pre-emptive evacuation of ${what}. About ${share}% of residents are expected to go.`, late ? 'bad' : 'warn')
+        break
+      }
+      case 'forced':
+        im.force()
+        this.pushLog(t, `${when}${ago}: forced evacuation. Police and barangay officials are moving everyone still in the danger zones.`, 'warn')
+        break
+      case 'boats':
+        im.boatsSafe = true
+        this.pushLog(t, `${when}${ago}: rescue boats moved from the fire stations to the shelters.`, 'info')
+        break
+    }
+  }
+
+  /** River alarm levels at the gauge (only read if the city has gauges). */
+  checkAlarms() {
+    const a = alarmLevel(this.flood.stage, RIVER_ALARMS)
+    if (a <= this.alarm) return
+    this.alarm = a
+    if (!this.upgrades.floodWarning) return
+    const text = ['', 'River alarm 1 at the gauge: warning — the river is rising toward its banks.', 'River alarm 2: prepare to evacuate low-lying areas.', 'River alarm 3: critical level — the river is about to overtop.'][a]
+    this.pushLog(this.simTime, text, a >= 2 ? 'bad' : 'warn')
+  }
+
   /** Every simulated minute: lightning in the district, tornadoes, and the fires they start. */
   stepHazards(t) {
     const H = this.hazards
@@ -1252,11 +1575,12 @@ export class Game {
       const name = BUILDING_TYPES[b.type].name.toLowerCase()
       // the current finds the wiring and the roof timbers; concrete with steel inside mostly takes it to ground
       const pFire = b.construction === 'wood_old' || b.construction === 'wood_mod' ? 0.3 : b.construction === 'urm' ? 0.12 : 0.04
-      if (s && !s.burning && !s.burnt && rng.chance(pFire)) {
+      if (b.rod) text = `Lightning struck the lightning rod on ${/^[aeiou]/.test(name) ? 'an' : 'a'} ${name} and went safely to ground.`
+      else if (s && !s.burning && !s.burnt && rng.chance(pFire)) {
         this.tyIgnite(b, s, 'lightning')
         text = null
       } else text = `Lightning struck ${/^[aeiou]/.test(name) ? 'an' : 'a'} ${name}${b.floors >= 6 ? ` (${b.floors} floors), the tallest thing around` : ''}.${rng.chance(0.25) ? ' Its electrics are fried.' : ''}`
-      if (rng.chance(0.2)) this.windDmg.feederFault(b.x, b.y, 'lightning')
+      if (!b.rod && rng.chance(0.2)) this.windDmg.feederFault(b.x, b.y, 'lightning')
     } else if (hit.kind === 'tree') {
       const tr = this.tyFire.trees.find((o) => o.t === hit.ref)
       // a soaked tree rarely burns: the bolt splits it instead
@@ -1415,6 +1739,8 @@ export class Game {
     let tick = false
     while (this.acc >= 300) {
       this.acc -= 300
+      this.checkAlarms()
+      this.evalPlan()
       this.impact.update(300 / 3600)
       this.impact.updateLevees(300 / 3600)
       tick = true
@@ -1425,6 +1751,12 @@ export class Game {
       this.world.updateWater(f)
     }
     if (tick) this.syncFlood()
+    if (f.gate && f.gateClosed !== this.gateShut) {
+      this.gateShut = f.gateClosed
+      this.world.gateShut = f.gateClosed
+      this.world.rebuildStatic()
+      if (f.gateChanges <= 4) this.pushLog(this.simTime, f.gateClosed ? `The river barrier has shut against the surge. Its pumps are lifting river water over it (${GATE_PUMP} m³/s); the rest piles up behind it until the surge passes.` : 'The surge has passed and the river barrier is open: the river is draining to the sea again.', f.gateClosed ? 'warn' : 'info')
+    }
   }
 
   drainTyphoonLog() {
@@ -1464,7 +1796,7 @@ export class Game {
       for (const p of this.flood.pumps) {
         const was = p.unpowered
         p.unpowered = !W.powered(p.i, p.j)
-        if (p.unpowered && !was && p.active) cut++
+        if (p.unpowered && !was && p.active && !p.generator) cut++
       }
       if (cut) this.pushLog(this.simTime, `${cut} pump station${cut > 1 ? 's have' : ' has'} lost power and stopped.`, 'bad')
       // street lights and traffic signals go dark with their feeder
@@ -2148,6 +2480,10 @@ export class Game {
     s.hoverInfo = this.hover?.bid != null && this.hover.bid !== this.selected ? this.buildingInfo(this.hover.bid) : null
     if (this.phase === 'prepare') s.prep = this.prepStats()
     s.riskLayer = this.riskLayer
+    s.coastal = !!this.city.coast
+    s.plan = this.plan
+    s.planFired = this.planFired ?? null
+    s.leveeHeight = this.leveeHeight
     const M = this.floodMapData
     if (M) {
       const h = this.hover
@@ -2175,7 +2511,15 @@ export class Game {
       }
       if (this.flood) {
         const f = this.flood
-        s.sim.flood = { rain: f.rain, cumRain: f.cumRain, basinRain: f.basinRain, stage: f.stage, inflow: f.inflow, warned: this.impact.warned, pumpsFailed: f.pumps.filter((p) => p.failed).length }
+        s.sim.flood = { rain: f.rain, cumRain: f.cumRain, basinRain: f.basinRain, stage: f.stage, inflow: f.inflow, warned: this.impact.warned, pumpsFailed: f.pumps.filter((p) => p.failed).length, alarm: this.upgrades.floodWarning ? this.alarm : null, diverted: f.floodway ? f.diverted : null, gate: f.gate ? f.gateClosed : null }
+        const im = this.impact
+        let sheltered = 0
+        let cap = 0
+        for (const b of im.shelters) {
+          sheltered += im.st.get(b.id)?.present ?? 0
+          cap += b.capacity
+        }
+        s.sim.shelters = { sheltered, cap, crowded: sheltered > cap, orders: Object.keys(im.orders), forced: im.forced }
         // the sea: m above mean sea level now, the most so far, and the beachfront it has to get over
         if (f.coast) s.sim.flood.sea = { rise: f.seaRise, max: f.seaMax, shore: this.typhoon.shoreRise, ...this.typhoon.now.sea }
       }

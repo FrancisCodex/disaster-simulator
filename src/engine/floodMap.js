@@ -72,6 +72,8 @@ export function seaFloodDepth(city, rise) {
   const depth = new Float32Array(N * N)
   if (!city.coast) return depth
   const W = city.coast.msl + rise
+  // a river gate is shut while the sea is up
+  const gate = new Set(city.riverGate?.cells ?? [])
   const seen = new Uint8Array(N * N)
   const q = []
   for (let k = 0; k < N * N; k++)
@@ -83,7 +85,7 @@ export function seaFloodDepth(city, rise) {
     const k = q.pop()
     const i = k % N
     for (const kk of [i > 0 ? k - 1 : -1, i < N - 1 ? k + 1 : -1, k - N, k + N]) {
-      if (kk < 0 || kk >= N * N || seen[kk] || top(city, kk) >= W) continue
+      if (kk < 0 || kk >= N * N || seen[kk] || top(city, kk) >= W || gate.has(kk)) continue
       seen[kk] = 1
       depth[kk] = W - city.z[kk]
       q.push(kk)

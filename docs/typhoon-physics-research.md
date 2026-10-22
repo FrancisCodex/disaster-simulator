@@ -330,7 +330,7 @@ Suggested phases, each one shippable:
 2. ✅ **Wind damage:** component fragility, trees, power, reversal fatigue, roof loss visuals, slanted rain. Torn-off roof sheets already fly downwind with a simple drag model; phase 4 adds full plate aerodynamics and impact damage.
 3. ✅ **Storm surge:** coastal city variant, tide, downstream boundary, Haiyan and Nargis presets. See §5.1 for what was built.
 4. ✅ **Debris, lightning and tornadoes:** debris flight, rolling-sphere strikes, TC-tornado vortex. See §4.3 and §6.3.1 for what was built.
-5. **Prep tools and after-action report:** shutters, roof straps, tree trimming, buried lines, generators at pumps, sea wall, mangrove belt, signal-triggered evacuation plans. Researched in detail, with each measure mapped onto the engine, in `typhoon-prep-research.md`.
+5. **Prep tools and after-action report:** (5a, the preparation tools, ✅; 5b, the report, next) shutters, roof straps, tree trimming, buried lines, generators at pumps, sea wall, mangrove belt, signal-triggered evacuation plans. Researched in detail, with each measure mapped onto the engine, in `typhoon-prep-research.md`.
 
 ---
 

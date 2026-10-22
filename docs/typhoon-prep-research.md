@@ -279,6 +279,15 @@ The earthquake report already compares the real run with a shadow run of the sam
 * **People:** the evacuation plan editor (D1), plain-language surge warning (D2), shelter quality and overcrowding (D3), drills and volunteers (D4).
 * Most are ✅ against hooks that already exist. The new mechanics are the plan editor, gates and the zoning brush.
 
+✅ **Built (phase 5a).** Differences from the plan above, learned in testing:
+* **Road flood gates** were left out: the solver doesn't model traffic through walls, so they would add nothing. Wall heights (2/3/4 m) are in.
+* **The zoning brush** became a one-click "danger-zone relocation": homes the forecast puts under more than 1 m of water are cleared and their families must be rehoused (`city.resettled`).
+* **The river gate is a storm-surge barrier, not a tide gate.** Closing on every rising tide penned a river in flood (~1,000 m³/s) behind it until it burst the walls from inside. It now stays open for ordinary tides and shuts once a surge lifts the sea 1.2 m above normal. While shut it pumps 400 m³/s over itself, and it stays shut until the surge has passed (a river's own flow piles metres up against a gate that has just shut).
+* **Sea walls have flap culverts:** without them, rain and river water trapped behind the wall built up until the wall failed from the land side.
+* **A defence works only as a system.** Haiyan on a coastal metropolis, headless runs, flooded buildings: plan only 120. Sea wall and estuary walls, 117. Plus gate and upstream floodway, 20. A sea wall alone is worse than nothing: the surge comes up the river, over its banks, and the wall then traps it.
+* **Seawater is now traced** (`FloodSim.salt`, spread along the flow only during a surge), replacing phase 3's "sea above the floor" guess, which counted rain-flooded buildings behind a wall as surge.
+* **The suggested plan** with warning upgrades took Haiyan deaths from 84 to 18 (surge deaths 38 → 0). The wind roof code, shutters, tree care and concrete poles, in an ordinary typhoon: roofs lost 97 → 23, windows broken by debris 177 → 85, power still on 13% → 38%.
+
 **Phase 5b: after-action report.** The shadow run in a worker (§4.1), the pillar table (§4.2) and the recovery estimates (§4.3), all as numbers and short lessons.
 
 **Second tier, if time allows.** Catchment dam and reforestation (A6), underground tunnel (A7), flood basins (A8), green infrastructure (A9), reef (B3), dunes (B4), insurance (E1).

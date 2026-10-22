@@ -208,7 +208,20 @@ function Situation({ s }) {
         <div className="mt-1 h-1.5 overflow-hidden rounded bg-slate-700">
           <div className={`h-full transition-all ${flood.stage > 0 ? 'bg-red-500' : 'bg-amber-400'}`} style={{ width: `${Math.max(0, Math.min(100, ((flood.stage + 4.5) / 6) * 100))}%` }} />
         </div>
+        {(flood.alarm != null || flood.diverted != null || flood.gate != null) && (
+          <div className="mt-1 text-xs text-slate-400">
+            {flood.alarm != null && <span className={flood.alarm >= 2 ? 'text-red-300' : flood.alarm ? 'text-amber-300' : ''}>{flood.alarm ? `River alarm ${flood.alarm}` : 'No river alarm'}</span>}
+            {flood.diverted > 1 && <span> · floodway taking {fmtInt(flood.diverted)} m³/s</span>}
+            {flood.gate != null && <span className={flood.gate ? 'text-amber-300' : ''}> · river gate {flood.gate ? 'shut' : 'open'}</span>}
+          </div>
+        )}
         {flood.sea && <SeaNow sea={flood.sea} />}
+        {s.sim.shelters && (s.sim.shelters.cap > 0 || s.sim.shelters.sheltered > 0) && (
+          <div className="mt-1 text-xs text-slate-400">
+            ⛺ {fmtInt(s.sim.shelters.sheltered)} in shelters of {fmtInt(s.sim.shelters.cap)} places
+            {s.sim.shelters.crowded && <span className="text-orange-300"> · overcrowded</span>}
+          </div>
+        )}
         <div className="mt-2 text-xs">{flood.warned ? <span className="text-amber-300">⚠ Evacuation order in effect</span> : <span className="text-slate-500">No warning issued</span>}</div>
       </div>
     )}

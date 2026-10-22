@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { TOOLS, BUILDING_TOOLS } from '../engine/game.js'
-import { UPGRADES, CONSTRUCTION } from '../engine/config.js'
+import { UPGRADES, CONSTRUCTION, LEVEE_HEIGHTS } from '../engine/config.js'
+import { PLAN_ACTIONS, PLAN_TRIGGERS } from '../engine/evacPlan.js'
 import { Row, BuildingPanel, Section, Sheet } from './common.jsx'
 import { useIsMobile } from './useIsMobile.js'
 import { RepoIcon } from './RepoCredit.jsx'
@@ -10,7 +11,10 @@ import { TyphoonForecast } from './TyphoonScenario.jsx'
 import RiskMapPanel from './RiskMapPanel.jsx'
 
 // tool groups shown for each scenario: the other disaster's tools are hidden
-const GROUPS = { typhoon: ['General', 'Build', 'Flood'], quake: ['General', 'Build', 'Quake'] }
+const GROUPS = { typhoon: ['General', 'Build', 'Flood', 'Coast', 'Wind'], quake: ['General', 'Build', 'Quake'] }
+
+/** The tools of a group this city and disaster can use (coast tools only on the coast). */
+const toolsOf = (s, g) => TOOLS.filter((t) => t.group === g && !(t.coastal && !s.coastal) && !(t.disaster && t.disaster !== s.settings.disaster))
 
 function Swatch({ color, label }) {
   return (
@@ -33,8 +37,9 @@ function Legend() {
 
 const incoming = (s) => (s.settings.disaster === 'quake' ? `M${s.level.M.toFixed(1)} earthquake${s.level.title ? ` · ${s.level.title}` : ''}` : `${s.level.title} · ${Math.round(s.level.forecast.peakKmh10)} km/h at the city`)
 
-/** Upgrades for this scenario only. */
-const upgradesFor = (disaster) => Object.entries(UPGRADES).filter(([, U]) => U.disaster === disaster)
+/** Upgrades for this scenario only (coastal ones on the coast). */
+const upgradesFor = (disaster, coastal = true) => Object.entries(UPGRADES).filter(([, U]) => U.disaster === disaster && (coastal || !U.coastal))
+const UPGRADE_GROUPS = { People: '📣 Warning & evacuation', Water: '💧 Water', Wind: '💨 Wind & power', Land: '🏘️ Land use' }
 
 function Overview({ s }) {
   const p = s.prep
@@ -83,39 +88,88 @@ const overviewSummary = (s) => (s.settings.disaster === 'quake' ? `~${fmtInt(s.p
 
 function Upgrades({ s, game }) {
   const remaining = s.budget - s.spent
-  return upgradesFor(s.settings.disaster).map(([k, U]) => {
-    const { cost, owned, lvl, count } = game.upgradeCost(k)
-    const nothing = U.program && !owned && count === 0
+  let group = null
+  return upgradesFor(s.settings.disaster, s.coastal).map(([k, U]) => {
+    const { cost, owned, lvl, count, people } = game.upgradeCost(k)
+    const nothing = (U.program || U.action) && !owned && count === 0
+    const head = U.group && U.group !== group ? (group = U.group) : null
     return (
-      <div key={k} className="mb-2 rounded-md border border-slate-600 p-2 last:mb-0">
+      <div key={k}>
+      {head && <div className="mt-1 mb-1 text-[10px] font-semibold tracking-wider text-slate-500 uppercase">{UPGRADE_GROUPS[head] ?? head}</div>}
+      <div className="mb-2 rounded-md border border-slate-600 p-2 last:mb-0">
         <div className="flex items-start justify-between gap-2">
           <div className="text-[13px] font-semibold text-white">
             {U.name}
             {U.max ? <span className="ml-1 text-xs text-slate-400">({lvl}/{U.max})</span> : null}
             {U.program && !owned ? <span className="ml-1 text-xs font-normal text-slate-400">· {fmtInt(count)} building{count === 1 ? '' : 's'}</span> : null}
+            {U.action && !owned ? <span className="ml-1 text-xs font-normal text-slate-400">· {fmtInt(count)} homes, {fmtInt(people)} people</span> : null}
           </div>
           <button
             disabled={owned || nothing || cost > remaining}
             onClick={() => game.buyUpgrade(k)}
             className="shrink-0 rounded bg-emerald-600 px-2 py-0.5 text-xs font-semibold text-white enabled:hover:bg-emerald-500 disabled:bg-slate-700 disabled:text-slate-400"
           >
-            {owned ? (U.program ? 'Done' : 'Owned') : nothing ? 'None needed' : fmtMoney(cost)}
+            {owned ? (U.program || U.action ? 'Done' : 'Owned') : nothing ? 'None needed' : fmtMoney(cost)}
           </button>
         </div>
         <p className="mt-0.5 text-[11px] leading-snug text-slate-400">{U.desc}</p>
+      </div>
       </div>
     )
   })
 }
 
+/** The typhoon plan: for each action, the trigger that sets it off. */
+function PlanEditor({ s, game }) {
+  const triggers = Object.entries(PLAN_TRIGGERS).filter(([, T]) => s.coastal || !T.coastal)
+  const gauges = s.upgrades.floodWarning
+  return (
+    <div className="text-xs">
+      <p className="mb-2 text-[11px] leading-snug text-slate-400">
+        When each step is taken. Earlier gives people time to move; later risks the water or the wind getting there first. Steps already due when the storm arrives have been carried out by then.
+      </p>
+      {Object.entries(PLAN_ACTIONS)
+        .filter(([, A]) => s.coastal || !A.coastal)
+        .map(([k, A]) => (
+          <label key={k} className="mb-1.5 block" title={A.desc}>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-slate-200">{A.name}</span>
+              <select value={s.plan[k]} onChange={(e) => game.setPlan(k, e.target.value)} className={`w-40 rounded border border-slate-700 bg-slate-900/80 px-1 py-0.5 text-[11px] ${s.plan[k] === 'never' ? 'text-slate-500' : 'text-white'}`}>
+                {triggers.map(([tk, T]) => (
+                  <option key={tk} value={tk} disabled={T.gauges && !gauges}>
+                    {T.name}
+                    {T.gauges && !gauges ? ' (needs gauges)' : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </label>
+        ))}
+      <div className="mt-2 flex gap-2">
+        <button onClick={() => game.usePlan('suggested')} className="rounded bg-sky-600/80 px-2 py-1 text-[11px] font-semibold text-white hover:bg-sky-500">
+          Use a suggested plan
+        </button>
+        <button onClick={() => game.usePlan('none')} className="rounded px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-700/60">
+          Reset (no plan)
+        </button>
+      </div>
+      <p className="mt-2 text-[10px] leading-snug text-slate-500">
+        How many go when told, and how fast, depends on the warning upgrades: gauges and sirens spread orders fast, plain-language surge warnings make coastal families believe them, and drills get people moving.
+      </p>
+    </div>
+  )
+}
+
+const planSummary = (s) => `${Object.values(s.plan).filter((v) => v !== 'never' && v !== 'flooding').length} steps before the flooding`
+
 function upgradesSummary(s, game) {
-  const list = upgradesFor(s.settings.disaster)
+  const list = upgradesFor(s.settings.disaster, s.coastal)
   const owned = list.filter(([k]) => game.upgradeCost(k).owned).length
   return `${owned}/${list.length} done`
 }
 
 /** The tool in hand: what it does, and what the building under the cursor would cost or why it can't. */
-function ToolStatus({ s, tool, compact }) {
+function ToolStatus({ s, game, tool, compact }) {
   return (
     <div className={compact ? 'text-[12px] leading-snug' : 'max-w-md text-sm'}>
       <span className="mr-1">{tool?.icon}</span>
@@ -124,6 +178,16 @@ function ToolStatus({ s, tool, compact }) {
       {s.hover && s.hover.cost > 0 && <span className={`ml-2 font-mono ${s.hover.reason ? 'text-red-400' : 'text-emerald-300'}`}>{s.hover.reason ?? fmtMoney(s.hover.cost)}</span>}
       {compact && !(s.hover && s.hover.cost > 0) && <span className="ml-2 text-slate-400">{s.tool === 'inspect' ? 'Tap a building to see its details and risk.' : 'Tap where to apply it.'}</span>}
       {BUILDING_TOOLS.includes(s.tool) && <Legend />}
+      {s.tool === 'levee' && (
+        <span className="ml-2 inline-flex items-center gap-1 text-xs text-slate-400">
+          height
+          {LEVEE_HEIGHTS.map((h) => (
+            <button key={h} onClick={() => game.setLeveeHeight(h)} className={`rounded px-1.5 py-0.5 ${s.leveeHeight === h ? 'bg-sky-500/30 text-white ring-1 ring-sky-400' : 'text-slate-300 hover:bg-slate-700/60'}`}>
+              {h} m
+            </button>
+          ))}
+        </span>
+      )}
     </div>
   )
 }
@@ -175,11 +239,11 @@ function DesktopPrepare({ s, game }) {
 
       {/* tools */}
       <div className="panel scroll-thin pointer-events-auto absolute top-24 left-3 max-h-[calc(100vh-8rem)] w-52 overflow-y-auto p-2">
-        {GROUPS[disaster].map((g) => (
+        {GROUPS[disaster].filter((g) => toolsOf(s, g).length).map((g) => (
           <div key={g} className="mb-2">
             <div className="px-1 pb-1 text-[10px] font-semibold tracking-wider text-slate-500 uppercase">{g}</div>
             <div className="grid grid-cols-2 gap-1">
-              {TOOLS.filter((t) => t.group === g).map((t) => (
+              {toolsOf(s, g).map((t) => (
                 <button
                   key={t.key}
                   onClick={() => game.setTool(t.key)}
@@ -204,6 +268,11 @@ function DesktopPrepare({ s, game }) {
         <Section id="upgrades" title="City-wide upgrades" summary={upgradesSummary(s, game)}>
           <Upgrades s={s} game={game} />
         </Section>
+        {disaster === 'typhoon' && (
+          <Section id="plan" title="Typhoon plan" summary={planSummary(s)}>
+            <PlanEditor s={s} game={game} />
+          </Section>
+        )}
         <BuildingPanel info={s.selected} title="Selected" onClose={() => game.select(null)} />
         {!s.selected && s.hoverInfo && <BuildingPanel info={s.hoverInfo} title="Hover" />}
       </div>
@@ -211,7 +280,7 @@ function DesktopPrepare({ s, game }) {
       {/* bottom bar (leaves the corner to the GitHub credit, an icon below 2xl) */}
       <div className="pointer-events-none absolute right-14 bottom-3 left-3 flex items-end justify-center gap-3 2xl:right-3">
         <div className="panel pointer-events-auto flex items-center gap-3 px-4 py-2.5">
-          <ToolStatus s={s} tool={tool} />
+          <ToolStatus s={s} game={game} tool={tool} />
           <div className="h-8 w-px bg-slate-700" />
           <button onClick={() => game.toggleOverlay()} className={`rounded-md px-3 py-1.5 text-sm whitespace-nowrap ${s.overlay ? 'bg-amber-500/25 text-amber-200 ring-1 ring-amber-400' : 'text-slate-300 hover:bg-slate-700/60'}`}>
             {disaster === 'quake' ? 'Seismic risk map' : 'Risk map'}
@@ -229,7 +298,7 @@ function DesktopPrepare({ s, game }) {
 }
 
 function MobilePrepare({ s, game }) {
-  const [sheet, setSheet] = useState(null) // 'overview' | 'upgrades' | 'more'
+  const [sheet, setSheet] = useState(null) // 'overview' | 'upgrades' | 'plan' | 'more'
   const remaining = s.budget - s.spent
   const disaster = s.settings.disaster
   const tool = TOOLS.find((t) => t.key === s.tool)
@@ -273,6 +342,10 @@ function MobilePrepare({ s, game }) {
           <Sheet title="City-wide upgrades" onClose={() => setSheet(null)}>
             <Upgrades s={s} game={game} />
           </Sheet>
+        ) : sheet === 'plan' ? (
+          <Sheet title="Typhoon plan" onClose={() => setSheet(null)}>
+            <PlanEditor s={s} game={game} />
+          </Sheet>
         ) : s.overlay && disaster === 'typhoon' && sheet === null ? (
           <div className="scroll-thin pointer-events-auto max-h-[45vh] overflow-y-auto">
             <RiskMapPanel s={s} game={game} compact />
@@ -288,7 +361,7 @@ function MobilePrepare({ s, game }) {
         ) : null}
 
         <div className="no-scrollbar pointer-events-auto flex gap-1 overflow-x-auto">
-          {GROUPS[disaster].flatMap((g) => TOOLS.filter((t) => t.group === g)).map((t) => (
+          {GROUPS[disaster].flatMap((g) => toolsOf(s, g)).map((t) => (
             <button
               key={t.key}
               onClick={() => game.setTool(t.key)}
@@ -301,7 +374,7 @@ function MobilePrepare({ s, game }) {
         </div>
 
         <div className="panel pointer-events-auto px-3 py-2">
-          <ToolStatus s={s} tool={tool} compact />
+          <ToolStatus s={s} game={game} tool={tool} compact />
           <div className="mt-2 flex items-center gap-1">
             <button onClick={() => open('overview')} className={tab('overview')}>
               Overview
@@ -309,6 +382,11 @@ function MobilePrepare({ s, game }) {
             <button onClick={() => open('upgrades')} className={tab('upgrades')}>
               Upgrades
             </button>
+            {disaster === 'typhoon' && (
+              <button onClick={() => open('plan')} className={tab('plan')}>
+                Plan
+              </button>
+            )}
             <button onClick={() => game.toggleOverlay()} className={`rounded-md px-2.5 py-1.5 text-[13px] whitespace-nowrap ${s.overlay ? 'bg-amber-500/25 text-amber-200 ring-1 ring-amber-400' : 'text-slate-300'}`}>
               Risk map
             </button>
