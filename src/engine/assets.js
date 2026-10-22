@@ -97,10 +97,36 @@ export function vehicleGeometry(type) {
 
 export const VEHICLE_LENGTH = { sedan: 4.6, hatch: 3.9, suv: 4.7, van: 5.0, bus: 11.5, truck: 7.0 }
 
+/** Per-instance opacity (attribute aFade, 0..1) so cars can fade in and out instead of shrinking. */
+export function addInstanceFade(m, sh) {
+  m.transparent = true
+  sh.vertexShader = sh.vertexShader
+    .replace('#include <common>', '#include <common>\nattribute float aFade;\nvarying float vFade;')
+    .replace('#include <begin_vertex>', '#include <begin_vertex>\nvFade = aFade;')
+  sh.fragmentShader = sh.fragmentShader
+    .replace('#include <common>', '#include <common>\nvarying float vFade;')
+    .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.a *= vFade;')
+}
+
+/** Shadow-pass material that dithers a car's shadow away with its opacity. */
+export function fadeDepthMaterial() {
+  const m = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking })
+  m.onBeforeCompile = (sh) => {
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', '#include <common>\nattribute float aFade;\nvarying float vFade;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvFade = aFade;')
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying float vFade;')
+      .replace('void main() {', 'void main() {\n  if (vFade < fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))))) discard;')
+  }
+  return m
+}
+
 /** Vehicle material: glass/tyre colours stay dark, the body takes the instance colour. */
 export function vehicleMaterial(envMap) {
   const m = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.32, metalness: 0.5, envMap, envMapIntensity: 0.9 })
   m.onBeforeCompile = (sh) => {
+    addInstanceFade(m, sh)
     sh.vertexShader = sh.vertexShader
       .replace('#include <common>', '#include <common>\nattribute float aPart;')
       .replace('#include <color_vertex>', '#include <color_vertex>\n#ifdef USE_INSTANCING_COLOR\nif (abs(color.r - 1.0) > 0.01 || abs(color.g - 1.0) > 0.01 || abs(color.b - 1.0) > 0.01) vColor.rgb = color.rgb;\n#endif')

@@ -1,6 +1,7 @@
 // Loads the CC0 Quaternius vehicles (https://quaternius.com),
 // pre-converted by scripts/convert-quaternius.mjs into compact binaries.
 import * as THREE from 'three'
+import { addInstanceFade } from './assets.js'
 
 const BASE = './models/quaternius/'
 
@@ -48,6 +49,7 @@ export function loadModels() {
 export function vehicleModelMaterial(envMap) {
   const m = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.38, metalness: 0.3, envMap, envMapIntensity: 0.8 })
   m.onBeforeCompile = (sh) => {
+    addInstanceFade(m, sh)
     sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nattribute float aPaint;').replace(
       '#include <color_vertex>',
       `#include <color_vertex>

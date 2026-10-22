@@ -15,7 +15,7 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import { GRID, CELL, CELL_RIVER, CELL_POND, CELL_PARK } from './config.js'
 import { idx, cellToWorld } from './cityGen.js'
 import { clamp } from './math.js'
-import { vehicleGeometry, vehicleMaterial, VEHICLE_TYPES, VEHICLE_LENGTH, personGeometry, personMaterial } from './assets.js'
+import { fadeDepthMaterial, vehicleGeometry, vehicleMaterial, VEHICLE_TYPES, VEHICLE_LENGTH, personGeometry, personMaterial } from './assets.js'
 import { KERB } from './roads.js'
 import { analyzeRoads, AVENUE, JUNCTION, STREET, END, BEND } from './roadNet.js'
 import { vehicleModelMaterial } from './quaternius.js'
@@ -203,6 +203,10 @@ export class CityLife {
       const mat = km ? vehicleModelMaterial(this.world.envTexture) : vehicleMaterial(this.world.envTexture)
       const mesh = new THREE.InstancedMesh(geo, mat, list.length)
       mesh.userData.sharedGeometry = true
+      // per-car opacity, so cars fade in and out at the district edge
+      mesh.userData.fade = new THREE.InstancedBufferAttribute(new Float32Array(list.length).fill(1), 1).setUsage(THREE.DynamicDrawUsage)
+      geo.setAttribute('aFade', mesh.userData.fade)
+      mesh.customDepthMaterial = fadeDepthMaterial()
       mesh.count = list.length
       mesh.castShadow = true
       list.forEach((c, i) => {
@@ -914,6 +918,7 @@ export class CityLife {
     const fire = this.world.fire
     const smoke = this.world.smoke
     const touched = new Set()
+    const fading = new Set()
     cars.forEach((c, n) => {
       const ci = c.k % GRID
       const cj = (c.k - ci) / GRID
@@ -983,10 +988,8 @@ export class CityLife {
         c.speed += clamp(desired - c.speed, -acc * dt, acc * dt)
         c.t += (c.speed * dt) / c.path.len
         if (c.t >= 1 && c.exiting) {
-          // past the edge of the district: drive on and fade away
-          c.state = 'exit'
-          c.exitD = 0
-          c.t = 1
+          // already faded out on the way here: swap for a car arriving elsewhere
+          this.enterFromEdge(c)
         } else if (c.t >= 1) {
           const p3 = c.path.p3
           const inDir = c.dir
@@ -995,9 +998,11 @@ export class CityLife {
         }
         if (c.fadeIn !== undefined) {
           c.fadeIn += c.speed * dt
-          c.scale = Math.min(1, 0.1 + c.fadeIn / 9)
-          if (c.scale >= 1) c.fadeIn = undefined
+          c.fade = Math.min(1, 0.25 + c.fadeIn / 3) // quick: visible almost at once
+          if (c.fade >= 1) c.fadeIn = undefined
         }
+        // leaving the district: fade out gradually over the last stretch of road
+        if (c.exiting) c.fade = Math.min(c.fade ?? 1, clamp((1 - c.t) / 0.7, 0, 1))
         const pt = this.pathPoint(c.path, Math.min(1, c.t))
         // pulling over: ease toward the kerb while stopped, back out when moving off
         c.pull += ((c.halt ? 1 : 0) - c.pull) * Math.min(1, dt * (c.speed > 0.5 || !c.halt ? 1.6 : 0.8))
@@ -1039,7 +1044,7 @@ export class CityLife {
         c.exitD += v * dt
         c.x += fx * v * dt
         c.z += fz * v * dt
-        c.scale = Math.max(0, 1 - c.exitD / 10)
+        c.fade = Math.max(0, 1 - c.exitD / 10)
         if (c.exitD > 10) this.enterFromEdge(c)
       }
       if (c.fire > 0) {
@@ -1058,15 +1063,17 @@ export class CityLife {
         touched.add(c.mesh)
       }
       const flat = c.state === 'crushed' || c.state === 'burnt' ? 0.45 : c.state === 'sunk' ? 0.8 : 1
-      const sc = c.scale ?? 1
+      const fade = c.fade ?? 1
       _p.set(c.x, c.y, c.z)
       _q.setFromEuler(_e.set(c.roll, c.yaw, flat < 1 ? 0.05 : 0, 'YXZ'))
-      _s.set(sc, flat * sc, sc)
+      _s.set(1, flat, 1)
       _m.compose(_p, _q, _s)
       c.mesh.setMatrixAt(c.mi, _m)
+      c.mesh.userData.fade.setX(c.mi, fade)
+      fading.add(c.mesh)
       // stopped on the shoulder: hazard lights blink
       const hazard = c.halt && c.state === 'drive' && Math.sin(this.time * 7 + n) < 0
-      const lit = (c.state === 'drive' || c.state === 'stalled') && sc > 0.6 && !hazard ? 1 : 0
+      const lit = (c.state === 'drive' || c.state === 'stalled') && fade > 0.6 && !hazard ? 1 : 0
       const fx = Math.cos(c.yaw)
       const fz = -Math.sin(c.yaw)
       const L = c.len * 0.5
@@ -1074,6 +1081,7 @@ export class CityLife {
     })
     for (const m of Object.values(this.vMeshes)) m.instanceMatrix.needsUpdate = true
     for (const m of touched) m.instanceColor.needsUpdate = true
+    for (const m of fading) m.userData.fade.needsUpdate = true
     this.carLights.geometry.attributes.position.needsUpdate = true
   }
 
@@ -1363,7 +1371,7 @@ export class CityLife {
       e = cand
       break
     }
-    c.scale = 1
+    c.fade = 1
     c.fadeIn = undefined
     c.exiting = false
     c.state = 'drive'
@@ -1375,7 +1383,7 @@ export class CityLife {
     c.wait = 0
     c.planK = -1
     this.enterCell(c, e.k, e.d, null)
-    c.scale = 0.1
+    c.fade = 0.25
     c.fadeIn = 0
   }
 

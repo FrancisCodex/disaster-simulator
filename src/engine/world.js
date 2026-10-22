@@ -85,7 +85,7 @@ export class World {
     controls.dampingFactor = 0.08
     controls.maxPolarAngle = 1.42
     controls.minDistance = 12
-    controls.maxDistance = 2600
+    controls.maxDistance = 1800
     controls.screenSpacePanning = false
     controls.zoomToCursor = true
     this.controls = controls
@@ -2636,10 +2636,33 @@ export class World {
     this.lifeCtx = ctx
   }
 
+  /** Keep the orbit target over the district and the camera within reach of it, so the city can't be lost. */
+  clampView() {
+    const { controls, camera } = this
+    const t = controls.target
+    const lim = HALF * 1.05
+    if (![t.x, t.y, t.z, camera.position.x, camera.position.y, camera.position.z].every(Number.isFinite)) {
+      t.set(0, 0, 0)
+      camera.position.set(0, 600, 700)
+      controls.update()
+      return
+    }
+    const x = clamp(t.x, -lim, lim)
+    const y = clamp(t.y, -60, 300)
+    const z = clamp(t.z, -lim, lim)
+    if (x !== t.x || y !== t.y || z !== t.z) {
+      camera.position.x += x - t.x
+      camera.position.y += y - t.y
+      camera.position.z += z - t.z
+      t.set(x, y, z)
+    }
+  }
+
   /** frozen: the simulation is paused — only the camera moves; everything else holds still. */
   update(dt, frozen = false) {
     if (frozen) {
       this.controls.update()
+      this.clampView()
       this.bld.flush()
       this.placeLabels()
       this.renderer.render(this.scene, this.camera)
@@ -2649,6 +2672,7 @@ export class World {
     this.frameDt = dt
     this.uTime.value += dt
     this.controls.update()
+    this.clampView()
     const t = this.realTime
     this.shakes = this.shakes.filter((s) => t - s.t0 < s.dur + 0.1)
     const g = this.groundAccel(t)
