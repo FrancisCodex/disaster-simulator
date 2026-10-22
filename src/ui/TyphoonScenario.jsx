@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { TYPHOON_LEVELS, HISTORICAL_TYPHOONS } from '../engine/config.js'
-import { typhoonScenarioFrom, CUSTOM_TYPHOON } from '../engine/game.js'
-import { buildStorm, forecastSummary, bulletinGeometry, pagasaCat, tenMinKmh, msToKmh, SIGNALS, TEN_TO_ONE, GUST_LAND, SITE_EXPOSURE, KDM, KT, SHELVES, TIDE_PHASES, M2_PERIOD } from '../engine/typhoonPhysics.js'
+import { typhoonScenarioFrom, CUSTOM_TYPHOON, stormCityCoast } from '../engine/game.js'
+import { buildStorm, forecastSummary, bulletinGeometry, pagasaCat, tenMinKmh, msToKmh, SIGNALS, TEN_TO_ONE, GUST_LAND, SITE_EXPOSURE, KDM, KT, TIDE_PHASES, M2_PERIOD } from '../engine/typhoonPhysics.js'
 import { Slider, Toggle } from './QuakeScenario.jsx'
 
 const HEADINGS = [
@@ -50,11 +50,19 @@ const when = (tau) => (Math.abs(tau) < 0.5 ? 'at closest approach' : tau > 0 ? `
 
 const avgName = (avg) => (avg === 10 ? '10-min (PAGASA / JMA)' : '1-min (JTWC)')
 
-/** Typhoon scenario chooser for the menu: intensity tiers, historical storms, or a custom storm from a bulletin. */
-export function TyphoonPicker({ typhoon, setTyphoon, level, setLevel }) {
+/**
+ * Typhoon scenario chooser for the menu: intensity tiers, historical storms, or a custom storm from a bulletin.
+ * coast: the city's coastline ({ on, shelf }, chosen with the city); picking a storm that struck a coast puts the city on that kind of coast.
+ */
+export function TyphoonPicker({ typhoon, setTyphoon, level, setLevel, coast, setCityCoast }) {
   const mode = typhoon.mode ?? 'tier'
   const set = (patch) => setTyphoon({ ...typhoon, ...patch })
-  const sc = typhoonScenarioFrom({ typhoon, level })
+  const sc = typhoonScenarioFrom({ typhoon, level, coast })
+  const pickStorm = (id) => {
+    set({ id, coast: undefined })
+    const c = stormCityCoast(id)
+    if (c) setCityCoast(c)
+  }
   const hist = mode === 'historical' ? sc : null
   const customise = () => {
     const { wind, avg, pc, heading, speed, dist, side, landfall, rmax, r34, lat, rainBoost } = sc
@@ -93,7 +101,7 @@ export function TyphoonPicker({ typhoon, setTyphoon, level, setLevel }) {
 
       {mode === 'historical' && (
         <>
-          <select value={hist.id} onChange={(e) => set({ id: e.target.value, coast: undefined })} className="w-full rounded-md border border-slate-700 bg-slate-900/80 px-2 py-1.5 text-sm text-white outline-none focus:border-amber-400">
+          <select value={hist.id} onChange={(e) => pickStorm(e.target.value)} className="w-full rounded-md border border-slate-700 bg-slate-900/80 px-2 py-1.5 text-sm text-white outline-none focus:border-amber-400">
             {HISTORICAL_TYPHOONS.map((h) => (
               <option key={h.id} value={h.id}>
                 {h.year} · {h.name}
@@ -129,29 +137,18 @@ export function TyphoonPicker({ typhoon, setTyphoon, level, setLevel }) {
 
 const FACINGS = HEADINGS.filter((_, i) => i % 2 === 0)
 
-/** Coastal city or inland, and on the coast: the shelf, which way the sea lies, and the tide. */
+/** For a coastal city (chosen with the city): which way the sea lies, and the tide. */
 function CoastOptions({ sc, historical, setCoast }) {
   const c = sc.coast
   const facing = FACINGS.reduce((a, b) => (Math.abs(((b[1] - c.facing + 540) % 360) - 180) < Math.abs(((a[1] - c.facing + 540) % 360) - 180) ? b : a))
   return (
     <div className="mt-2 space-y-1 rounded-lg border border-slate-700 bg-slate-800/40 p-3 text-xs">
-      <div className="flex items-center justify-between gap-2">
-        <span className="font-semibold text-slate-200">🌊 Coast &amp; storm surge</span>
-        <Toggle label="Coastal city" on={c.on} onChange={(on) => setCoast({ on })} hint="Put the sea along the city's southern edge, with the river mouth there, and simulate the storm surge" />
-      </div>
+      <div className="font-semibold text-slate-200">🌊 Storm surge</div>
       {!c.on ? (
-        <p className="text-[11px] text-slate-500">An inland river city: no storm surge. Turn on to put the city on the coast.</p>
+        <p className="text-[11px] text-slate-500">The city is inland: no storm surge. Choose a coastal city in step 1 to put it on the sea.</p>
       ) : (
         <>
-          <div className="grid grid-cols-3 gap-1">
-            {Object.values(SHELVES).map((sh) => (
-              <button key={sh.key} onClick={() => setCoast({ shelf: sh.key })} title={sh.desc} className={`rounded-md border px-1.5 py-1 text-[11px] ${c.shelf === sh.key ? 'border-amber-400 bg-amber-500/15 text-white' : 'border-slate-700 text-slate-300 hover:border-slate-500'}`}>
-                {sh.name}
-              </button>
-            ))}
-          </div>
-          <p className="text-[11px] text-slate-500">{SHELVES[c.shelf]?.desc}</p>
-          <div className="flex items-center justify-between gap-2 pt-1">
+          <div className="flex items-center justify-between gap-2">
             <span className="text-slate-400">The sea lies to the</span>
             {historical ? (
               <span className="font-mono text-slate-200">{facing[0]}</span>

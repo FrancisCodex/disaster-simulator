@@ -63,10 +63,18 @@ export function quakeEventFrom(settings) {
  *   { mode: 'tier' } uses TYPHOON_LEVELS[settings.level];
  *   { mode: 'historical', id } a HISTORICAL_TYPHOONS reenactment;
  *   { mode: 'custom', params } a storm from a bulletin (see buildStorm in typhoonPhysics.js).
- * settings.typhoon.coast overrides the storm's coast (a coastal city and its surge; see TYPHOON_LEVELS).
+ * Whether the city is on the coast, and its shelf, come from settings.coast (the
+ * city's own setting, for any disaster); settings.typhoon.coast overrides the
+ * storm's sea direction and tide (see TYPHOON_LEVELS).
  */
 export const CUSTOM_TYPHOON = { wind: 150, avg: 10, pc: null, windCA: null, leadH: 24, heading: 290, speed: 20, dist: 20, side: 'right', landfall: null, rmax: null, r34: null, lat: 14, rainBoost: 1 }
 export const DEFAULT_COAST = { on: false, shelf: 'open', facing: null, tide: 0.5, tidePhase: 'rising' }
+
+/** The coast a historical storm struck, as a city setting ({ on, shelf }), or null when it hit inland. */
+export function stormCityCoast(id) {
+  const c = HISTORICAL_TYPHOONS.find((x) => x.id === id)?.coast
+  return c?.on ? { on: true, shelf: c.shelf } : null
+}
 
 export function typhoonScenarioFrom(settings) {
   const t = settings.typhoon ?? { mode: 'tier' }
@@ -81,16 +89,19 @@ export function typhoonScenarioFrom(settings) {
     sc = { ...CUSTOM_TYPHOON, ...L, mode: 'tier', title: L.name }
   }
   const coast = { ...DEFAULT_COAST, ...sc.coast, ...t.coast }
+  // the city decides whether there is a coast at all, and what its shelf is like
+  if (settings.coast) {
+    coast.on = !!settings.coast.on
+    coast.shelf = settings.coast.shelf ?? coast.shelf
+  }
   // unless told otherwise, the sea lies the way the storm comes from
   if (coast.facing == null) coast.facing = (sc.heading + 180) % 360
   return { ...sc, coast }
 }
 
-/** The coast a city is generated with for these settings, or null for an inland city. */
+/** The coast a city is generated with for these settings ({ shelf }), or null for an inland city. */
 export function cityCoastFrom(settings) {
-  if (settings.disaster !== 'typhoon') return null
-  const c = typhoonScenarioFrom(settings).coast
-  return c.on ? { shelf: c.shelf } : null
+  return settings.coast?.on ? { shelf: settings.coast.shelf ?? 'open' } : null
 }
 
 export const TOOLS = [
@@ -326,7 +337,7 @@ export class Game {
 
   typhoonScenario() {
     const s = this.settings
-    const key = JSON.stringify([s.typhoon, s.level])
+    const key = JSON.stringify([s.typhoon, s.level, s.coast])
     if (this.typhoonCache?.key !== key) {
       const sc = typhoonScenarioFrom(s)
       // the hourly timeline stays out: the scenario goes into every UI snapshot
@@ -956,7 +967,7 @@ export class Game {
 
   /** Forecast peak of the river for this scenario (cached until the scenario or the channel changes). */
   riverForecast() {
-    const key = JSON.stringify([this.settings.typhoon, this.settings.level, !!this.city.dredged])
+    const key = JSON.stringify([this.settings.typhoon, this.settings.level, this.settings.coast, !!this.city.dredged])
     if (this.riverFcCache?.key !== key) {
       const fc = this.level.forecast
       const r = forecastRiverPeak(buildStorm(this.level), catchmentRain, fc.startH, fc.endH + 12, { dredged: this.city.dredged })

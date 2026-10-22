@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { CITY_TYPES } from '../engine/config.js'
-import { START_TIMES } from '../engine/game.js'
+import { START_TIMES, stormCityCoast } from '../engine/game.js'
+import { SHELVES } from '../engine/typhoonPhysics.js'
 import { QuakePicker } from './QuakeScenario.jsx'
 import { TyphoonPicker } from './TyphoonScenario.jsx'
 import { GitHubMark } from './RepoCredit.jsx'
@@ -24,6 +25,44 @@ function Step({ n, title, children }) {
   )
 }
 
+/** Inland river city or coastal city, and the kind of coast. */
+function CoastPicker({ coast, setCoast, disaster }) {
+  const opt = (on, icon, name, sub) => (
+    <button
+      onClick={() => setCoast({ ...coast, on })}
+      className={`flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-left transition ${coast.on === on ? 'border-sky-400 bg-sky-500/15' : 'border-slate-700 bg-slate-800/40 hover:border-slate-500'}`}
+    >
+      <span className="text-lg">{icon}</span>
+      <span>
+        <span className="block text-sm font-semibold text-white">{name}</span>
+        <span className="block text-[11px] leading-tight text-slate-400">{sub}</span>
+      </span>
+    </button>
+  )
+  return (
+    <div className="mt-3">
+      <div className="grid grid-cols-2 gap-2">
+        {opt(false, '🏞️', 'Inland', 'On a river, away from the sea')}
+        {opt(true, '🏖️', 'Coastal', 'On the sea, at the river mouth')}
+      </div>
+      {coast.on && (
+        <>
+          <div className="mt-2 grid grid-cols-3 gap-1">
+            {Object.values(SHELVES).map((sh) => (
+              <button key={sh.key} onClick={() => setCoast({ ...coast, shelf: sh.key })} title={sh.desc} className={`rounded-md border px-1.5 py-1 text-[11px] ${coast.shelf === sh.key ? 'border-sky-400 bg-sky-500/15 text-white' : 'border-slate-700 text-slate-300 hover:border-slate-500'}`}>
+                {sh.name}
+              </button>
+            ))}
+          </div>
+          <p className="mt-1.5 text-xs text-slate-400">
+            {SHELVES[coast.shelf]?.desc} {disaster === 'typhoon' ? 'Typhoons bring a storm surge here.' : 'Tsunamis after offshore earthquakes are planned for a later update.'}
+          </p>
+        </>
+      )}
+    </div>
+  )
+}
+
 export default function Menu({ onStart }) {
   const [cityType, setCityType] = useState('metropolis')
   const [disaster, setDisaster] = useState('typhoon')
@@ -31,6 +70,8 @@ export default function Menu({ onStart }) {
   const [startHour, setStartHour] = useState(8)
   const [quake, setQuake] = useState({ mode: 'tier', aftershocks: true, variability: true })
   const [typhoon, setTyphoon] = useState({ mode: 'historical', id: 'haiyan2013' })
+  // the city's coastline (any disaster): the default storm, Haiyan, struck a coastal city on a bay
+  const [coast, setCoast] = useState(() => stormCityCoast('haiyan2013') ?? { on: false, shelf: 'open' })
   const [seed, setSeed] = useState(() => Math.floor(Math.random() * 999999))
 
   const pickDisaster = (d) => {
@@ -86,6 +127,7 @@ export default function Menu({ onStart }) {
           <p className="mt-2 text-xs text-slate-400">
             {CITY_TYPES[cityType].blurb} Population {CITY_META[cityType].pop}. Budget ${CITY_TYPES[cityType].budget}M.
           </p>
+          <CoastPicker coast={coast} setCoast={setCoast} disaster={disaster} />
         </Step>
 
         <Step n="2" title="Disaster">
@@ -111,7 +153,7 @@ export default function Menu({ onStart }) {
           {disaster === 'quake' ? (
             <QuakePicker quake={quake} setQuake={setQuake} level={level} setLevel={setLevel} />
           ) : (
-            <TyphoonPicker typhoon={typhoon} setTyphoon={setTyphoon} level={level} setLevel={setLevel} />
+            <TyphoonPicker typhoon={typhoon} setTyphoon={setTyphoon} level={level} setLevel={setLevel} coast={coast} setCityCoast={setCoast} />
           )}
         </Step>
 
@@ -145,7 +187,7 @@ export default function Menu({ onStart }) {
         </Step>
 
         <button
-          onClick={() => onStart({ cityType, disaster, level, startHour, seed, quake, typhoon })}
+          onClick={() => onStart({ cityType, disaster, level, startHour, seed, quake, typhoon, coast })}
           className="mt-auto rounded-lg bg-sky-500 py-3 text-base font-bold text-white shadow-lg shadow-sky-900/40 transition hover:bg-sky-400"
         >
           Generate city →
