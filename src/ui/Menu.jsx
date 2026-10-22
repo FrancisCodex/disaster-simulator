@@ -91,7 +91,7 @@ export default function Menu({ onStart }) {
         <Step n="2" title="Disaster">
           <div className="grid grid-cols-2 gap-2">
             {[
-              ['typhoon', '🌀', 'Typhoon / cyclone', 'Wind, rain bands, eye passage, river floods'],
+              ['typhoon', '🌀', 'Typhoon / cyclone', 'Wind, rain bands, eye passage, river floods, storm surge'],
               ['quake', '🌋', 'Earthquake', 'Ground shaking, collapses, fires, aftershocks'],
             ].map(([k, icon, name, sub]) => (
               <button

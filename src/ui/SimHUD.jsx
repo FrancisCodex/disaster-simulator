@@ -129,6 +129,27 @@ function WindToll({ w }) {
   )
 }
 
+/** The sea at the coast: level above normal (surge + tide) against the beachfront. */
+function SeaNow({ sea }) {
+  const over = sea.rise > sea.shore
+  const signed = (v) => `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(2)} m`
+  return (
+    <>
+      <div className="mt-2 flex items-baseline justify-between">
+        <span className="text-[11px] tracking-wider text-slate-400 uppercase">Sea level</span>
+        <span className={`font-mono ${over ? 'text-red-400' : sea.rise > 1 ? 'text-amber-300' : 'text-emerald-300'}`}>{signed(sea.rise)} vs normal</span>
+      </div>
+      <div className="relative mt-1 h-1.5 overflow-hidden rounded bg-slate-700">
+        <div className={`h-full transition-all ${over ? 'bg-red-500' : 'bg-cyan-400'}`} style={{ width: `${Math.max(0, Math.min(100, ((sea.rise + 1) / 8) * 100))}%` }} />
+        <div className="absolute top-0 h-full w-0.5 bg-white/70" style={{ left: `${Math.min(100, ((sea.shore + 1) / 8) * 100)}%` }} title="Top of the beachfront" />
+      </div>
+      <div className="mt-1 text-xs text-slate-400">
+        Surge {signed(sea.surge)} · tide {signed(sea.tide)} · beachfront +{sea.shore.toFixed(1)} m{sea.max > 0.3 ? ` · highest ${signed(sea.max)}` : ''}
+      </div>
+    </>
+  )
+}
+
 /** What the disaster is doing right now: rain and river, or shocks, fires and ground failure. */
 function Situation({ s }) {
   const { flood, quake, typhoon: ty, wind, totals: T } = s.sim
@@ -155,6 +176,7 @@ function Situation({ s }) {
         <div className="mt-1 h-1.5 overflow-hidden rounded bg-slate-700">
           <div className={`h-full transition-all ${flood.stage > 0 ? 'bg-red-500' : 'bg-amber-400'}`} style={{ width: `${Math.max(0, Math.min(100, ((flood.stage + 4.5) / 6) * 100))}%` }} />
         </div>
+        {flood.sea && <SeaNow sea={flood.sea} />}
         <div className="mt-2 text-xs">{flood.warned ? <span className="text-amber-300">⚠ Evacuation order in effect</span> : <span className="text-slate-500">No warning issued</span>}</div>
       </div>
     )}

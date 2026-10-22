@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { TYPHOON_LEVELS, HISTORICAL_TYPHOONS } from '../engine/config.js'
 import { typhoonScenarioFrom, CUSTOM_TYPHOON } from '../engine/game.js'
-import { buildStorm, forecastSummary, bulletinGeometry, pagasaCat, tenMinKmh, msToKmh, SIGNALS, TEN_TO_ONE, GUST_LAND, SITE_EXPOSURE, KDM, KT } from '../engine/typhoonPhysics.js'
+import { buildStorm, forecastSummary, bulletinGeometry, pagasaCat, tenMinKmh, msToKmh, SIGNALS, TEN_TO_ONE, GUST_LAND, SITE_EXPOSURE, KDM, KT, SHELVES, TIDE_PHASES, M2_PERIOD } from '../engine/typhoonPhysics.js'
 import { Slider, Toggle } from './QuakeScenario.jsx'
 
 const HEADINGS = [
@@ -46,6 +46,8 @@ export function SignalChip({ n, className = '' }) {
   return <span className={`rounded px-1.5 py-0.5 text-[11px] font-bold ${SIGNAL_TONE[n]} ${className}`}>{n ? `Signal No. ${n}` : 'No signal'}</span>
 }
 
+const when = (tau) => (Math.abs(tau) < 0.5 ? 'at closest approach' : tau > 0 ? `${Math.round(tau)} h after` : `${Math.round(-tau)} h before`)
+
 const avgName = (avg) => (avg === 10 ? '10-min (PAGASA / JMA)' : '1-min (JTWC)')
 
 /** Typhoon scenario chooser for the menu: intensity tiers, historical storms, or a custom storm from a bulletin. */
@@ -56,7 +58,7 @@ export function TyphoonPicker({ typhoon, setTyphoon, level, setLevel }) {
   const hist = mode === 'historical' ? sc : null
   const customise = () => {
     const { wind, avg, pc, heading, speed, dist, side, landfall, rmax, r34, lat, rainBoost } = sc
-    set({ mode: 'custom', params: { ...CUSTOM_TYPHOON, wind, avg, pc: pc ?? null, heading, speed, dist, side, landfall: landfall ?? null, rmax: rmax ?? null, r34: r34 ?? null, lat, rainBoost: rainBoost ?? 1 } })
+    set({ mode: 'custom', coast: sc.coast, params: { ...CUSTOM_TYPHOON, wind, avg, pc: pc ?? null, heading, speed, dist, side, landfall: landfall ?? null, rmax: rmax ?? null, r34: r34 ?? null, lat, rainBoost: rainBoost ?? 1 } })
   }
   return (
     <div>
@@ -91,7 +93,7 @@ export function TyphoonPicker({ typhoon, setTyphoon, level, setLevel }) {
 
       {mode === 'historical' && (
         <>
-          <select value={hist.id} onChange={(e) => set({ id: e.target.value })} className="w-full rounded-md border border-slate-700 bg-slate-900/80 px-2 py-1.5 text-sm text-white outline-none focus:border-amber-400">
+          <select value={hist.id} onChange={(e) => set({ id: e.target.value, coast: undefined })} className="w-full rounded-md border border-slate-700 bg-slate-900/80 px-2 py-1.5 text-sm text-white outline-none focus:border-amber-400">
             {HISTORICAL_TYPHOONS.map((h) => (
               <option key={h.id} value={h.id}>
                 {h.year} · {h.name}
@@ -118,7 +120,64 @@ export function TyphoonPicker({ typhoon, setTyphoon, level, setLevel }) {
 
       {mode === 'custom' && <CustomStorm params={{ ...CUSTOM_TYPHOON, ...typhoon.params }} setParams={(params) => set({ params })} />}
 
+      <CoastOptions sc={sc} historical={mode === 'historical'} setCoast={(patch) => set({ coast: { ...typhoon.coast, ...patch } })} />
+
       <TyphoonForecast sc={sc} defaultOpen />
+    </div>
+  )
+}
+
+const FACINGS = HEADINGS.filter((_, i) => i % 2 === 0)
+
+/** Coastal city or inland, and on the coast: the shelf, which way the sea lies, and the tide. */
+function CoastOptions({ sc, historical, setCoast }) {
+  const c = sc.coast
+  const facing = FACINGS.reduce((a, b) => (Math.abs(((b[1] - c.facing + 540) % 360) - 180) < Math.abs(((a[1] - c.facing + 540) % 360) - 180) ? b : a))
+  return (
+    <div className="mt-2 space-y-1 rounded-lg border border-slate-700 bg-slate-800/40 p-3 text-xs">
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-semibold text-slate-200">🌊 Coast &amp; storm surge</span>
+        <Toggle label="Coastal city" on={c.on} onChange={(on) => setCoast({ on })} hint="Put the sea along the city's southern edge, with the river mouth there, and simulate the storm surge" />
+      </div>
+      {!c.on ? (
+        <p className="text-[11px] text-slate-500">An inland river city: no storm surge. Turn on to put the city on the coast.</p>
+      ) : (
+        <>
+          <div className="grid grid-cols-3 gap-1">
+            {Object.values(SHELVES).map((sh) => (
+              <button key={sh.key} onClick={() => setCoast({ shelf: sh.key })} title={sh.desc} className={`rounded-md border px-1.5 py-1 text-[11px] ${c.shelf === sh.key ? 'border-amber-400 bg-amber-500/15 text-white' : 'border-slate-700 text-slate-300 hover:border-slate-500'}`}>
+                {sh.name}
+              </button>
+            ))}
+          </div>
+          <p className="text-[11px] text-slate-500">{SHELVES[c.shelf]?.desc}</p>
+          <div className="flex items-center justify-between gap-2 pt-1">
+            <span className="text-slate-400">The sea lies to the</span>
+            {historical ? (
+              <span className="font-mono text-slate-200">{facing[0]}</span>
+            ) : (
+              <select value={facing[0]} onChange={(e) => setCoast({ facing: FACINGS.find((h) => h[0] === e.target.value)[1] })} className="rounded border border-slate-700 bg-slate-900/80 px-1.5 py-1 text-white">
+                {FACINGS.map(([n]) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+          <p className="text-[11px] text-slate-500">Onshore winds pile the sea up against the coast. A storm coming in from the sea, with the city on its {sc.lat >= 0 ? 'right' : 'left'} side, drives the highest surge.</p>
+          <Slider label="Tide: high water above mean sea level" value={c.tide} min={0} max={2.5} step={0.1} unit=" m" onChange={(tide) => setCoast({ tide })} />
+          <div className="text-slate-400">Tide at closest approach</div>
+          <div className="grid grid-cols-4 gap-1">
+            {Object.values(TIDE_PHASES).map((t) => (
+              <button key={t.key} onClick={() => setCoast({ tidePhase: t.key })} className={`rounded-md border px-1 py-1 text-[11px] ${c.tidePhase === t.key ? 'border-amber-400 bg-amber-500/15 text-white' : 'border-slate-700 text-slate-300 hover:border-slate-500'}`}>
+                {t.name}
+              </button>
+            ))}
+          </div>
+          <p className="text-[11px] text-slate-500">The same surge at high tide instead of low puts the sea {(2 * c.tide).toFixed(1)} m higher. The tide here is the main lunar tide (M2, {M2_PERIOD} h).</p>
+        </>
+      )}
     </div>
   )
 }
@@ -297,6 +356,14 @@ export function TyphoonForecast({ sc, defaultOpen = false }) {
             <R k="Eye passes over" v={fc.eyeH > 0 ? `yes, ~${Math.max(10, Math.round((fc.eyeH * 60) / 10) * 10)} min of calm` : 'no'} accent={fc.eyeH > 0 ? 'text-red-300' : undefined} />
             <R k="Simulation starts" v={`${Math.round(-fc.startH)} h before closest approach`} />
           </Sec>
+          {fc.sea && (
+            <Sec title="The sea at the coast">
+              <R k="Peak sea level (above normal)" v={`${fc.sea.peak.toFixed(1)} m · ${when(fc.sea.peakTau)}`} accent={fc.sea.peak >= 2 ? 'text-red-300' : 'text-sky-300'} />
+              <R k="Storm surge at the peak" v={`${fc.sea.surgeAtPeak.toFixed(1)} m`} />
+              <R k="· low pressure / wind / waves" v={`${fc.sea.parts.pressure.toFixed(1)} / ${fc.sea.parts.wind.toFixed(1)} / ${fc.sea.parts.wave.toFixed(1)} m`} />
+              <R k="Tide at the peak" v={`${fc.sea.tideAtPeak >= 0 ? '+' : '−'}${Math.abs(fc.sea.tideAtPeak).toFixed(1)} m`} />
+            </Sec>
+          )}
           <Sec title="The storm at closest approach">
             <R k={`Category (PAGASA)${fc.ss ? ' · Saffir–Simpson' : ''}`} v={`${fc.category.name}${fc.ss ? ` · Cat ${fc.ss}` : ''}`} />
             <R k="Max sustained near the centre" v={`${Math.round(tenMinKmh(fc.vmaxCA))} km/h 10-min · ${kmh(fc.vmaxCA)} 1-min`} />
@@ -305,7 +372,7 @@ export function TyphoonForecast({ sc, defaultOpen = false }) {
             <R k="Holland B · outer exponent" v={`${fc.B.toFixed(2)} · ${fc.xn.toFixed(2)}`} />
           </Sec>
           <p className="text-[10px] text-slate-500">
-            City winds are for open ground at the coast (×{SITE_EXPOSURE} of the marine wind). Buildings feel more at roof height and in the open, less behind taller neighbours. Storm surge comes in a later version.
+            City winds are for open ground at the coast (×{SITE_EXPOSURE} of the marine wind). Buildings feel more at roof height and in the open, less behind taller neighbours.{fc.sea ? ' Sea levels are a bulk estimate at the coast, not a full surge model; wave runup comes on top.' : ''}
           </p>
           <button onClick={() => setEq(!eq)} className="text-sky-300 hover:text-sky-200">
             {eq ? 'Hide' : 'Show'} equations
@@ -331,6 +398,11 @@ function Timeline({ fc }) {
   const line = pts.map((e, i) => `${i ? 'L' : 'M'}${x(e.tau).toFixed(1)},${yW(e.kmh10).toFixed(1)}`).join('')
   const bands = []
   for (const g of SIGNALS) if (g.kmh < maxW) bands.push(g)
+  // sea level at the coast (m above normal), on its own scale
+  const sea = fc.sea?.timeline.filter((e) => e.tau >= from && e.tau <= to)
+  const maxS = sea ? Math.max(2, ...sea.map((e) => e.level)) * 1.1 : 1
+  const yS = (v) => H - ((v + 1) / (maxS + 1)) * (H - 6)
+  const seaLine = sea?.map((e, i) => `${i ? 'L' : 'M'}${x(e.tau).toFixed(1)},${yS(e.level).toFixed(1)}`).join('')
   return (
     <div>
       <svg viewBox={`0 0 ${W} ${H + 12}`} className="w-full" role="img" aria-label="Wind and rain at the city over time">
@@ -340,6 +412,7 @@ function Timeline({ fc }) {
         {pts.map((e) => (
           <rect key={e.tau} x={x(e.tau)} width={W / pts.length + 0.3} y={H - (e.rain / maxR) * (H * 0.6)} height={(e.rain / maxR) * (H * 0.6)} fill="#38bdf8" opacity={0.45} />
         ))}
+        {seaLine && <path d={seaLine} fill="none" stroke="#22d3ee" strokeWidth={1.4} strokeDasharray="4 2" />}
         <path d={line} fill="none" stroke="#fbbf24" strokeWidth={1.6} />
         <line x1={x(0)} x2={x(0)} y1={0} y2={H} stroke="#94a3b8" strokeDasharray="2 2" strokeWidth={0.8} />
         <text x={x(0) + 2} y={9} fontSize={8} fill="#94a3b8">
@@ -356,6 +429,11 @@ function Timeline({ fc }) {
         <span>
           <span className="text-amber-300">━</span> wind {Math.round(maxW / 1.1)} km/h max
         </span>
+        {sea && (
+          <span>
+            <span className="text-cyan-400">┅</span> sea +{(maxS / 1.1).toFixed(1)} m max
+          </span>
+        )}
         <span>
           <span className="text-sky-400">▮</span> rain {Math.round(maxR / 1.1)} mm/h max
         </span>
@@ -394,6 +472,8 @@ function Equations() {
     ['Averaging and gusts (WMO 2010)', `10-min = ${TEN_TO_ONE} × 1-min;  3-s gust ≈ ${GUST_LAND} × 1-min over land`],
     ['Rain (R-CLIPER, Tuleya 2007)', 'R = T₀ + (Tm − T₀)·r/rm inside rm,  Tm·e^(−(r−rm)/re) outside; + eye, eyewall and spiral rainbands'],
     ['Wind signals (PAGASA 2022)', 'No. 1–5 at 39 / 62 / 89 / 118 / 185 km/h, raised 36 / 24 / 18 / 12 / 12 h ahead'],
+    ['Storm surge (bulk model)', 'η = Δp/(ρw·g) + k·ρa·Cd·|U|·Uₙ·L/(ρw·g·h) + 0.15·Hs,  Hs ≈ 0.2·U;  Cd: Large & Pond (1981), ≤ 2.5×10⁻³'],
+    ['Surge build-up and tide', 'wind setup relaxes over L/√(g·h);  tide = A·cos(2π(t − t_high)/12.42 h)'],
   ]
   return (
     <div className="space-y-1 rounded bg-slate-950/50 p-2">

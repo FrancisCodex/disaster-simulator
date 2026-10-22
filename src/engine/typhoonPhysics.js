@@ -15,9 +15,14 @@
 // Rain:      R-CLIPER azimuthal mean (Tuleya et al. 2007) with a rain-free eye,
 //            an eyewall ring, rotating spiral rainbands and a front-left bias.
 // Warnings:  PAGASA Modified Tropical Cyclone Wind Signals (2022).
+// Surge:     bulk model at the coast: inverse barometer, wind setup over the
+//            shelf (relaxing over its seiche time), wave setup, plus an M2 tide.
 //
 // Units: wind m/s as 1-minute sustained at 10 m unless named otherwise,
-// distances km, time h, pressure hPa, rain mm/h. Storm frame: x east, y north.
+// distances km, time h, pressure hPa, rain mm/h, sea level m above mean sea
+// level. Storm frame: x east, y north. A coastal district has its sea along the
+// south edge of the grid, so its storm is turned into that frame: "north" is
+// then inland, and toGeo() turns directions back for the compass.
 
 import { clamp, smoothstep } from './math.js'
 
@@ -137,12 +142,17 @@ function rcliperRate(r, p) {
  *   landfall (h relative to closest approach, null = never)
  *   rmax (km, optional), r34 (km, optional: radius of gale-force winds)
  *   lat (deg, negative = southern hemisphere), rainBoost (monsoon / terrain)
+ *   coast (optional): { on, shelf: SHELVES key, facing: direction the sea lies in (deg),
+ *          tide: amplitude (m), tidePhase: TIDE_PHASES key at closest approach }
  */
 export function buildStorm(sc) {
   const lat = sc.lat ?? 14
   const hemi = lat < 0 ? -1 : 1
   const c = Math.max(1, sc.speed ?? 20)
-  const h = (sc.heading ?? 290) * DEG
+  const coast = sc.coast?.on ? { shelf: 'open', facing: 180, tide: 0.5, tidePhase: 'rising', ...sc.coast } : null
+  // the grid's south is the direction the sea lies in
+  const rot = coast ? coast.facing - 180 : 0
+  const h = ((sc.heading ?? 290) - rot) * DEG
   const u = [Math.sin(h), Math.cos(h)] // unit vector of motion (east, north)
   const rp = [u[1], -u[0]] // right-hand perpendicular
   const side = sc.side === 'left' ? -1 : 1
@@ -169,6 +179,8 @@ export function buildStorm(sc) {
     side,
     landfall,
     rainBoost: sc.rainBoost ?? 1,
+    coast,
+    rot,
     rmaxGiven: sc.rmax ?? null,
     r34: sc.r34 ?? null,
     // centre position at τ (km, district at the origin)
@@ -268,7 +280,7 @@ function rainAt(s, st, tau, r, theta) {
   return { mean, band, rate: Math.max(0, mean * band * cells) }
 }
 
-/** Mean rain (mm/h) over the upstream catchment: samples 5–25 km up the river (north of the district). */
+/** Mean rain (mm/h) over the upstream catchment: samples 5–28 km up the river (north of the district, inland). */
 export function catchmentRain(s, tau) {
   const st = structure(s, tau)
   let sum = 0
@@ -279,6 +291,100 @@ export function catchmentRain(s, tau) {
 const POINTS = ['north', 'north-northeast', 'northeast', 'east-northeast', 'east', 'east-southeast', 'southeast', 'south-southeast', 'south', 'south-southwest', 'southwest', 'west-southwest', 'west', 'west-northwest', 'northwest', 'north-northwest']
 /** Compass point of a direction given as (east, north). */
 export const compassOf = (x, y) => POINTS[(Math.round((Math.atan2(x, y) / (Math.PI * 2)) * 16) + 16) % 16]
+
+/** A direction in the storm's (grid) frame back in geographic axes. */
+export function toGeo(s, x, y) {
+  const r = (s.rot ?? 0) * DEG
+  return [x * Math.cos(r) + y * Math.sin(r), -x * Math.sin(r) + y * Math.cos(r)]
+}
+/** Compass point of a direction in the storm's frame. */
+export const geoCompass = (s, x, y) => compassOf(...toGeo(s, x, y))
+
+// ------------------------------------------------------------ storm surge
+// Bulk model of the sea level at the coast (the main terms of SLOSH, not a
+// surge model): the low pressure lifts the sea (inverse barometer, ~1 cm per
+// hPa); onshore wind stress drags water toward the coast and piles it up over
+// the continental shelf (wind setup, τ·L / (ρw·g·h): long, shallow shelves
+// and narrowing bays give the worst surges); breaking waves add wave setup at
+// the shoreline. The wind setup takes the shelf's seiche time L/√(g·h) to
+// build and to drain. The tide (M2, 12.42 h) adds or subtracts on top.
+export const RHO_SEA = 1025 // kg/m³
+const G = 9.81
+export const M2_PERIOD = 12.42 // h
+
+// L: shelf width (km), h: its mean depth (m), funnel: amplification by a
+// bay that narrows toward the city, wave: share of the offshore waves that
+// reach the beach (a wide shallow shelf breaks them far out)
+export const SHELVES = {
+  open: { key: 'open', name: 'Open coast', L: 12, h: 30, funnel: 1, wave: 1, desc: 'Deep water close to shore. Little wind setup, but the big waves break right on the beach.' },
+  shelf: { key: 'shelf', name: 'Wide shallow shelf', L: 80, h: 11, funnel: 1, wave: 0.55, desc: 'Shallow sea far offshore, as off a delta or the US Gulf coast. The wind piles water up over a long fetch: the worst surges (Nargis, Katrina).' },
+  bay: { key: 'bay', name: 'Funnel-shaped bay', L: 30, h: 18, funnel: 2.1, wave: 0.6, desc: 'A bay narrowing toward the city squeezes the surge higher, as San Pedro Bay did to Tacloban in Haiyan.' },
+}
+
+// hours from closest approach to the next high water
+export const TIDE_PHASES = {
+  high: { key: 'high', name: 'High tide', at: 0 },
+  falling: { key: 'falling', name: 'Falling', at: -M2_PERIOD / 4 },
+  low: { key: 'low', name: 'Low tide', at: M2_PERIOD / 2 },
+  rising: { key: 'rising', name: 'Rising', at: M2_PERIOD / 4 },
+}
+
+/** Sea-surface drag coefficient: Large & Pond (1981), levelling off in hurricane winds (Powell et al. 2003). */
+export const dragCd = (U) => clamp((0.49 + 0.065 * U) * 1e-3, 1.2e-3, 2.5e-3)
+
+/** Tide (m above mean sea level) at τ. */
+export const tideAt = (s, tau) => s.coast.tide * Math.cos((2 * Math.PI * (tau - (TIDE_PHASES[s.coast.tidePhase] ?? TIDE_PHASES.rising).at)) / M2_PERIOD)
+
+/** The surge terms at τ; the wind setup is its steady value (windEq). */
+export function surgeForcing(s, tau, st = structure(s, tau)) {
+  const c = SHELVES[s.coast.shelf] ?? SHELVES.open
+  // onshore stress (inland is the grid's north) averaged across the shelf, from the marine wind
+  let stress = 0
+  for (const q of [0.15, 0.5, 0.85]) {
+    const f = fieldAt(s, tau, 0, -q * c.L, st)
+    const U = f.wind / SITE_EXPOSURE
+    stress += (RHO_AIR * dragCd(U) * U * U * f.dir[1]) / 3
+  }
+  const windEq = clamp((c.funnel * stress * c.L * 1000) / (RHO_SEA * G * c.h), -1.5, 12)
+  // waves at the shelf edge: in a tropical cyclone Hs ≈ 0.2 × the wind (m, m/s)
+  const edge = fieldAt(s, tau, 0, -c.L, st)
+  const hs = (0.2 * edge.wind) / SITE_EXPOSURE
+  const wave = 0.15 * hs * c.wave * clamp(edge.dir[1] + 0.2, 0, 1)
+  const p = fieldAt(s, tau, 0, 0, st).p
+  const pressure = ((P_ENV - p) * 100) / (RHO_SEA * G)
+  return { pressure, windEq, wave, hs }
+}
+
+/** Sea level at the coast every 5 minutes: { tau, tide, pressure, wind, wave, surge, level } (m). */
+export function surgeTimeline(s, from = -48, to = 36, step = 1 / 12) {
+  const c = SHELVES[s.coast.shelf] ?? SHELVES.open
+  const relax = (c.L * 1000) / Math.sqrt(G * c.h) / 3600
+  const k = 1 - Math.exp(-step / relax)
+  const out = []
+  let wind = null
+  for (let tau = from; tau <= to + 1e-9; tau += step) {
+    const F = surgeForcing(s, tau)
+    wind = wind == null ? F.windEq : wind + (F.windEq - wind) * k
+    const tide = tideAt(s, tau)
+    const surge = F.pressure + wind + F.wave
+    out.push({ tau, tide, pressure: F.pressure, wind, wave: F.wave, hs: F.hs, surge, level: surge + tide })
+  }
+  return out
+}
+
+/** A surge timeline entry interpolated at τ. */
+export function seaAt(tl, tau) {
+  const step = tl[1].tau - tl[0].tau
+  const x = clamp((tau - tl[0].tau) / step, 0, tl.length - 1.001)
+  const n = Math.floor(x)
+  const f = x - n
+  const a = tl[n]
+  const b = tl[n + 1]
+  const out = {}
+  for (const key of ['tide', 'pressure', 'wind', 'wave', 'surge', 'level']) out[key] = a[key] + (b[key] - a[key]) * f
+  out.tau = tau
+  return out
+}
 
 /** Highest PAGASA signal for a 10-min wind (km/h). */
 export const signalForWind = (kmh10) => [...SIGNALS].reverse().find((g) => kmh10 >= g.kmh)?.n ?? 0
@@ -344,8 +450,21 @@ export function forecastSummary(s) {
   }
   const startH = clamp((first ?? -6) - 1.5, -24, -3)
   const tc = structure(s, 0)
+  let sea = null
+  if (s.coast) {
+    const stl = surgeTimeline(s)
+    let top = stl[0]
+    let surgeMax = stl[0]
+    for (const e of stl) {
+      if (e.tau < startH) continue
+      if (e.level > top.level) top = e
+      if (e.surge > surgeMax.surge) surgeMax = e
+    }
+    sea = { timeline: stl, peak: top.level, peakTau: top.tau, surgeAtPeak: top.surge, tideAtPeak: top.tide, surgeMax: surgeMax.surge, surgeMaxTau: surgeMax.tau, parts: { pressure: top.pressure, wind: top.wind, wave: top.wave } }
+  }
   return {
     timeline: tl,
+    sea,
     peakWind: peak.wind,
     peakKmh10: peak.kmh10,
     peakGust: peak.wind * GUST_LAND,

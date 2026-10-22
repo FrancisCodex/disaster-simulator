@@ -1,25 +1,29 @@
 // Human and structural impact of flooding, evaluated every few simulated
 // minutes from the hydraulic state. Depth-damage curves, depth×velocity
 // building failure, warning → evacuation → shelter flow, vertical evacuation
-// in tall buildings and boat rescue by fire crews.
+// in tall buildings and boat rescue by fire crews. On the coast, people
+// drowned by seawater (the sea above their floor) count as storm-surge deaths.
 
 import { GRID, CONSTRUCTION, BUILDING_TYPES } from './config.js'
 import { occupancyAt, idx } from './cityGen.js'
 import { clamp } from './math.js'
 
 export class FloodImpact {
-  constructor(city, sim, { warning = false, startHour = 8, signal = () => 0, rng }) {
+  /** surgeZone: on the coast, how high above mean sea level the evacuation zone reaches (m; the forecast sea level). */
+  constructor(city, sim, { warning = false, startHour = 8, signal = () => 0, surgeZone = 0, rng }) {
     this.city = city
     this.sim = sim
     this.warningSystem = warning
     this.signal = signal // PAGASA wind signal in force over the city
     this.rng = rng
+    this.coast = city.coast ?? null
+    this.surgeZone = surgeZone
     this.warned = false
     this.warnTime = null
     this.events = []
     this.leftArea = 0
     this.rescued = 0
-    this.deathsByCause = { drowning: 0, collapse: 0, evacuation: 0, roof: 0, wind: 0 }
+    this.deathsByCause = { drowning: 0, collapse: 0, evacuation: 0, roof: 0, wind: 0, surge: 0 }
     this.deathsByType = {}
     this.st = new Map()
     this.population = 0
@@ -38,6 +42,7 @@ export class FloodImpact {
         maxIn: 0,
         collapsed: false,
         offline: false,
+        sea: false, // seawater got into it
       })
     }
     this.shelters = city.buildings.filter((b) => !b.removed && b.type === 'shelter')
@@ -60,12 +65,17 @@ export class FloodImpact {
         if (s && s.dIn > 0.3) flooded++
       }
       const early = this.warningSystem && (this.signal() >= 3 || sim.stage > -1.8)
-      const late = sim.stage > -0.2 || flooded > city.buildings.length * 0.03
+      const surge = this.coast && sim.seaRise > 1.5
+      const late = sim.stage > -0.2 || flooded > city.buildings.length * 0.03 || surge
       if (early || late) {
         this.warned = true
         this.warnTime = sim.time
         this.log(
-          early ? 'Pre-emptive evacuation ordered under the typhoon plan: low-lying and riverside districts are moving to shelters.' : 'Emergency flood warning issued — evacuation ordered (late: flooding already under way).',
+          early
+            ? `Pre-emptive evacuation ordered under the typhoon plan: low-lying${this.coast ? ', coastal' : ''} and riverside districts are moving to shelters.`
+            : surge && !flooded
+              ? 'Emergency evacuation ordered: the sea is rising over the beach (late: the surge is already arriving).'
+              : 'Emergency flood warning issued — evacuation ordered (late: flooding already under way).',
           'warn',
         )
       }
@@ -108,6 +118,8 @@ export class FloodImpact {
       v /= n
       const dIn = Math.max(0, eta - (b.floorZ + b.elevated))
       s.dIn = dIn
+      // the sea stands above the floor: this is seawater
+      if (this.coast && dIn > 0.1 && sim.seaZ > b.floorZ + b.elevated) s.sea = true
       s.dOut = dOut
       s.v = v
       if (dIn > s.maxIn) s.maxIn = dIn
@@ -116,7 +128,10 @@ export class FloodImpact {
       // ---- structural failure: depth × velocity (Clausen & Clark style) or buoyancy
       const C = CONSTRUCTION[b.construction]
       if (!s.collapsed && b.floors <= 3) {
-        const dv = dOut * Math.max(v, 0.3)
+        // on the beachfront, waves riding on the surge hit far harder than the current (~½√(g·d), fading inland)
+        let vw = 0
+        if (s.sea && dOut > 0.3) vw = 0.5 * Math.sqrt(9.81 * dOut) * Math.exp(-((this.coast.shore[b.x] - b.y - b.d) * 10) / 80)
+        const dv = dOut * Math.max(v + vw, 0.3)
         const buoy = (b.construction === 'wood_old' || b.construction === 'wood_mod') && dIn > 2.6
         if (dv > C.floodDV || buoy) {
           if (rng.chance(clamp(dtH * 2, 0, 1))) {
@@ -125,7 +140,7 @@ export class FloodImpact {
             this.kill(b, s, dead, 'collapse')
             s.injured += s.present * 0.2
             s.present -= s.present * 0.2
-            if (dead >= 1 || b.floors > 1) this.log(`${BUILDING_TYPES[b.type].name} swept away by floodwater (${dOut.toFixed(1)} m deep, ${v.toFixed(1)} m/s).`, 'bad')
+            if (dead >= 1 || b.floors > 1) this.log(s.sea ? `${BUILDING_TYPES[b.type].name} smashed by storm-surge waves (${dOut.toFixed(1)} m of seawater).` : `${BUILDING_TYPES[b.type].name} swept away by floodwater (${dOut.toFixed(1)} m deep, ${v.toFixed(1)} m/s).`, 'bad')
             this.events.push({ t: sim.time, collapse: b.id })
           }
         }
@@ -137,7 +152,9 @@ export class FloodImpact {
       if (s.present <= 0.01) continue
 
       // ---- evacuation
-      const inZone = b.groundZ < city.bankZ[b.y] + zoneMargin
+      let inZone = b.groundZ < city.bankZ[b.y] + zoneMargin
+      // the coastal zone: below the forecast sea level under the plan; otherwise only the beachfront leaves
+      if (this.coast) inZone ||= b.groundZ < this.coast.msl + (this.warningSystem ? this.surgeZone + 1 : 1.5)
       let rate = 0
       if (this.warned && inZone) rate = this.warningSystem ? 0.35 : 0.15
       // the typhoon plan also moves families out of light-material homes, wherever they are
@@ -163,7 +180,8 @@ export class FloodImpact {
       }
 
       // ---- people sheltering in place
-      const refuge = b.floors * b.floorH - 0.5 + (b.type === 'house' ? 1 : 0)
+      // in a home the wind has flattened there is no upper floor to climb to: water over ~0.6 m reaches people in the rubble
+      const refuge = s.collapsed ? 2.2 : b.floors * b.floorH - 0.5 + (b.type === 'house' ? 1 : 0)
       const exposure = dIn - (refuge - 1.6)
       if (exposure > 0 || (dIn > 1 && v > 1.5 && b.floors <= 2)) {
         const rateD = 0.03 + 0.4 * clamp(exposure / 1.6, 0, 1)
@@ -253,6 +271,7 @@ export class FloodImpact {
     s.present -= n
     s.dead += n
     s.injured += n * 0.4
+    if (s.sea && (cause === 'drowning' || cause === 'collapse' || cause === 'evacuation')) cause = 'surge'
     this.deathsByCause[cause] += n
     this.deathsByType[b.type] = (this.deathsByType[b.type] || 0) + n
   }

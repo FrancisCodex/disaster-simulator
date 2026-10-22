@@ -171,6 +171,15 @@ Cheap bulk model (not SLOSH, but its main terms):
 * **Implementation:** the downstream boundary of FloodSim becomes a time-varying water level. Where that level exceeds ground or sea-wall height, inflow enters through the existing local-inertial momentum equations. Water then propagates realistically through streets and up the river.
 * Calibration targets: Haiyan in Tacloban ~4–6 m, Nargis ≥ 4 m (12 ft at Bogale), Katrina ~8.5 m (Mississippi coast), Mangkhut in Victoria Harbour, where HKO forecast ≥ 3.5 m total sea level.
 
+### 5.1 As implemented (phase 3)
+* **Coastal city** (`cityGen.js`, `opts.coast`): the sea fills the south edge of the grid (open-water cells typed `CELL_RIVER`, flagged in `city.sea`), behind a sandy beach and a low coastal plain about 2–4 m above mean sea level for the first ~300 m. The river's banks fall toward the sea and its mouth silts into a bar. A bay shelf curves the shoreline inland. The menu's **Coast & storm surge** panel turns it on, with the shelf, the direction the sea lies in, the tide amplitude and the tide at closest approach. Historical surge storms (Haiyan, Nargis, Katrina, Idai, Mangkhut) turn it on by default.
+* **Frame:** the storm is rotated so that the sea's real direction maps onto the grid's south (`buildStorm`, `s.rot`); `toGeo` / `geoCompass` turn directions back for the compass in the log.
+* **Surge** (`typhoonPhysics.js`): the bulk model above, evaluated every 5 minutes (`surgeTimeline`). The onshore stress is averaged at 15 / 50 / 85 % of the shelf width, Cd follows Large & Pond (1981) capped at 2.5×10⁻³, Hs ≈ 0.2·U at the shelf edge, and the wind setup relaxes over the shelf's seiche time L/√(g·h). Shelves: open coast (L 12 km, h 30 m), wide shallow shelf (80 km, 11 m), funnel bay (30 km, 18 m, ×2.1). Tide: M2 cosine.
+* **Calibration** (peak surge, before tide): Haiyan 4.7 m, Katrina 4.8 m, Idai 4.6 m, Mangkhut 2.6 m (observed 2.35 m), Nargis 3.2 m (below the ≥ 4 m target; a dedicated delta shelf could close the gap).
+* **FloodSim:** open-sea cells (the grid edge, and everything more than 30 m off the beach) are held at mean sea level + tide + surge; only a near-shore band is solved, so the sea costs about the same per simulated hour as an inland river. The surge runs up the streets and the river through the existing momentum equations. Storm drains stop as the sea covers their outfalls.
+* **Impact:** people drowned by seawater count as **storm-surge deaths**. Breaking waves on the surge add ½√(g·d) to the flow velocity within ~80 m of the beach, which is what smashes beachfront homes. Survivors in a wind-flattened home have no upper floor to climb to. The early-warning plan evacuates everything below the forecast sea level + 1 m; without it, only the beachfront leaves, and only once the sea is visibly rising.
+* **Before the storm:** the risk map's flood layer adds the sea at its forecast peak (a connected bathtub from the sea, with a slider), and the forecast panel gives the peak sea level and its parts. **During:** a sea-level gauge in the HUD; a surge warning, drawdown, coming-ashore and peak lines in the log; a lesson on the tide in the results.
+
 ---
 
 ## 6. Wind damage to buildings, trees and infrastructure
@@ -310,7 +319,7 @@ src/ui/TyphoonScenario.jsx     Tier / Historical / Custom (bulletin) picker + fo
 Suggested phases, each one shippable:
 1. ✅ **Storm core + rain into FloodSim:** tracks, Holland wind (HUD readout only), R-CLIPER with rainbands, catchment inflow, the three-mode picker, TCWS signals. *Replaces the flood mode with nothing lost.*
 2. ✅ **Wind damage:** component fragility, trees, power, reversal fatigue, roof loss visuals, slanted rain. Torn-off roof sheets already fly downwind with a simple drag model; phase 4 adds full plate aerodynamics and impact damage.
-3. **Storm surge:** coastal city variant, tide, downstream boundary, Haiyan and Nargis presets.
+3. ✅ **Storm surge:** coastal city variant, tide, downstream boundary, Haiyan and Nargis presets. See §5.1 for what was built.
 4. **Debris, lightning and tornadoes:** Rapier debris flight, rolling-sphere strikes, TC-tornado vortex.
 5. **Prep tools and after-action report:** shutters, roof straps, tree trimming, buried lines, generators at pumps, sea wall, mangrove belt, signal-triggered evacuation plans.
 

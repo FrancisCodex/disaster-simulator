@@ -8,27 +8,56 @@ const when = (tau) => (Math.abs(tau) < 0.5 ? 'around closest approach' : tau > 0
 /** What is under the cursor on the flood map. */
 function HereReadout({ c }) {
   if (!c) return <div className="text-[11px] text-slate-500">Point at the map to read the depth there.</div>
+  if (c.sea) return <div className="text-[11px] text-slate-400">The sea.</div>
   if (c.river) return <div className="text-[11px] text-slate-400">The river channel.</div>
   return (
     <div className="text-[11px] text-slate-300">
       {c.depth > 0.02 ? (
         <>
-          <span className="font-semibold text-sky-300">{c.depth.toFixed(2)} m deep</span> {c.source === 2 ? '(rain ponding in a hollow)' : '(river water)'}
+          <span className="font-semibold text-sky-300">{c.depth.toFixed(2)} m deep</span> {c.source === 3 ? '(storm surge)' : c.source === 2 ? '(rain ponding in a hollow)' : '(river water)'}
         </>
       ) : (
         <span className="text-emerald-300">Dry</span>
       )}
       <span className="text-slate-400">
         {' '}
-        · ground {signed(c.aboveBank)} vs the riverbank{c.wall ? ' · flood wall' : ''}
+        · ground {c.aboveSea != null ? `${c.aboveSea.toFixed(1)} m above sea level` : `${signed(c.aboveBank)} vs the riverbank`}
+        {c.wall ? ' · flood wall' : ''}
       </span>
+    </div>
+  )
+}
+
+/** Sea level for the map (surge + tide above normal) and the forecast peak. */
+function SeaLevel({ M, game }) {
+  const F = M.forecast.sea
+  return (
+    <div className="mt-2">
+      <label className="block">
+        <div className="flex justify-between text-xs">
+          <span className="text-slate-400">Sea level (surge + tide)</span>
+          <span className="font-mono text-sky-300">{signed(M.sea)} vs normal</span>
+        </div>
+        <input type="range" min={-1} max={8} step={0.1} value={M.sea} onChange={(e) => game.setSeaLevelMap(+e.target.value)} className="w-full accent-sky-400" />
+      </label>
+      {F && (
+        <div className="text-[11px] text-slate-400">
+          Forecast peak: <span className="text-slate-200">{signed(F.peak)}</span> ({F.surgeAtPeak.toFixed(1)} m surge, tide {signed(F.tideAtPeak)}, {when(F.peakTau)})
+          {!M.seaAuto && (
+            <button onClick={() => game.setSeaLevelMap(null)} className="ml-1 text-sky-300 hover:text-sky-200">
+              use forecast
+            </button>
+          )}
+        </div>
+      )}
     </div>
   )
 }
 
 /**
  * The typhoon risk map: flood depth over the land at a chosen river level
- * (the forecast peak by default), or wind damage risk to buildings.
+ * and, on the coast, sea level (the forecast peaks by default), or wind
+ * damage risk to buildings.
  */
 export default function RiskMapPanel({ s, game, compact = false }) {
   const layer = s.riskLayer ?? 'flood'
@@ -67,6 +96,7 @@ export default function RiskMapPanel({ s, game, compact = false }) {
               </button>
             )}
           </div>
+          {M.sea != null && <SeaLevel M={M} game={game} />}
           <div className="mt-2 grid grid-cols-1 gap-0.5">
             {DEPTH_BANDS.map((b) => (
               <div key={b.label} className="flex items-center gap-2 text-[11px]">
@@ -95,7 +125,7 @@ export default function RiskMapPanel({ s, game, compact = false }) {
           </div>
           {!compact && (
             <p className="mt-1.5 text-[10px] leading-snug text-slate-500">
-              Water spreads from the river to all low ground it can reach. Flood walls keep it out while they hold, and hollows fill with rain. Drag the level to see what each extra metre of river puts under water.
+              Water spreads from the river{M.sea != null ? ' and the sea' : ''} to all low ground it can reach. Flood walls keep it out while they hold, and hollows fill with rain. Drag the level to see what each extra metre of {M.sea != null ? 'river or sea' : 'river'} puts under water.
             </p>
           )}
         </>

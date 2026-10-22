@@ -3,6 +3,10 @@
 // rainfall, infiltration, storm drains, pumps, an upstream river hydrograph
 // and a free-outflow downstream boundary. Rain comes from a TyphoonSim: on the
 // district for the grid, and over the upstream catchment for the river.
+// A coastal city's downstream boundary is the sea instead: its edge cells are
+// held at the sea level of the moment (mean sea level + tide + storm surge),
+// and the surge comes ashore through the same momentum equations, up the
+// streets and up the river.
 
 import { GRID, CELL, G, CELL_ROAD, CELL_RIVER, CELL_PARK, CELL_POND, PUMP_RATE } from './config.js'
 import { clamp } from './math.js'
@@ -94,6 +98,26 @@ export class FloodSim {
       if (t === CELL_POND) this.cls[k] = 0
     }
     this.refreshGround()
+    this.coast = city.coast ?? null
+    // The open sea is held at the sea level of the moment (the bulk surge model
+    // already gives it): sea cells on the grid's edge, and all more than 30 m off
+    // the beach. Only a band of water along the shore is solved, which keeps the
+    // sea from tripling the work per step.
+    this.seaEdge = []
+    this.fixed = new Uint8Array(N * N)
+    if (this.coast) {
+      for (let k = 0; k < N * N; k++) {
+        const i = k % N
+        const j = (k - i) / N
+        if (city.sea[k] && (i === 0 || i === N - 1 || j === N - 1 || this.coast.shore[i] - (j + 0.5) < -3)) {
+          this.seaEdge.push(k)
+          this.fixed[k] = 1
+        }
+      }
+    }
+    this.seaZ = this.coast ? this.coast.msl : 0
+    this.seaRise = 0 // m above mean sea level
+    this.seaMax = 0
     this.pumps = city.pumps.map((p) => ({ ...p, active: true, removed: 0 }))
     this.time = 0
     this.rain = 0
@@ -113,6 +137,23 @@ export class FloodSim {
       const j = Math.floor(k / N)
       this.h[k] = Math.max(0, city.bankZ[j] - 4.6 - this.zg[k])
     }
+    // and the sea in everything open to it below its level
+    if (this.coast) {
+      const sea = this.seaLevel(0)
+      const q = [...this.seaEdge]
+      const seen = new Uint8Array(N * N)
+      for (const k of q) seen[k] = 1
+      while (q.length) {
+        const k = q.pop()
+        this.h[k] = Math.max(this.h[k], sea - this.zg[k])
+        const i = k % N
+        for (const kk of [i > 0 ? k - 1 : -1, i < N - 1 ? k + 1 : -1, k - N, k + N]) {
+          if (kk < 0 || kk >= N * N || seen[kk] || this.zg[kk] >= sea) continue
+          seen[kk] = 1
+          q.push(kk)
+        }
+      }
+    }
     this.raining = false
     for (let s = 0; s < 1500; s++) this.step(Math.min(this.stableDt(), 3))
     this.time = 0
@@ -127,6 +168,11 @@ export class FloodSim {
 
   rainRate(t) {
     return this.storm ? this.storm.rainAt(t) : 0
+  }
+
+  /** Sea level (absolute, m) at simulation time t: mean sea level + tide + surge. */
+  seaLevel(t) {
+    return this.coast.msl + (this.storm?.seaAt ? this.storm.seaAt(t).level : 0)
   }
 
   stableDt() {
@@ -147,7 +193,7 @@ export class FloodSim {
   }
 
   step(dt) {
-    const { N, dx, zg, h, qx, qy, nn, cls } = this
+    const { N, dx, zg, h, qx, qy, nn, cls, fixed } = this
     const gdt = G * dt
     const cap = (0.25 * dx) / dt
 
@@ -158,8 +204,15 @@ export class FloodSim {
     this.cumRain += (rainMmH * dt) / 3600
     const th = this.time / 3600
     const infil = this.raining ? ((6 + 24 * Math.exp(-th / 1.5)) / 3.6e6) * dt : 0
-    // storm drains back up when the river is near its banks
-    const drainEff = clamp(-this.stage / 1.2, 0, 1)
+    // storm drains back up when the river is near its banks, and on the coast
+    // when the sea covers their outfalls (high tide, surge)
+    let drainEff = clamp(-this.stage / 1.2, 0, 1)
+    if (this.coast) {
+      this.seaZ = this.seaLevel(this.raining ? this.time : 0)
+      this.seaRise = this.seaZ - this.coast.msl
+      if (this.raining && this.seaRise > this.seaMax) this.seaMax = this.seaRise
+      drainEff *= clamp(1.5 - this.seaRise, 0, 1)
+    }
     const drain = (this.drainage / 3.6e6) * dt * drainEff
     // upstream hydrograph: lagged runoff of the rain falling on the catchment
     const basin = this.raining && this.storm ? this.storm.catchmentAt(this.time) * UPLAND_RAIN : 0
@@ -177,6 +230,11 @@ export class FloodSim {
       for (let i = 0; i < N - 1; i++) {
         const a = row + i
         const b = a + 1
+        // nothing moves between two cells of open sea held at the sea level
+        if (fixed[a] & fixed[b]) {
+          qx[frow + i] = 0
+          continue
+        }
         const za = zg[a]
         const zb = zg[b]
         const ea = za + h[a]
@@ -209,6 +267,10 @@ export class FloodSim {
       for (let i = 0; i < N; i++) {
         const a = row + i
         const b = a + N
+        if (fixed[a] & fixed[b]) {
+          qy[a] = 0
+          continue
+        }
         const za = zg[a]
         const zb = zg[b]
         const ea = za + h[a]
@@ -312,14 +374,20 @@ export class FloodSim {
     }
     this.drainedVol += toRiver
 
-    // ---- free outflow along the downstream edge (normal-depth Manning)
-    const last = (N - 1) * N
-    for (let i = 0; i < N; i++) {
-      const k = last + i
-      const hk = h[k]
-      if (hk < 1e-3) continue
-      const q = (Math.pow(hk, 5 / 3) * Math.sqrt(RIVER_SLOPE)) / nn[k]
-      h[k] = Math.max(0, hk - Math.min(hk * 0.5, q * k1))
+    if (this.coast) {
+      // ---- the sea: open-sea cells stand at the sea level of the moment
+      const sea = this.seaZ
+      for (const k of this.seaEdge) h[k] = sea > zg[k] ? sea - zg[k] : 0
+    } else {
+      // ---- free outflow along the downstream edge (normal-depth Manning)
+      const last = (N - 1) * N
+      for (let i = 0; i < N; i++) {
+        const k = last + i
+        const hk = h[k]
+        if (hk < 1e-3) continue
+        const q = (Math.pow(hk, 5 / 3) * Math.sqrt(RIVER_SLOPE)) / nn[k]
+        h[k] = Math.max(0, hk - Math.min(hk * 0.5, q * k1))
+      }
     }
 
     // ---- bookkeeping
@@ -339,9 +407,11 @@ export class FloodSim {
     const { N, h, zg, city } = this
     let s = 0
     let n = 0
+    // on the coast, the river's own level: upstream of where the sea sets it
+    const jEnd = this.coast ? this.coast.shoreMean - 12 : N - 5
     for (const k of this.river) {
       const j = Math.floor(k / N)
-      if (j < 5 || j > N - 5) continue
+      if (j < 5 || j > jEnd) continue
       s += zg[k] + h[k] - city.bankZ[j]
       n++
     }

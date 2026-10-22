@@ -6,6 +6,10 @@
 //    surface — flood walls raise the ground they stand on, so land behind a
 //    continuous wall stays dry, as long as the wall holds. This is the
 //    "connected bathtub" inundation map used for quick flood-hazard maps.
+//  • Storm surge (coastal cities): the same connected bathtub from the sea,
+//    at the forecast sea level (surge + tide) above mean sea level. Over a
+//    few hundred metres the real surge barely loses height, so the bathtub
+//    is a fair map of where it reaches (wave runup comes on top).
 //  • Rain ponding: hollows with no way out fill with rain even where the
 //    river never reaches (depression filling, Barnes et al. 2014 priority
 //    flood). How deep they fill is capped by how much rain can run into them.
@@ -38,7 +42,7 @@ export function riverFloodDepth(city, level) {
   let t = 0
   const surface = (j) => city.bankZ[j] + level
   for (let k = 0; k < N * N; k++)
-    if (city.cellType[k] === CELL_RIVER) {
+    if (city.cellType[k] === CELL_RIVER && !city.sea[k]) {
       seen[k] = 1
       q[t++] = k
     }
@@ -57,6 +61,32 @@ export function riverFloodDepth(city, level) {
       seen[kk] = 1
       depth[kk] = W - city.z[kk]
       q[t++] = kk
+    }
+  }
+  return depth
+}
+
+/** Depth (m) of seawater on each cell with the sea `rise` m above mean sea level (coastal cities). */
+export function seaFloodDepth(city, rise) {
+  const N = GRID
+  const depth = new Float32Array(N * N)
+  if (!city.coast) return depth
+  const W = city.coast.msl + rise
+  const seen = new Uint8Array(N * N)
+  const q = []
+  for (let k = 0; k < N * N; k++)
+    if (city.sea[k]) {
+      seen[k] = 1
+      q.push(k)
+    }
+  while (q.length) {
+    const k = q.pop()
+    const i = k % N
+    for (const kk of [i > 0 ? k - 1 : -1, i < N - 1 ? k + 1 : -1, k - N, k + N]) {
+      if (kk < 0 || kk >= N * N || seen[kk] || top(city, kk) >= W) continue
+      seen[kk] = 1
+      depth[kk] = W - city.z[kk]
+      q.push(kk)
     }
   }
   return depth
@@ -134,14 +164,16 @@ export function pondDepth(city, maxDepth) {
 }
 
 /**
- * The combined map: river flooding at `level`, and ponding from `rainMm` of
- * rain (local runoff concentrates ~3× into the hollows). Returns per-cell
- * depth and its source (1 river, 2 ponding), plus totals.
+ * The combined map: river flooding at `level`, ponding from `rainMm` of
+ * rain (local runoff concentrates ~3× into the hollows) and, on the coast,
+ * the sea `sea` m above mean sea level. Returns per-cell depth and its
+ * source (1 river, 2 ponding, 3 sea), plus totals.
  */
-export function floodMap(city, level, rainMm) {
+export function floodMap(city, level, rainMm, sea = null) {
   const N = GRID
   const river = riverFloodDepth(city, level)
   const pond = pondDepth(city, Math.max(0.05, (rainMm / 1000) * 3))
+  const surge = sea != null ? seaFloodDepth(city, sea) : null
   const depth = new Float32Array(N * N)
   const source = new Uint8Array(N * N)
   let cells = 0
@@ -150,14 +182,15 @@ export function floodMap(city, level, rainMm) {
     if (city.cellType[k] === CELL_RIVER) continue
     const r = river[k]
     const p = pond[k]
-    const d = Math.max(r, p)
+    const w = surge ? surge[k] : 0
+    const d = Math.max(r, p, w)
     if (d <= 0.02) continue
     depth[k] = d
-    source[k] = r >= p ? 1 : 2
+    source[k] = w >= d ? 3 : r >= p ? 1 : 2
     if (d > 0.1) cells++
     if (d > max) max = d
   }
-  return { level, depth, source, areaHa: (cells * 100) / 1e4, maxDepth: max }
+  return { level, sea, depth, source, areaHa: (cells * 100) / 1e4, maxDepth: max }
 }
 
 /** Band colour [r, g, b] for a depth, or null when it is too shallow to show. */

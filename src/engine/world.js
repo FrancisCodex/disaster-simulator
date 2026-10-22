@@ -564,6 +564,13 @@ export class World {
     const ez = clamp(z, -HALF, HALF)
     const edgeH = this.vertexHeight(Math.round((ex + HALF) / CELL), Math.round((ez + HALF) / CELL))
     const dist = Math.hypot(x - ex, z - ez)
+    const C = city.coast
+    if (C) {
+      // the coastline runs on east and west; offshore the seabed shelves away
+      const zs = (C.shoreMean + 0.5) * CELL - HALF
+      const off = z - zs
+      if (off > 0) return lerp(edgeH, C.msl - Math.min(25, 0.8 + off * 0.03), smoothstep(0, 250, dist))
+    }
     // the river keeps flowing north–south beyond the district
     const rx = (z < 0 ? city.riverCenter[0] : city.riverCenter[GRID - 1]) * CELL - HALF
     const bank = 20 - (z + HALF) * 0.0015
@@ -580,6 +587,11 @@ export class World {
       const far = smoothstep(500, 3200, Math.hypot(x, z))
       const mountains = ridged * 420 * far * valley
       natural = bank + 0.5 + Math.max(0, dr - hw) * 0.012 + Math.max(0, hills) + mountains
+    }
+    if (C) {
+      // a low coastal plain behind the beach, rising slowly inland
+      const inland = (C.shoreMean + 0.5) * CELL - HALF - z
+      natural = lerp(C.msl + 1.2 + inland * 0.004, natural, smoothstep(150, 1400, inland))
     }
     const w = smoothstep(0, 350, dist)
     return lerp(edgeH, natural, w)
@@ -634,18 +646,26 @@ export class World {
       const y = pos[k * 3 + 1]
       const slope = 1 - nor[k * 3 + 1]
       const f = noise.fbm(x * 0.004, z * 0.004, 3)
-      const above = y - (20 - (z + HALF) * 0.0015)
+      const above = y - this.outerBase(z)
       // meadow → forest → rock → snow
       _c.setRGB(0.36 + f * 0.05, 0.47 + f * 0.06, 0.25)
       if (f > 0.05 || above > 40) _c.lerp(new THREE.Color(0.17, 0.27, 0.15), smoothstep(0.0, 0.25, f) * 0.85 + smoothstep(40, 90, above) * 0.3)
       _c.lerp(new THREE.Color(0.45, 0.42, 0.38), smoothstep(0.25, 0.55, slope) + smoothstep(220, 330, above))
       _c.lerp(new THREE.Color(0.93, 0.94, 0.96), smoothstep(360, 430, above) * (1 - smoothstep(0.5, 0.8, slope)))
       if (above < 0.5) _c.setRGB(0.38, 0.33, 0.24)
+      // beaches along the coast, sand and silt under the sea
+      if (this.city.coast && y < this.city.coast.msl + 1.4) _c.setRGB(0.66, 0.6, 0.45).lerp(new THREE.Color(0.3, 0.3, 0.26), smoothstep(0, 8, this.city.coast.msl - y))
       col.set([_c.r, _c.g, _c.b], k * 3)
     }
     g.attributes.position.needsUpdate = true
     g.attributes.color.needsUpdate = true
     g.computeBoundingSphere()
+  }
+
+  /** Height the surrounding land's colours and forest are measured from: the river's banks, or on the coast the sea. */
+  outerBase(z) {
+    const bank = 20 - (z + HALF) * 0.0015
+    return this.city.coast ? Math.min(bank, this.city.coast.msl + 1.6) : bank
   }
 
   buildOuterForest() {
@@ -663,7 +683,7 @@ export class World {
       const f = noise.fbm(x * 0.004, z * 0.004, 3)
       if (f < 0.04) continue
       const y = this.outerHeight(x, z)
-      const above = y - (20 - (z + HALF) * 0.0015)
+      const above = y - this.outerBase(z)
       if (above < 1.5 || above > 300) continue
       const s = 6 + Math.random() * 7
       _m.makeScale(s * 0.38, s * 1.6, s * 0.38).setPosition(x, y - 0.5, z)
@@ -690,7 +710,11 @@ export class World {
         const n = noise.fbm(i * 0.2, j * 0.2, 2)
         let col
         if (t === CELL_ROAD) col = '#3b3e44'
-        else if (t === CELL_RIVER) col = '#4a4030'
+        else if (city.sea[k]) {
+          // sand under the shallows, darker silt further out
+          const dz = city.coast.msl - city.z[k]
+          col = `hsl(${42 - smoothstep(0, 6, dz) * 8}, ${32 - smoothstep(0, 6, dz) * 12}%, ${58 - smoothstep(0, 7, dz) * 26 + n * 3}%)`
+        } else if (t === CELL_RIVER) col = '#4a4030'
         else if (t === CELL_BANK) col = '#b5a477'
         else if (t === CELL_PARK) col = `hsl(105, 42%, ${33 + n * 6}%)`
         else if (t === CELL_POND) col = '#58613f'
@@ -733,7 +757,7 @@ export class World {
         const j = Math.floor(py / PX)
         if (i < 0 || i >= GRID) continue
         const t = city.cellType[idx(i, j)]
-        if (t === CELL_ROAD || city.buildingAt[idx(i, j)] >= 0) continue
+        if (t === CELL_ROAD || city.buildingAt[idx(i, j)] >= 0 || city.sea[idx(i, j)]) continue
         const d = Math.abs(px + 0.5 - c)
         if (d < hw) ctx.fillStyle = d < hw * 0.7 ? '#3f382b' : (px * 3 + py * 5) % 7 < 1 ? '#6e6250' : '#5d4f38'
         else if (d < bank) ctx.fillStyle = (px * 7 + py * 13) % 11 < 1 ? '#a8966a' : '#b5a477'
@@ -976,9 +1000,12 @@ export class World {
     this.root.add(mesh)
     this.wetVert = new Uint8Array(V * V)
     this.vh = new Float32Array(V * V)
-    // the river continues beyond the district to the north and south
+    // the river continues beyond the district to the north and south (on the coast, only north: the sea is south)
     this.outerRivers = []
-    for (const s of [-1, 1]) {
+    this.outerSea = null
+    this.outerSouth = null
+    if (this.city.coast) this.buildOuterSea()
+    for (const s of this.city.coast ? [-1] : [-1, 1]) {
       const len = OUTER - HALF
       const w = RIVER_HALF_WIDTH * CELL * 2.2
       const geo = new THREE.PlaneGeometry(w, len, 1, 20).rotateX(-Math.PI / 2)
@@ -990,6 +1017,33 @@ export class World {
       const rx = (s < 0 ? this.city.riverCenter[0] : this.city.riverCenter[GRID - 1]) * CELL - HALF
       m.position.set(rx, 0, s * (HALF + len / 2))
       m.renderOrder = 2
+      if (s < 0) this.outerNorth = m
+      else this.outerSouth = m
+      this.outerRivers.push(m)
+      this.root.add(m)
+    }
+  }
+
+  /** Open sea beyond a coastal district: south of it, and east and west along the coast. */
+  buildOuterSea() {
+    const C = this.city.coast
+    const zs = (C.shoreMean + 0.5) * CELL - HALF
+    const parts = [
+      [-OUTER, OUTER, HALF, OUTER],
+      [-OUTER, -HALF, zs, HALF],
+      [HALF, OUTER, zs, HALF],
+    ]
+    this.outerSea = []
+    for (const [x0, x1, z0, z1] of parts) {
+      const geo = new THREE.PlaneGeometry(x1 - x0, z1 - z0, 8, 8).rotateX(-Math.PI / 2)
+      const n = geo.attributes.position.count
+      const aw = new Float32Array(n * 4)
+      for (let q = 0; q < n; q++) aw.set([12, 0, 0, 0], q * 4)
+      geo.setAttribute('aWater', new THREE.BufferAttribute(aw, 4))
+      const m = new THREE.Mesh(geo, this.waterMat)
+      m.position.set((x0 + x1) / 2, C.msl, (z0 + z1) / 2)
+      m.renderOrder = 2
+      this.outerSea.push(m)
       this.outerRivers.push(m)
       this.root.add(m)
     }
@@ -1064,11 +1118,14 @@ export class World {
     g.attributes.aWater.needsUpdate = true
     g.computeVertexNormals()
     g.computeBoundingSphere()
+    // the open sea stands at the level the sim holds its edge at
+    if (this.outerSea && sim.coast) for (const m of this.outerSea) m.position.y = sim.seaZ
     // outer river level follows the edge rows
     for (const [m, j] of [
-      [this.outerRivers[0], 0],
-      [this.outerRivers[1], GRID - 1],
+      [this.outerNorth, 0],
+      [this.outerSouth, GRID - 1],
     ]) {
+      if (!m) continue
       let s = 0
       let n = 0
       for (let i = 0; i < GRID; i++) {

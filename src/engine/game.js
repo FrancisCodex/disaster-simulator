@@ -63,19 +63,34 @@ export function quakeEventFrom(settings) {
  *   { mode: 'tier' } uses TYPHOON_LEVELS[settings.level];
  *   { mode: 'historical', id } a HISTORICAL_TYPHOONS reenactment;
  *   { mode: 'custom', params } a storm from a bulletin (see buildStorm in typhoonPhysics.js).
+ * settings.typhoon.coast overrides the storm's coast (a coastal city and its surge; see TYPHOON_LEVELS).
  */
 export const CUSTOM_TYPHOON = { wind: 150, avg: 10, pc: null, windCA: null, leadH: 24, heading: 290, speed: 20, dist: 20, side: 'right', landfall: null, rmax: null, r34: null, lat: 14, rainBoost: 1 }
+export const DEFAULT_COAST = { on: false, shelf: 'open', facing: null, tide: 0.5, tidePhase: 'rising' }
 
 export function typhoonScenarioFrom(settings) {
   const t = settings.typhoon ?? { mode: 'tier' }
+  let sc
   if (t.mode === 'historical') {
     const h = HISTORICAL_TYPHOONS.find((x) => x.id === t.id) ?? HISTORICAL_TYPHOONS[0]
     const title = `${h.year} ${h.name}${h.local ? ` (${h.local})` : ''}`
-    return { ...CUSTOM_TYPHOON, ...h, mode: 'historical', title, example: `Reenacted at ${h.city}, ${h.place}.` }
+    sc = { ...CUSTOM_TYPHOON, ...h, mode: 'historical', title, example: `Reenacted at ${h.city}, ${h.place}.` }
+  } else if (t.mode === 'custom') sc = { ...CUSTOM_TYPHOON, name: 'Custom typhoon', title: 'Custom typhoon', desc: 'Your own storm, from a bulletin or a what-if.', example: '', ...t.params, mode: 'custom' }
+  else {
+    const L = TYPHOON_LEVELS[clamp(settings.level ?? 4, 0, TYPHOON_LEVELS.length - 1)]
+    sc = { ...CUSTOM_TYPHOON, ...L, mode: 'tier', title: L.name }
   }
-  if (t.mode === 'custom') return { ...CUSTOM_TYPHOON, name: 'Custom typhoon', title: 'Custom typhoon', desc: 'Your own storm, from a bulletin or a what-if.', example: '', ...t.params, mode: 'custom' }
-  const L = TYPHOON_LEVELS[clamp(settings.level ?? 4, 0, TYPHOON_LEVELS.length - 1)]
-  return { ...CUSTOM_TYPHOON, ...L, mode: 'tier', title: L.name }
+  const coast = { ...DEFAULT_COAST, ...sc.coast, ...t.coast }
+  // unless told otherwise, the sea lies the way the storm comes from
+  if (coast.facing == null) coast.facing = (sc.heading + 180) % 360
+  return { ...sc, coast }
+}
+
+/** The coast a city is generated with for these settings, or null for an inland city. */
+export function cityCoastFrom(settings) {
+  if (settings.disaster !== 'typhoon') return null
+  const c = typhoonScenarioFrom(settings).coast
+  return c.on ? { shelf: c.shelf } : null
 }
 
 export const TOOLS = [
@@ -96,6 +111,19 @@ export const TOOLS = [
   { key: 'softstorey', name: 'Brace soft storey', group: 'Quake', icon: '🏗️', desc: 'Add steel frames or shear walls to an open shopfront ground floor (the LA / San Francisco soft-storey retrofit). Cheap: only the ground floor is worked on.' },
   { key: 'anchor', name: 'Anchor facade', group: 'Quake', icon: '🧷', desc: 'Tie back brick facades and parapets, film the glass. Stops most of the falling masonry and glass that kills people in the street (Christchurch 2011).' },
 ]
+
+/** How high the beachfront of a coastal city stands (m above mean sea level): the median of the land within 60 m of the shore. */
+export function shoreRise(city) {
+  if (!city.coast) return Infinity
+  const zs = []
+  for (let i = 0; i < GRID; i++)
+    for (let j = Math.floor(city.coast.shore[i]) - 6; j < city.coast.shore[i]; j++) {
+      const k = idx(i, j)
+      if (j >= 0 && !city.sea[k] && city.cellType[k] !== CELL_RIVER) zs.push(city.z[k] + city.levee[k])
+    }
+  zs.sort((a, b) => a - b)
+  return zs.length ? zs[zs.length >> 1] - city.coast.msl : Infinity
+}
 
 export const BUILDING_TOOLS = ['retrofit', 'isolate', 'elevate', 'softstorey', 'anchor']
 const QUAKE_TOOLS = ['retrofit', 'isolate', 'softstorey', 'anchor']
@@ -218,7 +246,7 @@ export class Game {
 
   newGame(settings) {
     this.settings = { ...settings }
-    const city = generateCity(settings.cityType, settings.seed)
+    const city = generateCity(settings.cityType, settings.seed, { coast: cityCoastFrom(settings) })
     this.setupCity(city)
     this.budget = CITY_TYPES[city.type].budget
     this.spent = 0
@@ -244,6 +272,7 @@ export class Game {
     this.lensStats = null
     this.world.setLabels([])
     this.floodLevel = null
+    this.seaLevelMap = null
     this.log = []
     this.results = null
     this.flood = this.quake = this.impact = this.shadow = this.typhoon = this.windDmg = null
@@ -303,6 +332,7 @@ export class Game {
       // the hourly timeline stays out: the scenario goes into every UI snapshot
       const forecast = forecastSummary(buildStorm(sc))
       delete forecast.timeline
+      if (forecast.sea) forecast.sea = { ...forecast.sea, timeline: undefined }
       this.typhoonCache = { key, sc: { ...sc, forecast } }
     }
     return this.typhoonCache.sc
@@ -939,7 +969,10 @@ export class Game {
   computeFloodMap() {
     const fc = this.riverForecast()
     const level = this.floodLevel ?? Math.round(fc.stage * 10) / 10
-    const M = floodMap(this.city, level, this.level.forecast.rainTotal)
+    // on the coast, the sea at its forecast peak (surge + tide) unless the player set one
+    const seaFc = this.level.forecast.sea
+    const sea = this.city.coast ? (this.seaLevelMap ?? Math.round((seaFc?.peak ?? 0) * 10) / 10) : null
+    const M = floodMap(this.city, level, this.level.forecast.rainTotal, sea)
     let wet = 0
     let people = 0
     for (const b of this.city.buildings) {
@@ -972,6 +1005,13 @@ export class Game {
   /** River level for the flood map, m above the banks; null = the forecast peak. */
   setFloodLevel(level) {
     this.floodLevel = level
+    this.applyColorMode()
+    this.emit()
+  }
+
+  /** Sea level for the flood map of a coastal city, m above mean sea level; null = the forecast peak. */
+  setSeaLevelMap(level) {
+    this.seaLevelMap = level
     this.applyColorMode()
     this.emit()
   }
@@ -1014,9 +1054,9 @@ export class Game {
     const P = CITY_TYPES[city.type]
     const stats = cityStats(city, settings.startHour)
     if (settings.disaster === 'typhoon') {
-      this.typhoon = new TyphoonSim(this.level, { place: city.name })
+      this.typhoon = new TyphoonSim(this.level, { place: city.name, shoreRise: shoreRise(city) })
       this.flood = new FloodSim(city, { storm: this.typhoon, drainage: P.drainage + 15 * this.upgrades.drainage })
-      this.impact = new FloodImpact(city, this.flood, { warning: this.upgrades.floodWarning, startHour: settings.startHour, signal: () => this.typhoon.signal, rng: this.rng })
+      this.impact = new FloodImpact(city, this.flood, { warning: this.upgrades.floodWarning, startHour: settings.startHour, signal: () => this.typhoon.signal, surgeZone: this.typhoon.fc.sea?.peak ?? 0, rng: this.rng })
       this.windDmg = new WindDamage(city, this.impact, this.typhoon, { rng: new Rng((settings.seed ^ 0x2545f491) >>> 0), life: this.world.life })
       this.windAcc = 0
       this.population = this.impact.population
@@ -1583,6 +1623,7 @@ export class Game {
       const im = this.impact
       const c = im.deathsByCause
       causes.push(
+        ...(city.coast ? [{ label: 'Storm surge', value: c.surge }] : []),
         { label: 'Drowned indoors', value: c.drowning },
         { label: 'Buildings swept away', value: c.collapse },
         { label: 'Caught while evacuating', value: c.evacuation },
@@ -1590,6 +1631,14 @@ export class Game {
         { label: 'Roofs torn off, flying glass', value: c.roof },
         { label: 'Outdoors: water, debris', value: T.outdoorDead },
       )
+      const seaPk = this.typhoon.peak.sea
+      if (seaPk && seaPk.level >= 0.8) {
+        const tide = Math.abs(seaPk.tide) >= 0.2 ? `, on a tide ${seaPk.tide > 0 ? `${seaPk.tide.toFixed(1)} m above` : `${(-seaPk.tide).toFixed(1)} m below`} normal` : ''
+        lessons.push(`The sea rose ${seaPk.level.toFixed(1)} m above normal: ${seaPk.surge.toFixed(1)} m of storm surge${tide}. ${seaPk.level > this.typhoon.shoreRise ? 'It came over the beachfront and ran into the streets.' : 'It stayed below the beachfront this time.'}`)
+        const other = { high: 'low', low: 'high', rising: 'falling', falling: 'rising' }[this.level.coast.tidePhase]
+        if (this.level.coast.tide >= 0.3) lessons.push(`Timing matters: the same storm at ${other} tide would have changed the sea level by up to ${(2 * this.level.coast.tide).toFixed(1)} m. Surge forecasts always add the tide.`)
+      }
+      if (c.surge >= 1) lessons.push(`${Math.round(c.surge)} people were killed by the storm surge. Surge is the deadliest part of a typhoon (Haiyan, Nargis): the only safe place is out of its reach, so coastal evacuation has to be finished before the wind makes it impossible. Sea walls, mangrove belts and raised homes buy margin.`)
       if (c.drowning >= 1) lessons.push('Most drownings happened in low-rise homes in low-lying areas. Flood walls, elevating homes and earlier evacuation all reduce this.')
       if (c.evacuation >= 1) lessons.push(`${Math.round(c.evacuation)} people died wading through floodwater. ${this.upgrades.floodWarning ? 'Shelters closer to people help.' : 'An early-warning system gets people out before the streets flood.'}`)
       if (this.flood.stageMax > 0) lessons.push(`The river rose ${this.flood.stageMax.toFixed(1)} m above its banks. Continuous flood walls along the river, dredging and upstream storage help — but walls can fail if overtopped.`)
@@ -1895,9 +1944,10 @@ export class Game {
       let cell = null
       if (h) {
         const k = idx(h.i, h.j)
-        cell = { depth: M.depth[k], source: M.source[k], aboveBank: this.city.z[k] - this.city.bankZ[h.j], river: this.city.cellType[k] === CELL_RIVER, wall: this.city.levee[k] > 0 }
+        const coast = this.city.coast
+        cell = { depth: M.depth[k], source: M.source[k], aboveBank: this.city.z[k] - this.city.bankZ[h.j], aboveSea: coast ? this.city.z[k] - coast.msl : null, river: this.city.cellType[k] === CELL_RIVER, sea: !!this.city.sea[k], wall: this.city.levee[k] > 0 }
       }
-      s.floodMap = { level: M.level, auto: M.auto, forecast: { inflow: M.forecast.inflow, stage: M.forecast.stage, tPeak: M.forecast.tPeak }, areaHa: M.areaHa, maxDepth: M.maxDepth, buildingsWet: M.buildingsWet, peopleWet: M.peopleWet, cell }
+      s.floodMap = { level: M.level, auto: M.auto, sea: M.sea, seaAuto: this.seaLevelMap == null, forecast: { inflow: M.forecast.inflow, stage: M.forecast.stage, tPeak: M.forecast.tPeak, sea: this.level.forecast.sea }, areaHa: M.areaHa, maxDepth: M.maxDepth, buildingsWet: M.buildingsWet, peopleWet: M.peopleWet, cell }
     }
     if (this.phase === 'sim' || this.phase === 'results') {
       const t = this.simTime
@@ -1916,6 +1966,8 @@ export class Game {
       if (this.flood) {
         const f = this.flood
         s.sim.flood = { rain: f.rain, cumRain: f.cumRain, basinRain: f.basinRain, stage: f.stage, inflow: f.inflow, warned: this.impact.warned, pumpsFailed: f.pumps.filter((p) => p.failed).length }
+        // the sea: m above mean sea level now, the most so far, and the beachfront it has to get over
+        if (f.coast) s.sim.flood.sea = { rise: f.seaRise, max: f.seaMax, shore: this.typhoon.shoreRise, ...this.typhoon.now.sea }
       }
       if (this.typhoon) {
         const ty = this.typhoon
@@ -1932,7 +1984,7 @@ export class Game {
           const bid = this.city.buildingAt[k]
           const b = bid >= 0 ? this.city.byId.get(bid) : null
           const bridge = !!this.city.bridge[k]
-          const kind = bridge ? 'Bridge' : this.city.cellType[k] === CELL_RIVER ? 'River' : b ? (VARIANT_NAMES[b.variant] ?? BUILDING_TYPES[b.type].name) : this.city.cellType[k] === CELL_ROAD ? 'Street' : this.city.cellType[k] === CELL_PARK ? 'Park' : 'Open ground'
+          const kind = bridge ? 'Bridge' : this.city.sea[k] ? 'Sea' : this.city.cellType[k] === CELL_RIVER ? 'River' : b ? (VARIANT_NAMES[b.variant] ?? BUILDING_TYPES[b.type].name) : this.city.cellType[k] === CELL_ROAD ? 'Street' : this.city.cellType[k] === CELL_PARK ? 'Park' : 'Open ground'
           s.sim.lensCell = { i: h.i, j: h.j, kind, ground: this.city.z[k] - this.city.bankZ[h.j], depth: f.h[k], speed: f.velocityAt(h.i, h.j), powered: b && (b.type === 'hospital' || b.type === 'fire') ? 'Generator' : W.powered(h.i, h.j) ? 'On' : 'Off', inside: b ? this.impact.st.get(b.id)?.dIn ?? 0 : null }
         }
       }
