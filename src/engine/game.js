@@ -1269,6 +1269,9 @@ export class Game {
     this.panicLog = null
     this.groundShowAt = 0
     this.log = []
+    this.logSeq = 0
+    this.timeline = []
+    this.timelineStep = settings.disaster === 'quake' ? 60 : 600
     this.world.setHighlight(null)
     this.rng = new Rng((settings.seed ^ 0x5bd1e995) >>> 0)
     const stats = cityStats(city, settings.startHour)
@@ -1328,12 +1331,33 @@ export class Game {
     this.population += this.world.life.outdoorCount()
     this.streetLog = 0
     this.applyColorMode()
+    this.recordFrame()
     this.emit()
   }
 
   pushLog(t, text, level) {
-    this.log.push({ t, text, level })
-    if (this.log.length > 200) this.log.shift()
+    this.log.push({ t, text, level, n: this.logSeq++ })
+    if (this.log.length > 1000) this.log.shift()
+  }
+
+  /**
+   * Keep what the HUD showed at this moment, so the replay bar can show it
+   * again. The 3D city itself is not stored. When the record grows long,
+   * every other frame is dropped and frames are taken half as often.
+   */
+  recordFrame() {
+    const sim = { ...this.snapshot().sim }
+    delete sim.log
+    delete sim.timeline
+    delete sim.lensCell
+    delete sim.lensStats
+    const tl = this.timeline
+    if (tl.length && tl[tl.length - 1].time >= sim.time) tl.pop()
+    tl.push(sim)
+    if (tl.length > 600) {
+      this.timeline = tl.filter((_, i) => i % 2 === 0 || i === tl.length - 1)
+      this.timelineStep *= 2
+    }
   }
 
   setSpeed(i) {
@@ -1359,6 +1383,8 @@ export class Game {
       const want = dt * SPEEDS[this.speedIdx].mult
       if (this.flood) this.stepFlood(want)
       else if (this.quake) this.stepQuake(want)
+      const tl = this.timeline
+      if (this.phase === 'sim' && (!tl.length || this.simTime - tl[tl.length - 1].time >= this.timelineStep)) this.recordFrame()
       this.uiTimer = (this.uiTimer || 0) + dt
       if (this.uiTimer > 0.25) {
         this.uiTimer = 0
@@ -1852,6 +1878,7 @@ export class Game {
     this.phase = 'results'
     this.paused = true
     this.results = this.computeResults()
+    this.recordFrame()
     this.world.rain.update(0, 0, this.world.controls.target)
     // the typhoon's comparison arrives once the shadow runs have caught up with this one
     const sh = this.shadows
@@ -2338,7 +2365,9 @@ export class Game {
         physicsLimited: this.physicsLimited,
         population: this.population,
         totals: this.currentTotals(),
-        log: this.log.slice(-60),
+        log: this.log.slice(),
+        logSeq: this.logSeq,
+        timeline: this.timeline,
       }
       if (this.flood) {
         const f = this.flood

@@ -55,7 +55,8 @@ function RepoCard({ className = '' }) {
  */
 export default function RepoCredit({ phase }) {
   const mobile = useIsMobile()
-  if (mobile || phase === 'results') return null
+  // during the simulation the news and replay dock takes the whole bottom edge
+  if (mobile || phase === 'results' || phase === 'sim') return null
   return (
     <div className="pointer-events-none absolute right-3 bottom-3">
       {phase === 'prepare' ? (

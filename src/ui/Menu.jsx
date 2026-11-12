@@ -80,9 +80,10 @@ export default function Menu({ onStart }) {
   }
 
   return (
-    <div className="pointer-events-none absolute inset-0 flex">
-      <div className="panel scroll-thin pointer-events-auto m-4 flex w-[440px] max-w-[calc(100vw-2rem)] flex-col overflow-y-auto p-6">
-        <div className="mb-6">
+    <div className="menu-backdrop pointer-events-none absolute inset-0 flex md:items-center md:justify-center">
+      <div className="panel menu-card scroll-thin pointer-events-auto m-4 flex w-[440px] max-w-[calc(100vw-2rem)] flex-col overflow-y-auto p-6 md:max-h-[calc(100vh-2rem)] md:w-[920px] md:p-8">
+        <div className="mb-6 md:grid md:grid-cols-2 md:items-start md:gap-x-8">
+          <div>
           <div className="flex items-center gap-3">
             <img src="./favicon.svg" alt="" className="h-10 w-10" />
             <div>
@@ -100,7 +101,8 @@ export default function Menu({ onStart }) {
           <p className="mt-4 text-sm leading-relaxed text-slate-300">
             Generate a city, choose a natural disaster, then strengthen, rebuild and protect the city before it strikes. Every life counts.
           </p>
-          <div className="mt-3 rounded-md border border-violet-400/30 bg-violet-500/10 px-3 py-2 text-[12px] leading-relaxed text-violet-100/90">
+          </div>
+          <div className="mt-3 rounded-md md:mt-0 border border-violet-400/30 bg-violet-500/10 px-3 py-2 text-[12px] leading-relaxed text-violet-100/90">
             <span className="font-semibold text-violet-200">🚧 Beta: a work in progress.</span> MetroRisk is still being built. Features change often, the numbers are still being tuned, and you may
             run into bugs, odd results or slow performance, especially on phones and older computers. If something breaks,{' '}
             <a href={ISSUES_URL} target="_blank" rel="noopener noreferrer" className="font-semibold text-sky-300 underline-offset-2 hover:text-sky-200 hover:underline">
@@ -110,6 +112,8 @@ export default function Menu({ onStart }) {
           </div>
         </div>
 
+        <div className="md:grid md:grid-cols-2 md:gap-x-8">
+        <div>
         <Step n="1" title="City">
           <div className="grid grid-cols-3 gap-2">
             {Object.values(CITY_TYPES).map((c) => (
@@ -149,15 +153,7 @@ export default function Menu({ onStart }) {
           </div>
         </Step>
 
-        <Step n="3" title={disaster === 'quake' ? 'Earthquake' : 'Typhoon'}>
-          {disaster === 'quake' ? (
-            <QuakePicker quake={quake} setQuake={setQuake} level={level} setLevel={setLevel} />
-          ) : (
-            <TyphoonPicker typhoon={typhoon} setTyphoon={setTyphoon} level={level} setLevel={setLevel} coast={coast} setCityCoast={setCoast} />
-          )}
-        </Step>
-
-        <Step n="4" title="Time of day">
+        <Step n="3" title="Time of day">
           <div className="grid grid-cols-4 gap-1.5">
             {START_TIMES.map((t) => (
               <button
@@ -172,6 +168,15 @@ export default function Menu({ onStart }) {
           </div>
           <p className="mt-1.5 text-xs text-slate-400">{START_TIMES.find((t) => t.hour === startHour)?.sub}</p>
         </Step>
+        </div>
+        <div>
+        <Step n="4" title={disaster === 'quake' ? 'Earthquake' : 'Typhoon'}>
+          {disaster === 'quake' ? (
+            <QuakePicker quake={quake} setQuake={setQuake} level={level} setLevel={setLevel} />
+          ) : (
+            <TyphoonPicker typhoon={typhoon} setTyphoon={setTyphoon} level={level} setLevel={setLevel} coast={coast} setCityCoast={setCoast} />
+          )}
+        </Step>
 
         <Step n="5" title="Map seed">
           <div className="flex gap-2">
@@ -185,10 +190,12 @@ export default function Menu({ onStart }) {
             </button>
           </div>
         </Step>
+        </div>
+        </div>
 
         <button
           onClick={() => onStart({ cityType, disaster, level, startHour, seed, quake, typhoon, coast })}
-          className="mt-auto rounded-lg bg-sky-500 py-3 text-base font-bold text-white shadow-lg shadow-sky-900/40 transition hover:bg-sky-400"
+          className="mt-auto shrink-0 rounded-lg bg-sky-500 py-3 md:sticky md:bottom-0 md:z-10 text-base font-bold text-white shadow-lg shadow-sky-900/40 transition hover:bg-sky-400"
         >
           Generate city →
         </button>
