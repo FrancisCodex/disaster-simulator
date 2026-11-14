@@ -18,7 +18,7 @@ export default function Results({ s, game }) {
   const r = s.results
   if (hidden)
     return (
-      <div className="absolute bottom-4 left-1/2 -translate-x-1/2">
+      <div className="absolute top-3 left-1/2 -translate-x-1/2 max-md:top-28">
         <button onClick={() => setHidden(false)} className="panel px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800">
           Show results ({r.grade})
         </button>

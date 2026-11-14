@@ -268,11 +268,11 @@ export function BuildingPanel({ info, title = 'Building', onClose }) {
   )
 }
 
-export function Notice({ notice }) {
+export function Notice({ notice, high }) {
   if (!notice) return null
   const tone = notice.kind === 'bad' ? 'border-red-500/50 text-red-200' : notice.kind === 'good' ? 'border-emerald-500/50 text-emerald-200' : 'border-sky-500/40 text-sky-100'
   return (
-    <div key={notice.t} className={`panel fadein notice-pos pointer-events-none absolute left-1/2 max-w-[90vw] -translate-x-1/2 border px-4 py-2 text-sm ${tone}`}>
+    <div key={notice.t} className={`panel fadein notice-pos ${high ? 'notice-high' : ''} pointer-events-none absolute left-1/2 max-w-[90vw] -translate-x-1/2 border px-4 py-2 text-sm ${tone}`}>
       {notice.text}
     </div>
   )

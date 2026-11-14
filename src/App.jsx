@@ -45,7 +45,7 @@ export default function App() {
           {(snap.phase === 'sim' || snap.phase === 'results') && <SimHUD s={snap} game={game} />}
           <RepoCredit phase={snap.phase} />
           {snap.phase === 'results' && <Results key={snap.results.dead + snap.results.hours} s={snap} game={game} />}
-          <Notice notice={snap.notice} />
+          <Notice notice={snap.notice} high={snap.phase === 'sim' || snap.phase === 'results'} />
         </>
       )}
     </div>

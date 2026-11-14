@@ -1064,8 +1064,8 @@ export class World {
   }
 
   /** Rebuild the water surface from a FloodSim (h, zg, vx, vz arrays). */
-  updateWater(sim) {
-    this.waterSim = sim
+  updateWater(sim, replay = false) {
+    if (!replay) this.waterSim = sim
     const { h, zg } = sim
     const vxA = sim.vx
     const vzA = sim.vz
@@ -1107,8 +1107,17 @@ export class World {
           pos[v * 3 + 1] = y
           aw[v * 4] = Math.max(0, y - vh[v])
           aw[v * 4 + 1] = flood / n
-          aw[v * 4 + 2] = fx / n
-          aw[v * 4 + 3] = fz / n
+          // ease towards the new flow, and cap it: the solver's cell velocities
+          // flicker from step to step, which showed as the surface twitching
+          let ux = fx / n
+          let uz = fz / n
+          const sp = Math.hypot(ux, uz)
+          if (sp > 6) {
+            ux *= 6 / sp
+            uz *= 6 / sp
+          }
+          aw[v * 4 + 2] += (ux - aw[v * 4 + 2]) * 0.2
+          aw[v * 4 + 3] += (uz - aw[v * 4 + 3]) * 0.2
         } else wet[v] = 0
       }
     // dry vertices next to water take the neighbouring water level so the
@@ -1322,6 +1331,54 @@ export class World {
     const { cut, sink } = this.standing(b, a)
     const lights = a && (a.rubble || a.broken || a.burnt || a.ds >= 3 || a.dark || a.partial) ? 0 : 1
     this.bld.set(i, _m, live ? a.ux * a.vis : 0, live ? a.uz * a.vis : 0, b.height, cut, sink, lights + (a?.rubble || a?.broken ? 2 : 0), live ? a.mx * a.vis : 0, live ? a.mz * a.vis : 0)
+  }
+
+  /**
+   * What the replay needs to draw each building later: two bytes per building
+   * in bList order. Byte 0: bit 0 down (collapsed, swept away or flattened),
+   * 1 roof lost, 2 roof sheets lost, 3 burnt out, 4 dark, bits 5–7 the damage
+   * state. Byte 1: the flood stain, 0–255.
+   */
+  buildingStates() {
+    const out = new Uint8Array(this.bList.length * 2)
+    this.bList.forEach((b, i) => {
+      const a = this.anim.get(b.id)
+      if (!a) return
+      out[i * 2] = (a.rubble || a.broken || a.collapse ? 1 : 0) | (a.roofLost ? 2 : 0) | (a.roofCover ? 4 : 0) | (a.burnt ? 8 : 0) | (a.dark ? 16 : 0) | (Math.min(7, a.ds || 0) << 5)
+      out[i * 2 + 1] = Math.round(clamp(a.wet || 0, 0, 1) * 255)
+    })
+    return out
+  }
+
+  /**
+   * Draw the buildings as recorded by buildingStates (replay), or as they
+   * really are (st null). Nothing about the buildings themselves changes: a
+   * building that had not yet fallen is drawn standing, one that had is drawn
+   * as it lies now. Loose wreckage and debris stay where they are.
+   */
+  showBuildingStates(st) {
+    if (!this.bList) return
+    if (!st || st.length !== this.bList.length * 2) {
+      this.refreshColors()
+      return
+    }
+    const real = this.anim
+    const shown = new Map()
+    this.bList.forEach((b, i) => {
+      const a = real.get(b.id)
+      const fl = st[i * 2]
+      const wet = st[i * 2 + 1] / 255
+      if (!a && !fl && !wet) return
+      if (fl & 1 && a) {
+        shown.set(b.id, a)
+        return
+      }
+      const ds = fl >> 5
+      shown.set(b.id, { ux: 0, uz: 0, vx: 0, vz: 0, mx: 0, mz: 0, vis: a?.vis ?? 3, hScale: 1, spread: 1, tiltX: ds >= 3 ? (a?.tiltX ?? 0) : 0, tiltZ: ds >= 3 ? (a?.tiltZ ?? 0) : 0, ds, wet, roofLost: !!(fl & 2), roofCover: !!(fl & 4), burnt: !!(fl & 8), dark: !!(fl & 16), settle: a?.settle, leanTx: a?.leanTx, leanTz: a?.leanTz })
+    })
+    this.anim = shown
+    this.refreshColors()
+    this.anim = real
   }
 
   updateAllBuildings() {
@@ -2659,8 +2716,13 @@ export class World {
   }
 
   /** frozen: the simulation is paused — only the camera moves; everything else holds still. */
-  update(dt, frozen = false) {
+  update(dt, frozen = false, replay = false) {
     if (frozen) {
+      if (replay) {
+        // a replay: nothing in the city moves, but the water ripples and the rain falls
+        this.uTime.value += dt
+        this.rain.update(dt, this.rainIntensity || 0, this.controls.target, (x, z) => this.surfaceAt(x, z).y, this.subsurface.group.visible ? HALF - 2 : 0, this.windVec)
+      }
       this.controls.update()
       this.clampView()
       this.bld.flush()

@@ -1569,7 +1569,8 @@ export class CityLife {
               if (!net.isJ(p.k) && !net.hasWalk(p.k, p.dir, p.side)) p.side = -p.side
             }
             const [nx, nz] = this.walkPoint(p.k, p.dir, p.t, p.side)
-            p.yaw = Math.atan2(-(nz - p.z), nx - p.x) || p.yaw
+            // (not `atan2(...) || p.yaw`: due east is a yaw of 0, which that threw away)
+            if (nx !== p.x || nz !== p.z) p.yaw = Math.atan2(-(nz - p.z), nx - p.x)
             p.x = nx
             p.z = nz
           }

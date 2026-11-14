@@ -68,3 +68,28 @@ body,
 .safe-bottom {
   padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
 }
+
+/* main menu: from tablets up the card sits in the middle, over a dimmed city */
+@media (min-width: 768px) {
+  .menu-backdrop {
+    background: radial-gradient(ellipse at center, rgba(5, 9, 18, 0.55), rgba(5, 9, 18, 0.15) 75%);
+  }
+  .menu-card {
+    background: rgba(11, 17, 30, 0.9);
+    border-radius: 18px;
+    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(56, 189, 248, 0.08);
+  }
+}
+
+/* during the simulation the toast clears the news and replay dock */
+@media (min-width: 768px) and (min-height: 501px) {
+  .notice-pos.notice-high {
+    bottom: auto;
+    top: 1rem;
+  }
+}
+
+/* a new item sliding into the news feed */
+.feed-item {
+  animation: fadein 0.35s ease-out;
+}

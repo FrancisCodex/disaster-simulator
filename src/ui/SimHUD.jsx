@@ -1,10 +1,14 @@
 import { SPEEDS } from '../engine/config.js'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Stat, BuildingPanel, Sheet } from './common.jsx'
 import { useIsMobile } from './useIsMobile.js'
 import { fmtInt, fmtMoney } from '../engine/math.js'
 import { SignalChip } from './TyphoonScenario.jsx'
 import LensPanel from './LensPanel.jsx'
+import { buildFeed } from './news.js'
+import { NewsFeed, Ticker } from './NewsFeed.jsx'
+import { ReplayBar, Timeline, LiveChip } from './ReplayBar.jsx'
+import { useReplay } from './useReplay.js'
 
 /** How the people outside are reacting: calm → frightened → fleeing → panicking. */
 function PanicBar({ p }) {
@@ -40,15 +44,7 @@ function PanicBar({ p }) {
   )
 }
 
-const fmtT = (t) => {
-  const h = Math.floor(t / 3600)
-  const m = Math.floor((t % 3600) / 60)
-  return `T+${h}h ${String(m).padStart(2, '0')}m`
-}
-
 const LENS_NAME = { flood: 'Flood depth', damage: 'Damage', power: 'Power' }
-
-const LOG_TONE = { bad: 'text-red-300', warn: 'text-amber-200', info: 'text-slate-300', good: 'text-emerald-300' }
 
 const hrs = (tau) => {
   const a = Math.abs(tau)
@@ -311,29 +307,36 @@ function StatGrid({ s }) {
   )
 }
 
-function EventLog({ log, className = 'max-h-72' }) {
-  return (
-    <div className={`scroll-thin overflow-y-auto pr-1 ${className}`}>
-      {[...log].reverse().map((e, i) => (
-        <div key={log.length - i} className="border-b border-slate-800 py-1 text-[12.5px] leading-snug">
-          <span className="mr-1.5 font-mono text-[11px] text-slate-500">{fmtT(e.t)}</span>
-          <span className={LOG_TONE[e.level] ?? 'text-slate-300'}>{e.text}</span>
-        </div>
-      ))}
-    </div>
-  )
+function readFeedOpen() {
+  try {
+    return localStorage.getItem('metrorisk.open.feed') !== '0'
+  } catch {
+    return true
+  }
 }
 
 export default function SimHUD({ s, game }) {
   const mobile = useIsMobile()
-  return mobile ? <MobileSim s={s} game={game} /> : <DesktopSim s={s} game={game} />
+  const replay = useReplay(s, game)
+  // the feed as of the moment on screen: everything so far, or up to the point being replayed
+  const { view } = replay
+  const feed = useMemo(() => buildFeed(view.sim.log, s.city.name), [view.sim.log, s.city.name])
+  return mobile ? <MobileSim s={s} view={view} game={game} replay={replay} feed={feed} /> : <DesktopSim s={s} view={view} game={game} replay={replay} feed={feed} />
 }
 
-function DesktopSim({ s, game }) {
+/**
+ * Desktop and tablet: the situation on the left, the selected building on the
+ * right, and along the bottom the news feed, the headline ticker and the
+ * replay bar. s is the simulation now; view is s, or the recorded moment
+ * being replayed.
+ */
+function DesktopSim({ s, view, game, replay, feed }) {
   const sim = s.sim
   const quake = sim.quake
   const done = s.phase === 'results'
+  const startHour = s.settings.startHour
   const [lenses, setLenses] = useState(false)
+  const [feedOpen, setFeedOpen] = useState(readFeedOpen)
   const lensOn = (sim.lens ?? 'city') !== 'city'
   // the button is the on/off switch: on opens the panel on the flood depth lens, off returns to the plain city
   const toggleLenses = () => {
@@ -345,83 +348,75 @@ function DesktopSim({ s, game }) {
       game.setLens('flood')
     }
   }
+  const toggleFeed = () => {
+    setFeedOpen(!feedOpen)
+    try {
+      localStorage.setItem('metrorisk.open.feed', feedOpen ? '0' : '1')
+    } catch {
+      /* storage unavailable: it just won't be remembered */
+    }
+  }
   return (
     <>
-      {/* clock & controls */}
-      <div className="pointer-events-none absolute top-3 right-3 left-3 flex justify-center">
-        <div className="panel pointer-events-auto flex items-center gap-3 px-4 py-2">
-          <div className="text-center">
-            <div className="font-mono text-lg font-bold text-white tabular-nums">{sim.clock}</div>
-            <div className="font-mono text-[11px] text-slate-400">{fmtT(sim.elapsed)}</div>
+      {/* left: the situation and the toll, now or at the moment being replayed */}
+      <div className="scroll-thin pointer-events-auto absolute top-3 left-3 max-h-[calc(100vh-1.5rem)] w-64 overflow-y-auto">
+        <div className={`panel p-3 ${replay.reviewing ? 'ring-1 ring-amber-400/60' : ''}`}>
+          <div className="mb-2 flex items-baseline justify-between gap-2">
+            <span className="truncate text-sm font-bold text-white">{s.city.name}</span>
+            <span className={`font-mono text-[11px] whitespace-nowrap ${replay.reviewing ? 'text-amber-200' : 'text-slate-400'}`}>{view.sim.clock}</span>
           </div>
-          <div className="h-8 w-px bg-slate-700" />
-          {!done && (
-            <>
-              <button onClick={() => game.togglePause()} className="rounded-md bg-slate-700/60 px-3 py-1.5 text-sm text-white hover:bg-slate-600" title="Space">
-                {sim.paused ? '▶ Resume' : '⏸ Pause'}
-              </button>
-              <div className="flex overflow-hidden rounded-md ring-1 ring-slate-700">
-                {SPEEDS.map((sp, i) => (
-                  <button
-                    key={sp.label}
-                    onClick={() => game.setSpeed(i)}
-                    className={`px-2.5 py-1.5 text-xs ${sim.speedIdx === i && !sim.paused ? 'bg-sky-500/30 text-white' : 'text-slate-300 hover:bg-slate-700/60'}`}
-                  >
-                    {sp.label}
-                  </button>
-                ))}
-              </div>
-              {sim.physicsLimited && <span className="text-[11px] text-amber-300" title="Flood physics is running as fast as your CPU allows">CPU-limited</span>}
-              <div className="h-8 w-px bg-slate-700" />
-              <button onClick={() => game.endDisaster()} className="rounded-md bg-red-600 px-3 py-1.5 text-sm font-bold text-white hover:bg-red-500">
-                End disaster ■
-              </button>
-            </>
-          )}
-          {quake ? (
-            <button onClick={() => game.toggleOverlay()} className={`rounded-md px-3 py-1.5 text-sm ${s.overlay ? 'bg-amber-500/25 text-amber-200 ring-1 ring-amber-400' : 'text-slate-300 hover:bg-slate-700/60'}`}>
-              Integrity view
-            </button>
-          ) : (
-            <button onClick={toggleLenses} title="Turn the lenses on or off (L)" className={`rounded-md px-3 py-1.5 text-sm ${lenses || lensOn ? 'bg-sky-500/25 text-sky-100 ring-1 ring-sky-400' : 'text-slate-300 hover:bg-slate-700/60'}`}>
-              🔍 Lenses {lenses || lensOn ? 'on' : 'off'}
-            </button>
-          )}
+          {replay.reviewing && <div className="mb-2 rounded bg-amber-500/15 px-2 py-1 text-[11px] leading-snug text-amber-100">Replay: the readings, the news, the flood water and the buildings are shown as they were at this moment.</div>}
+          <Situation s={view} />
+          <StatGrid s={view} />
         </div>
       </div>
 
-      {(lenses || lensOn) && !quake && (
-        <div className="scroll-thin pointer-events-auto absolute top-24 left-[17.5rem] max-h-[calc(100vh-8rem)] w-72 overflow-y-auto">
-          <LensPanel
-            s={s}
-            game={game}
-            onClose={() => {
-              setLenses(false)
-              game.setLens('city')
-            }}
-          />
+      {/* right: the selected building */}
+      {s.selected && (
+        <div className="scroll-thin pointer-events-auto absolute top-3 right-3 max-h-[calc(100vh-1.5rem)] w-80 overflow-y-auto">
+          <BuildingPanel info={s.selected} title="Selected" onClose={() => game.select(null)} />
         </div>
       )}
 
-      {/* left: live stats */}
-      <div className="pointer-events-auto absolute top-24 left-3 flex w-64 flex-col gap-2">
-        <div className="panel p-3">
-          <Situation s={s} />
-          <StatGrid s={s} />
+      {/* middle: lenses on top; the feed, the ticker and the replay bar docked at the bottom */}
+      <div className={`pointer-events-none absolute top-3 bottom-3 left-[17.5rem] flex flex-col justify-between gap-2 ${s.selected ? 'right-[21.5rem]' : 'right-3'}`}>
+        <div className="scroll-thin pointer-events-auto min-h-0 w-72 overflow-y-auto">
+          {(lenses || lensOn) && !quake && (
+            <LensPanel
+              s={s}
+              game={game}
+              onClose={() => {
+                setLenses(false)
+                game.setLens('city')
+              }}
+            />
+          )}
+        </div>
+        <div className="mx-auto flex w-full max-w-5xl shrink-0 flex-col gap-2">
+          {feedOpen && (
+            <div className="panel fadein pointer-events-auto overflow-hidden">
+              <NewsFeed items={feed} startHour={startHour} className="max-h-[34vh]" />
+            </div>
+          )}
+          <Ticker items={feed} startHour={startHour} open={feedOpen} onToggle={toggleFeed} />
+          <ReplayBar s={s} game={game} replay={replay}>
+            {quake ? (
+              <button onClick={() => game.toggleOverlay()} className={`rounded-md px-3 py-1.5 text-sm ${s.overlay ? 'bg-amber-500/25 text-amber-200 ring-1 ring-amber-400' : 'text-slate-300 hover:bg-slate-700/60'}`}>
+                Integrity view
+              </button>
+            ) : (
+              <button onClick={toggleLenses} title="Turn the lenses on or off (L)" className={`rounded-md px-3 py-1.5 text-sm ${lenses || lensOn ? 'bg-sky-500/25 text-sky-100 ring-1 ring-sky-400' : 'text-slate-300 hover:bg-slate-700/60'}`}>
+                🔍 Lenses {lenses || lensOn ? 'on' : 'off'}
+              </button>
+            )}
+            {!done && (
+              <button onClick={() => game.endDisaster()} className="rounded-md bg-red-600 px-3 py-1.5 text-sm font-bold text-white hover:bg-red-500">
+                End disaster ■
+              </button>
+            )}
+          </ReplayBar>
         </div>
       </div>
-
-      {/* right: log + selection */}
-      <div className="pointer-events-auto absolute top-24 right-3 flex max-h-[calc(100vh-11rem)] w-80 flex-col gap-2">
-        <div className="panel flex min-h-0 flex-col p-3">
-          <div className="mb-1 text-[11px] tracking-wider text-slate-400 uppercase">Event log</div>
-          <EventLog log={sim.log} />
-        </div>
-        <div className="scroll-thin min-h-0 overflow-y-auto">
-          <BuildingPanel info={s.selected} title="Selected" onClose={() => game.select(null)} />
-        </div>
-      </div>
-      {!s.selected && <div className="pointer-events-none absolute bottom-4 left-1/2 -translate-x-1/2 text-xs text-slate-300/80 drop-shadow">Click a building to inspect it · Right-drag to rotate · Scroll to zoom</div>}
     </>
   )
 }
@@ -436,10 +431,10 @@ function Mini({ label, value, tone = 'text-white' }) {
 }
 
 /** Phone layout: clock and controls on top, the key numbers under them, details, log and the selected building in sheets. */
-function MobileSim({ s, game }) {
+function MobileSim({ s, view, game, replay, feed }) {
   const [sheet, setSheet] = useState(null) // 'details' | 'log' | 'lens'
   const sim = s.sim
-  const T = sim.totals
+  const T = view.sim.totals
   const quake = sim.quake
   const done = s.phase === 'results'
   const open = (k) => setSheet(sheet === k ? null : k)
@@ -449,15 +444,21 @@ function MobileSim({ s, game }) {
       <div className="pointer-events-none absolute top-2 right-2 left-2">
         <div className="panel pointer-events-auto flex items-center gap-2 px-2.5 py-1.5">
           <div className="min-w-0">
-            <div className="font-mono text-sm font-bold text-white tabular-nums">{sim.clock}</div>
-            <div className="font-mono text-[10px] text-slate-400">{fmtT(sim.elapsed)}</div>
+            <div className={`font-mono text-sm font-bold tabular-nums ${replay.reviewing ? 'text-amber-200' : 'text-white'}`}>{view.sim.clock}</div>
           </div>
+          <LiveChip s={s} replay={replay} short />
           {!done && (
             <>
-              <button onClick={() => game.togglePause()} className="ml-auto rounded-md bg-slate-700/60 px-2.5 py-1.5 text-sm text-white" aria-label={sim.paused ? 'Resume' : 'Pause'}>
-                {sim.paused ? '▶' : '⏸'}
-              </button>
-              <select value={sim.speedIdx} onChange={(e) => game.setSpeed(+e.target.value)} aria-label="Speed" className="rounded-md bg-slate-800 px-1.5 py-1.5 text-xs text-white ring-1 ring-slate-700">
+              {replay.reviewing ? (
+                <button onClick={() => (replay.playing ? replay.pause() : replay.play())} className="ml-auto rounded-md bg-amber-500/25 px-2.5 py-1.5 text-sm text-amber-100 ring-1 ring-amber-400/60" aria-label={replay.playing ? 'Pause replay' : 'Play replay'}>
+                  {replay.playing ? '⏸' : '▶'}
+                </button>
+              ) : (
+                <button onClick={() => game.togglePause()} className="ml-auto rounded-md bg-slate-700/60 px-2.5 py-1.5 text-sm text-white" aria-label={sim.paused ? 'Resume' : 'Pause'}>
+                  {sim.paused ? '▶' : '⏸'}
+                </button>
+              )}
+              <select value={replay.reviewing ? replay.rate : sim.speedIdx} onChange={(e) => (replay.reviewing ? replay.setRate(+e.target.value) : game.setSpeed(+e.target.value))} aria-label={replay.reviewing ? 'Replay speed' : 'Speed'} className="rounded-md bg-slate-800 px-1.5 py-1.5 text-xs text-white ring-1 ring-slate-700">
                 {SPEEDS.map((sp, i) => (
                   <option key={sp.label} value={i}>
                     {sp.label}
@@ -484,13 +485,13 @@ function MobileSim({ s, game }) {
             <BuildingPanel info={s.selected} title="Selected" onClose={() => game.select(null)} />
           </div>
         ) : sheet === 'details' ? (
-          <Sheet title="Situation" onClose={() => setSheet(null)}>
-            <Situation s={s} />
-            <StatGrid s={s} />
+          <Sheet title={replay.reviewing ? `Situation at ${view.sim.clock}` : 'Situation'} onClose={() => setSheet(null)}>
+            <Situation s={view} />
+            <StatGrid s={view} />
           </Sheet>
         ) : sheet === 'log' ? (
-          <Sheet title="Event log" onClose={() => setSheet(null)}>
-            <EventLog log={sim.log} className="" />
+          <Sheet title="News feed" onClose={() => setSheet(null)}>
+            <NewsFeed items={feed} startHour={s.settings.startHour} />
           </Sheet>
         ) : sheet === 'lens' ? (
           <div className="scroll-thin pointer-events-auto max-h-[55vh] overflow-y-auto">
@@ -508,12 +509,14 @@ function MobileSim({ s, game }) {
             </button>
           </div>
         ) : null}
+        {sheet !== 'log' && !s.selected && <Ticker items={feed} startHour={s.settings.startHour} open={false} onToggle={() => open('log')} />}
+        <Timeline s={s} replay={replay} className="panel pointer-events-auto px-2 pt-2 pb-1" />
         <div className="panel pointer-events-auto flex items-center gap-1 px-2 py-1.5">
           <button onClick={() => open('details')} className={tab('details')}>
             Details
           </button>
           <button onClick={() => open('log')} className={tab('log')}>
-            Log
+            News
           </button>
           <button
             onClick={() => {
