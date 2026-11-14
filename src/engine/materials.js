@@ -328,9 +328,20 @@ export function makeWaterMaterial({ envMap, uTime, uRain, uQuake }) {
           vec2 i = floor(p); vec2 f = fract(p); f = f * f * (3.0 - 2.0 * f);
           return mix(mix(hash12(i), hash12(i + vec2(1, 0)), f.x), mix(hash12(i + vec2(0, 1)), hash12(i + vec2(1, 1)), f.x), f.y);
         }
-        vec2 waveGrad(vec2 p, vec2 flow) {
+        // The pattern is carried along by the flow in two overlapping passes that
+        // each restart every 2.5 s, half a cycle apart, and fade into one another.
+        // The offset is never more than about a second of travel, so a change in
+        // the flow nudges the pattern instead of throwing it across the map (as
+        // flow * time does, more violently the longer the simulation has run).
+        vec3 flowPhase() {
+          float a = fract(uTime * 0.4);
+          return vec3(a - 0.5, fract(a + 0.5) - 0.5, abs(1.0 - 2.0 * a));
+        }
+        float flowNoise(vec2 p, vec2 off) {
+          return vnoise(p * 0.35 - off * 0.6) * 0.6 + vnoise(p * 1.3 - off) * 0.4;
+        }
+        vec2 waveGradAt(vec2 q) {
           vec2 g = vec2(0.0);
-          vec2 q = p - flow * uTime * 0.9;
           const int K = 5;
           for (int i = 0; i < K; i++) {
             float fi = float(i);
@@ -341,6 +352,12 @@ export function makeWaterMaterial({ envMap, uTime, uRain, uQuake }) {
             g += d * f * cos(ph) * (0.16 / pow(1.6, fi));
           }
           return g;
+        }
+        vec2 waveGrad(vec2 p, vec2 flow) {
+          vec3 fp = flowPhase();
+          vec2 a = waveGradAt(p - flow * fp.x * 2.25);
+          vec2 b = waveGradAt(p - flow * fp.y * 2.25 + vec2(13.7, 5.3));
+          return mix(a, b, fp.z) * 1.2;
         }`,
       )
       .replace(
@@ -358,7 +375,10 @@ export function makeWaterMaterial({ envMap, uTime, uRain, uQuake }) {
         float absorb = 1.0 - exp(-depth * 0.45);
         vec3 body = mix(mix(shallowRiver, deepRiver, absorb), mix(shallowFlood, deepFlood, absorb), flood);
         // foam: lapping edges, white water where it runs fast
-        float n = vnoise(vWorldP.xz * 0.35 - flow * uTime * 0.6) * 0.6 + vnoise(vWorldP.xz * 1.3 - flow * uTime) * 0.4;
+        vec3 fp = flowPhase();
+        float n = mix(flowNoise(vWorldP.xz, flow * fp.x * 2.5), flowNoise(vWorldP.xz + vec2(7.1, 3.3), flow * fp.y * 2.5), fp.z);
+        // blending two samples flattens the noise: stretch it back out
+        n = clamp((n - 0.5) * 1.3 + 0.5, 0.0, 1.0);
         float edgeFoam = (1.0 - smoothstep(0.03, 0.2, depth)) * 0.55;
         float rapid = smoothstep(2.4, 5.0, speed) * 0.6;
         // churned up by the shaking

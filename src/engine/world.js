@@ -1107,8 +1107,17 @@ export class World {
           pos[v * 3 + 1] = y
           aw[v * 4] = Math.max(0, y - vh[v])
           aw[v * 4 + 1] = flood / n
-          aw[v * 4 + 2] = fx / n
-          aw[v * 4 + 3] = fz / n
+          // ease towards the new flow, and cap it: the solver's cell velocities
+          // flicker from step to step, which showed as the surface twitching
+          let ux = fx / n
+          let uz = fz / n
+          const sp = Math.hypot(ux, uz)
+          if (sp > 6) {
+            ux *= 6 / sp
+            uz *= 6 / sp
+          }
+          aw[v * 4 + 2] += (ux - aw[v * 4 + 2]) * 0.2
+          aw[v * 4 + 3] += (uz - aw[v * 4 + 3]) * 0.2
         } else wet[v] = 0
       }
     // dry vertices next to water take the neighbouring water level so the
