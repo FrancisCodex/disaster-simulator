@@ -28,7 +28,7 @@ import {
 } from './config.js'
 import { DEFAULT_PLAN, SUGGESTED_PLAN } from './evacPlan.js'
 import { generateCity, addBuilding, idx, occupancyAt, cityStats, cellToWorld } from './cityGen.js'
-import { Rng, clamp, smoothstep } from './math.js'
+import { Rng, clamp, lerp, smoothstep } from './math.js'
 import { World, sheddingFacade } from './world.js'
 import { FloodSim, forecastRiverPeak, GATE_SURGE, GATE_PUMP } from './floodSim.js'
 import { floodMap, depthColor, LENS_GREY } from './floodMap.js'
@@ -1271,6 +1271,7 @@ export class Game {
     this.log = []
     this.logSeq = 0
     this.timeline = []
+    this.setReplay(null)
     this.timelineStep = settings.disaster === 'quake' ? 60 : 600
     this.world.setHighlight(null)
     this.rng = new Rng((settings.seed ^ 0x5bd1e995) >>> 0)
@@ -1351,6 +1352,15 @@ export class Game {
     delete sim.timeline
     delete sim.lensCell
     delete sim.lensStats
+    // what the replay needs to draw the city at this moment: the water (cm per cell, and the sea) and each building's state
+    const vis = { b: this.world.buildingStates() }
+    if (this.flood) {
+      const h = this.flood.h
+      const q = (vis.h = new Uint16Array(h.length))
+      for (let k = 0; k < h.length; k++) q[k] = Math.min(65535, Math.round(h[k] * 100))
+      vis.seaZ = this.flood.seaZ
+    }
+    sim.vis = vis
     const tl = this.timeline
     if (tl.length && tl[tl.length - 1].time >= sim.time) tl.pop()
     tl.push(sim)
@@ -1360,13 +1370,62 @@ export class Game {
     }
   }
 
+  /**
+   * Show the city as it was at t seconds into the simulation (the replay), or
+   * as it is now (t null). Only the picture changes: the water surface is
+   * blended between the two recorded frames around t, buildings are drawn in
+   * the state of the frame before it, and the sky, rain and wind follow that
+   * frame. The simulation itself is not touched, and must be paused.
+   */
+  setReplay(t) {
+    const w = this.world
+    const tl = this.timeline
+    if (t == null || !tl?.length || (this.phase !== 'sim' && this.phase !== 'results')) {
+      if (this.replay) {
+        this.replay = null
+        if (this.flood) w.updateWater(this.flood)
+        w.showBuildingStates(null)
+      }
+      return
+    }
+    let i = 0
+    for (let lo = 0, hi = tl.length - 1; lo <= hi; ) {
+      const mid = (lo + hi) >> 1
+      if (tl[mid].time <= t) {
+        i = mid
+        lo = mid + 1
+      } else hi = mid - 1
+    }
+    const A = tl[i]
+    const B = tl[Math.min(i + 1, tl.length - 1)]
+    const k = B.time > A.time ? clamp((t - A.time) / (B.time - A.time), 0, 1) : 0
+    const first = !this.replay
+    const sameFrame = this.replay?.frame === A
+    this.replay = { t, frame: A }
+    if (this.flood && A.vis?.h) {
+      const ha = A.vis.h
+      const hb = B.vis?.h ?? ha
+      const h = (this.replayH ??= new Float32Array(ha.length))
+      for (let c = 0; c < h.length; c++) h[c] = (ha[c] + (hb[c] - ha[c]) * k) / 100
+      // the live flood with the recorded depths in place of its own, and no flow
+      const past = Object.create(this.flood)
+      past.h = h
+      past.vx = past.vz = null
+      past.seaZ = lerp(A.vis.seaZ ?? this.flood.seaZ, B.vis?.seaZ ?? A.vis.seaZ ?? this.flood.seaZ, k)
+      w.updateWater(past, true)
+    }
+    if (first || !sameFrame) w.showBuildingStates(A.vis?.b)
+  }
+
   setSpeed(i) {
+    this.setReplay(null)
     this.speedIdx = i
     this.paused = false
     this.emit()
   }
 
   togglePause() {
+    if (this.paused) this.setReplay(null)
     this.paused = !this.paused
     this.emit()
   }
@@ -1380,6 +1439,7 @@ export class Game {
       if (this.overlay && this.phase === 'prepare') this.applyColorMode()
     }
     if (this.phase === 'sim' && !this.paused) {
+      if (this.replay) this.setReplay(null)
       const want = dt * SPEEDS[this.speedIdx].mult
       if (this.flood) this.stepFlood(want)
       else if (this.quake) this.stepQuake(want)
@@ -1401,22 +1461,25 @@ export class Game {
     }
     this.updateLens(dt)
     if (this.phase === 'sim' || this.phase === 'results') {
-      const hour = this.settings.startHour + this.simTime / 3600
-      const live = this.phase === 'sim' && this.typhoon
-      const rain = live ? this.flood.rain : 0
+      // a replay shows the weather of the moment being replayed
+      const R = this.replay
+      const now = R ? R.t : this.simTime
+      const hour = this.settings.startHour + now / 3600
+      const live = (R || this.phase === 'sim') && this.typhoon
+      const ty = R ? R.frame.typhoon : this.typhoon?.now
+      const rain = live ? (R ? (R.frame.flood?.rain ?? 0) : this.flood.rain) : 0
       // the storm's wind, in world axes (x east, z south): it slants the rain
-      const wind = live ? [this.typhoon.now.dir[0] * this.typhoon.now.wind, -this.typhoon.now.dir[1] * this.typhoon.now.wind] : [0, 0]
+      const wind = live && ty ? [ty.dir[0] * ty.wind, -ty.dir[1] * ty.wind] : [0, 0]
       let haze = 0
-      if (this.quake?.mainDone) haze = clamp(this.quake.shocks[0].pga * 0.8, 0, 0.45) * Math.exp(-(this.simTime - this.quake.mainTime) / 7200)
+      if (this.quake?.mainDone && now >= this.quake.mainTime) haze = clamp(this.quake.shocks[0].pga * 0.8, 0, 0.45) * Math.exp(-(now - this.quake.mainTime) / 7200)
       // the cloud shield spreads ~500 km from the centre; in the eye it opens to the sky
-      const ty = this.typhoon?.now
-      const cloud = live ? smoothstep(560, 180, ty.dist) * (ty.eye ? 0.25 : 1) : 0
+      const cloud = live && ty ? smoothstep(560, 180, ty.dist) * (ty.eye ? 0.25 : 1) : 0
       w.setEnvironment({ hour, rain, haze, wind, cloud })
-      if (this.hazards) this.stormVisuals(live)
+      if (this.hazards && !R) this.stormVisuals(live)
     }
     w.setLifeContext(this.lifeContext())
     // paused: freeze every moving thing (traffic, people, debris, fire, water, shaking)
-    w.update(dt, this.phase === 'sim' && this.paused)
+    w.update(dt, !!this.replay || (this.phase === 'sim' && this.paused), !!this.replay)
   }
 
   /**
@@ -1875,6 +1938,7 @@ export class Game {
 
   endDisaster() {
     if (this.phase !== 'sim') return
+    this.setReplay(null)
     this.phase = 'results'
     this.paused = true
     this.results = this.computeResults()
@@ -1915,6 +1979,7 @@ export class Game {
   }
 
   retry(keepPrep) {
+    this.setReplay(null)
     if (keepPrep && this.prepSnapshot) {
       const s = this.prepSnapshot
       this.setupCity(structuredClone(s.city))
@@ -1934,6 +1999,7 @@ export class Game {
   }
 
   backToMenu() {
+    this.setReplay(null)
     this.phase = 'menu'
     this.world.setFloodMap(null)
     this.world.setLabels([])

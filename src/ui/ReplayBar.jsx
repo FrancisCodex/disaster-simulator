@@ -97,9 +97,17 @@ const btn = 'rounded-md px-2.5 py-1.5 text-sm text-slate-200 hover:bg-slate-700/
 export function LiveChip({ s, replay, short = false }) {
   if (replay.reviewing)
     return (
-      <button onClick={replay.live} className="rounded-md bg-amber-500/20 px-2.5 py-1.5 text-xs font-bold whitespace-nowrap text-amber-200 ring-1 ring-amber-400/70 hover:bg-amber-500/30" title="Return to the present">
-        ⟲ Replay{short ? '' : ' · back to now'}
-      </button>
+      <span className="flex items-center gap-1.5">
+        {!short && (
+          <span className="flex items-center gap-1.5 px-1 text-xs font-bold tracking-wider whitespace-nowrap text-amber-200 uppercase">
+            <span className={`h-2 w-2 rounded-full bg-amber-400 ${replay.playing ? 'animate-pulse' : ''}`} />
+            Replay
+          </span>
+        )}
+        <button onClick={replay.live} className="rounded-md bg-amber-500/20 px-2.5 py-1.5 text-xs font-bold whitespace-nowrap text-amber-200 ring-1 ring-amber-400/70 hover:bg-amber-500/30" title="Leave the replay and return to the present">
+          {short ? 'Replay ✕' : 'Skip to now ⇥'}
+        </button>
+      </span>
     )
   const done = s.phase === 'results'
   return (
@@ -122,8 +130,16 @@ export function ReplayBar({ s, game, replay, children }) {
   return (
     <div className="panel pointer-events-auto px-3 pt-2.5 pb-2">
       <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-2">
-        {!done && (
-          <button onClick={() => game.togglePause()} className="w-[6.5rem] rounded-md bg-slate-700/70 px-3 py-1.5 text-sm font-semibold text-white hover:bg-slate-600" title="Space">
+        {replay.reviewing ? (
+          <button onClick={() => (replay.playing ? replay.pause() : replay.play())} className="w-[8.5rem] rounded-md bg-amber-500/25 px-3 py-1.5 text-sm font-semibold text-amber-100 ring-1 ring-amber-400/60 hover:bg-amber-500/35">
+            {replay.playing ? '⏸ Pause replay' : '▶ Play replay'}
+          </button>
+        ) : done ? (
+          <button onClick={() => replay.play(0)} className="w-[8.5rem] rounded-md bg-slate-700/70 px-3 py-1.5 text-sm font-semibold text-white hover:bg-slate-600" title="Play the whole event again from the start">
+            ⟲ Watch replay
+          </button>
+        ) : (
+          <button onClick={() => game.togglePause()} className="w-[8.5rem] rounded-md bg-slate-700/70 px-3 py-1.5 text-sm font-semibold text-white hover:bg-slate-600" title="Space">
             {sim.paused ? '▶ Resume' : '⏸ Pause'}
           </button>
         )}
@@ -133,14 +149,25 @@ export function ReplayBar({ s, game, replay, children }) {
             {elapsedText(replay.t)} · #{nth}
           </div>
         </div>
-        {!done && (
-          <div className="flex overflow-hidden rounded-md ring-1 ring-slate-700">
+        {replay.reviewing ? (
+          // the replay has its own speed: the simulation's is left alone
+          <div className="flex overflow-hidden rounded-md ring-1 ring-amber-400/40" title="Replay speed">
             {SPEEDS.map((sp, i) => (
-              <button key={sp.label} onClick={() => game.setSpeed(i)} className={`px-2.5 py-1.5 text-xs ${sim.speedIdx === i && !sim.paused ? 'bg-sky-500/30 text-white' : 'text-slate-300 hover:bg-slate-700/60'}`}>
+              <button key={sp.label} onClick={() => replay.setRate(i)} className={`px-2.5 py-1.5 text-xs ${replay.rate === i ? 'bg-amber-500/30 text-white' : 'text-slate-300 hover:bg-slate-700/60'}`}>
                 {sp.label}
               </button>
             ))}
           </div>
+        ) : (
+          !done && (
+            <div className="flex overflow-hidden rounded-md ring-1 ring-slate-700">
+              {SPEEDS.map((sp, i) => (
+                <button key={sp.label} onClick={() => game.setSpeed(i)} className={`px-2.5 py-1.5 text-xs ${sim.speedIdx === i && !sim.paused ? 'bg-sky-500/30 text-white' : 'text-slate-300 hover:bg-slate-700/60'}`}>
+                  {sp.label}
+                </button>
+              ))}
+            </div>
+          )
         )}
         {sim.physicsLimited && !done && (
           <span className="text-[11px] text-amber-300" title="Flood physics is running as fast as your CPU allows">
@@ -149,6 +176,11 @@ export function ReplayBar({ s, game, replay, children }) {
         )}
         <div className="ml-auto flex flex-wrap items-center gap-1.5">
           <LiveChip s={s} replay={replay} />
+          {!replay.reviewing && !done && sim.time > 0 && (
+            <button onClick={() => replay.play(0)} className={btn} title="Pause the simulation and play back what has happened so far, from the start">
+              ⟲ Replay
+            </button>
+          )}
           <button onClick={() => replay.step(-1)} className={btn} title="Back to the previous warning or bad news" aria-label="Previous event">
             ⏮
           </button>

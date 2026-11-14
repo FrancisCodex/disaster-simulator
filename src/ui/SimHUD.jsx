@@ -365,7 +365,7 @@ function DesktopSim({ s, view, game, replay, feed }) {
             <span className="truncate text-sm font-bold text-white">{s.city.name}</span>
             <span className={`font-mono text-[11px] whitespace-nowrap ${replay.reviewing ? 'text-amber-200' : 'text-slate-400'}`}>{view.sim.clock}</span>
           </div>
-          {replay.reviewing && <div className="mb-2 rounded bg-amber-500/15 px-2 py-1 text-[11px] leading-snug text-amber-100">Replay: these readings and the news are from this moment. The 3D city shows the present.</div>}
+          {replay.reviewing && <div className="mb-2 rounded bg-amber-500/15 px-2 py-1 text-[11px] leading-snug text-amber-100">Replay: the readings, the news, the flood water and the buildings are shown as they were at this moment.</div>}
           <Situation s={view} />
           <StatGrid s={view} />
         </div>
@@ -449,10 +449,16 @@ function MobileSim({ s, view, game, replay, feed }) {
           <LiveChip s={s} replay={replay} short />
           {!done && (
             <>
-              <button onClick={() => game.togglePause()} className="ml-auto rounded-md bg-slate-700/60 px-2.5 py-1.5 text-sm text-white" aria-label={sim.paused ? 'Resume' : 'Pause'}>
-                {sim.paused ? '▶' : '⏸'}
-              </button>
-              <select value={sim.speedIdx} onChange={(e) => game.setSpeed(+e.target.value)} aria-label="Speed" className="rounded-md bg-slate-800 px-1.5 py-1.5 text-xs text-white ring-1 ring-slate-700">
+              {replay.reviewing ? (
+                <button onClick={() => (replay.playing ? replay.pause() : replay.play())} className="ml-auto rounded-md bg-amber-500/25 px-2.5 py-1.5 text-sm text-amber-100 ring-1 ring-amber-400/60" aria-label={replay.playing ? 'Pause replay' : 'Play replay'}>
+                  {replay.playing ? '⏸' : '▶'}
+                </button>
+              ) : (
+                <button onClick={() => game.togglePause()} className="ml-auto rounded-md bg-slate-700/60 px-2.5 py-1.5 text-sm text-white" aria-label={sim.paused ? 'Resume' : 'Pause'}>
+                  {sim.paused ? '▶' : '⏸'}
+                </button>
+              )}
+              <select value={replay.reviewing ? replay.rate : sim.speedIdx} onChange={(e) => (replay.reviewing ? replay.setRate(+e.target.value) : game.setSpeed(+e.target.value))} aria-label={replay.reviewing ? 'Replay speed' : 'Speed'} className="rounded-md bg-slate-800 px-1.5 py-1.5 text-xs text-white ring-1 ring-slate-700">
                 {SPEEDS.map((sp, i) => (
                   <option key={sp.label} value={i}>
                     {sp.label}

@@ -1,11 +1,14 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { SPEEDS } from '../engine/config.js'
 import { clockAt } from './news.js'
 
 /**
  * Looking back along the recorded timeline. viewT is null while following the
  * simulation live. Scrubbing pauses the simulation; resuming it returns to
- * live. Only the readouts and the news go back in time: the 3D city stays as
- * it is now.
+ * live. From a moment in the past the record can be played forward again, at
+ * its own speed, until it catches up with the present. The readouts and the
+ * news go back in time, and so does the picture of the city (Game.setReplay):
+ * the flood water, the state of each building, and the weather.
  */
 export function useReplay(s, game) {
   // look: the moment being looked at, and whether the pause that a seek asks for has been seen yet
@@ -21,6 +24,31 @@ export function useReplay(s, game) {
   }
   const reviewing = viewT != null && viewT < sim.time
   const t = reviewing ? viewT : sim.time
+
+  // playing the record forward: the simulation itself stays paused meanwhile
+  const [playing, setPlaying] = useState(false)
+  const [rate, setRate] = useState(2)
+  // caught up with the present (or left the replay): stop
+  if (playing && !reviewing) setPlaying(false)
+  if (look && !reviewing) setLook(null)
+  // the 3D city follows: the water, the buildings and the weather of that moment
+  useEffect(() => {
+    game.setReplay(reviewing ? viewT : null)
+  }, [game, reviewing, viewT])
+  useEffect(() => () => game.setReplay(null), [game])
+
+  const on = playing && reviewing
+  useEffect(() => {
+    if (!on) return
+    let last = performance.now()
+    const iv = setInterval(() => {
+      const now = performance.now()
+      const dt = Math.min(0.25, (now - last) / 1000)
+      last = now
+      setLook((l) => l && { ...l, t: l.t + dt * SPEEDS[rate].mult })
+    }, 50)
+    return () => clearInterval(iv)
+  }, [on, rate])
 
   const view = useMemo(() => {
     if (!reviewing) return s
@@ -66,5 +94,11 @@ export function useReplay(s, game) {
       seek(next ? next.t : sim.time)
     }
   }
-  return { view, t, reviewing, seek, step, live: () => setViewT(null), marks }
+  /** Play the record forward from a moment (default: from where it is being looked at). */
+  const play = (from) => {
+    if (from != null) seek(from)
+    else if (!reviewing) return
+    setPlaying(true)
+  }
+  return { view, t, reviewing, seek, step, live: () => setViewT(null), marks, playing: on, rate, setRate, play, pause: () => setPlaying(false) }
 }
